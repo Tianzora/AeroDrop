@@ -51,3 +51,11 @@ test('LAN direct outranks relay', () => {
 
   assert.equal(winner, 'all');
 });
+
+test('equal route quality keeps all authoritative regardless of argument order', () => {
+  const allRoute = { isDirect: true, isLanDirect: false, kind: 'all' } as const;
+  const relayRoute = { isDirect: true, isLanDirect: false, kind: 'relay' } as const;
+
+  assert.equal(pickPreferredRouteKind(relayRoute, allRoute), 'all');
+  assert.equal(pickPreferredRouteKind(allRoute, relayRoute), 'all');
+});
