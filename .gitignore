@@ -35,6 +35,9 @@ coverage/
 .wrangler/
 .worktrees/
 .superpowers/
+.impeccable.md
+.codex/
+.gstack/
 
 # Editor directories and files
 .vscode/*

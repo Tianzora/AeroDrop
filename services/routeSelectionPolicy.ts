@@ -96,5 +96,18 @@ export const pickPreferredRouteKind = (
     return 1;
   };
 
-  return rank(right) > rank(left) ? right.kind : left.kind;
+  const leftRank = rank(left);
+  const rightRank = rank(right);
+
+  if (leftRank !== rightRank) {
+    return rightRank > leftRank ? right.kind : left.kind;
+  }
+
+  // Equal route quality: keep the composite `all` attempt authoritative so the
+  // winner does not depend on probe arrival order.
+  if (left.kind !== right.kind) {
+    return left.kind === 'all' ? left.kind : right.kind;
+  }
+
+  return left.kind;
 };
