@@ -41,7 +41,7 @@ export const SenderIdlePanel: React.FC<SenderIdlePanelProps> = ({ isDragOver, ha
       发送文件
     </h1>
     <p className="relative mt-6 max-w-[58ch] text-[15px] leading-[1.7] text-muted">
-      {isDragOver ? '松开即可添加' : '浏览器间直接传输，加密只在你们之间'}
+      {isDragOver ? '松开即可添加' : '拖拽文件到这里，或点击下方选择文件'}
     </p>
     <div className="relative mt-10 flex items-center gap-6 sm:gap-8">
       <label
