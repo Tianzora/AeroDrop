@@ -60,7 +60,6 @@ const App: React.FC = () => {
   const [mode, setMode] = useState<Mode>(initialRoute.mode);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [showRiskBanner, setShowRiskBanner] = useState(false);
-  const [isRiskBannerExpanded, setIsRiskBannerExpanded] = useState(false);
   const [swUpdateReady, setSwUpdateReady] = useState(false);
   const [isApplyingSwUpdate, setIsApplyingSwUpdate] = useState(false);
   const [deviceName] = useState<string>(() => getInitialDeviceName());
@@ -81,7 +80,6 @@ const App: React.FC = () => {
 
   const dismissRiskBanner = () => {
     setShowRiskBanner(false);
-    setIsRiskBannerExpanded(false);
     try {
       const dismissUntil = Date.now() + 24 * 60 * 60 * 1000;
       window.localStorage.setItem(RISK_BANNER_DISMISS_UNTIL_KEY, String(dismissUntil));
@@ -346,30 +344,17 @@ const App: React.FC = () => {
           mode={mode}
           onModeChange={setMode}
           onBrandClick={() => setMode('send')}
-          banner={
-            showRiskBanner ? (
-              <>
-                <div className="hidden items-center gap-2 rounded-full border border-warning/30 bg-warning/10 px-3 py-1.5 sm:flex">
-                  <ShieldAlert className="h-4 w-4 text-warning" />
-                  <span className="text-[12px] font-medium text-warning">代理网络可能影响 P2P 传输与屏幕共享，建议关闭代理</span>
-                  <button onClick={dismissRiskBanner} aria-label="关闭警告" className="ml-1 rounded-full p-0.5 text-warning hover:bg-warning/15">
-                    <X size={14} />
-                  </button>
-                </div>
-                <button
-                  type="button"
-                  onClick={() => setIsRiskBannerExpanded(!isRiskBannerExpanded)}
-                  aria-label="查看网络警告"
-                  className="relative rounded-full p-2 text-warning hover:bg-warning/10 sm:hidden"
-                >
-                  <ShieldAlert className="h-5 w-5" />
-                  {!isRiskBannerExpanded && <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-danger ring-2 ring-surface" />}
-                </button>
-              </>
-            ) : null
-          }
         />
       }
+      notice={showRiskBanner ? (
+        <div className="flex w-full items-center gap-2.5">
+          <ShieldAlert className="h-4 w-4 shrink-0" />
+          <span className="flex-1">代理网络可能影响 P2P 传输与屏幕共享，建议关闭代理</span>
+          <button onClick={dismissRiskBanner} aria-label="关闭警告" className="shrink-0 rounded-[4px] p-1 text-warning/80 transition-colors hover:bg-warning/15 hover:text-warning">
+            <X size={15} />
+          </button>
+        </div>
+      ) : undefined}
       footer={
         <footer className="mt-10 text-center text-[12.5px] tracking-[.005em] text-muted">
           Powered by WebRTC · 数据直接在设备间点对点传输，不经过云端存储
@@ -396,20 +381,6 @@ const App: React.FC = () => {
         </>
       }
     >
-      {showRiskBanner && isRiskBannerExpanded && (
-        <div className="mb-4 flex items-start gap-3 rounded-[12px] border border-warning/30 bg-warning/10 px-4 py-3 sm:hidden">
-          <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-warning" />
-          <div className="flex-1">
-            <p className="mb-1 text-[13px] font-semibold text-warning">网络环境受限</p>
-            <p className="text-[12px] leading-relaxed text-warning/90">
-              检测到当前网络可能限制 P2P 打洞（如代理、移动网络或跨境链路），系统会优先尝试更稳的连接方式。
-            </p>
-          </div>
-          <button onClick={dismissRiskBanner} aria-label="关闭警告" className="-mr-1 -mt-1 rounded-full p-1 text-warning hover:bg-warning/15">
-            <X size={16} />
-          </button>
-        </div>
-      )}
       <div className="flex w-full flex-1 flex-col">
         <ErrorBoundary>
           {mode === 'send' && <Sender onNotification={addNotification} deviceName={deviceName} />}
