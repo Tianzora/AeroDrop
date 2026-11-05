@@ -7,6 +7,7 @@ import {
   FileMetadata,
   P2PMessage,
   P2P_PROTOCOL_VERSION,
+  type MetadataChunkPayload,
   type RouteAttemptKind,
 } from '../types';
 import { formatFileSize } from '../services/fileUtils';
@@ -20,7 +21,7 @@ import {
   RATE_LIMITED_CONNECTION_MESSAGE,
 } from '../services/connectionGuidance';
 import { getIceConfig } from '../services/stunService';
-import { TRANSFER_CONFIG } from '../constants/transfer';
+import { CONNECTION_TIMINGS, RECEIVE_STORAGE, TRANSFER_CONFIG } from '../constants/transfer';
 import {
   attachIceRouteToSession,
   collectIceRouteWithRetry,
@@ -60,6 +61,16 @@ import {
   type ReceiveStreamingWriter,
 } from '../services/receive/streamingWriter';
 import { createDirectorySaveSession } from '../services/receive/directorySaveSession';
+import { createPersistedDirectoryHandleStore } from '../services/receive/persistedDirectoryHandle';
+import { verifyPersistedPrefix } from '../services/receive/prefixIntegrity';
+import { resolveDirectoryHandleForResume } from '../services/receive/resumeDirectoryHandle';
+import {
+  createResumeMetadataFingerprint,
+  clearResumeCheckpoint,
+  loadResumeCheckpoint,
+  saveResumeCheckpoint,
+  type ResumeCheckpoint,
+} from '../services/receive/resumeCheckpoint';
 import { createReceivedFileManifest } from '../services/receive/receivedFileManifest';
 import { createArchiveExportSession } from '../services/receive/archiveExportSession';
 import {
@@ -67,6 +78,7 @@ import {
   type ReceiveSaveMode,
 } from '../services/receive/saveCapabilityResolver';
 import { createSerialAsyncProcessor } from '../services/receive/serialAsyncProcessor';
+import { isValidShareCode, lookupSharePeerId, normalizeShareCodeInput } from '../services/shareCodeSession';
 import { createSessionDirectoryHandleCache } from '../services/receive/sessionDirectoryHandleCache';
 import {
   getOrCreateReceiverRouteSessionId,
@@ -83,7 +95,6 @@ import {
   shouldRunReceiverScheduledReconnect,
 } from '../services/receiverActivityPolicy';
 import { createTimeoutGroup } from '../services/timeoutGroup';
-import { useTransferStore } from '../stores/transferStore';
 import { logDebug } from '../services/diagnostics';
 import { ReceiverConnectingStage, ReceiverUI } from './receiver/ReceiverUI';
 
@@ -122,24 +133,34 @@ type RouteAttemptRecord = {
   conn: DataConnection;
 };
 
+// 分片 METADATA 的接收缓冲：按 transferId 分组、按 index 回填。
+type MetadataChunkBuffer = {
+  transferId: string;
+  total: number;
+  received: number;
+  chunks: Map<number, string>;
+};
+
 export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification, deviceName }) => {
-  const setReceiverSnapshot = useTransferStore((store) => store.setReceiverSnapshot);
-  const resetReceiverSnapshot = useTransferStore((store) => store.resetReceiverSnapshot);
-  const INITIAL_TIMEOUT_MS = 15000;
-  const RELAY_TIMEOUT_MS = 25000;
   const STREAMSAVER_PATH_PREFIX = '/__aerodrop_streamsaver__/';
-  const FAST_RETRY_BASE_MS = 700;
-  const FAST_RETRY_MAX_MS = 5000;
-  const MAX_CONNECT_RETRY = 6;
-  const MAX_COMMITTED_RECONNECT_RETRY = 3;
-  const MAX_AUTO_REPAIR_RETRIES_PER_FILE = 2;
-  const IOS_MEMORY_WARN_BYTES = 500 * 1024 * 1024;
-  const IOS_IDB_BUFFER_THRESHOLD_BYTES = 500 * 1024 * 1024;
+  const {
+    RECEIVER_INITIAL_CONNECT_MS: INITIAL_TIMEOUT_MS,
+    RECEIVER_RELAY_CONNECT_MS: RELAY_TIMEOUT_MS,
+    RECEIVER_FAST_RETRY_BASE_MS: FAST_RETRY_BASE_MS,
+    RECEIVER_FAST_RETRY_MAX_MS: FAST_RETRY_MAX_MS,
+    RECEIVER_MAX_CONNECT_RETRY: MAX_CONNECT_RETRY,
+    RECEIVER_MAX_COMMITTED_RECONNECT_RETRY: MAX_COMMITTED_RECONNECT_RETRY,
+    RECEIVER_MAX_AUTO_REPAIR_RETRIES_PER_FILE: MAX_AUTO_REPAIR_RETRIES_PER_FILE,
+  } = CONNECTION_TIMINGS;
+  const {
+    IOS_MEMORY_WARN_BYTES,
+    IOS_IDB_BUFFER_THRESHOLD_BYTES,
+    IOS_IDB_STALE_SESSION_TTL_MS,
+    IOS_IDB_PRUNE_LOCK_TTL_MS,
+  } = RECEIVE_STORAGE;
   const IOS_IDB_DB_NAME = 'aerodrop-receiver-buffer-v1';
   const IOS_IDB_STORE = 'fileChunks';
-  const IOS_IDB_STALE_SESSION_TTL_MS = 24 * 60 * 60 * 1000;
   const IOS_IDB_PRUNE_LOCK_KEY = 'aerodrop_idb_prune_lock_v1';
-  const IOS_IDB_PRUNE_LOCK_TTL_MS = 45 * 1000;
 
   const RECEIVER_SESSION_KEY = 'aerodrop_receiver_session_id';
   const getReceiverSessionId = (): string => {
@@ -231,6 +252,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
   const metadataRef = useRef<FileMetadata | null>(null);
+  const metadataChunkBufferRef = useRef<MetadataChunkBuffer | null>(null);
+  const acceptingRef = useRef<boolean>(false);
   const currentFileIndexRef = useRef<number>(0); 
   const currentFileNameRef = useRef<string>('');
   const completedFileIndicesRef = useRef<Set<number>>(new Set());
@@ -277,6 +300,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const receiveSessionCoordinatorRef = useRef<ReceiveSessionCoordinator | null>(null);
   const receiveStreamingWriterRef = useRef<ReceiveStreamingWriter | null>(null);
   const directorySaveSessionRef = useRef(createDirectorySaveSession());
+  const persistedDirectoryHandleRef = useRef(createPersistedDirectoryHandleStore());
+  const resolvedSenderPeerIdRef = useRef<string>('');
+  const metadataResumeFingerprintRef = useRef<string | null>(null);
+  const resumeCheckpointRef = useRef<ResumeCheckpoint | null>(null);
+  const lastCheckpointWriteRef = useRef<{ bytes: number; at: number }>({ bytes: 0, at: 0 });
   const receivedFileManifestRef = useRef(createReceivedFileManifest());
   const archiveExportSessionRef = useRef(createArchiveExportSession());
   const multiFileSaveModeRef = useRef<ReceiveSaveMode>('per-file-save-queue');
@@ -522,7 +550,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   });
 
   useEffect(() => {
-    if (code.length === 4 && state === TransferState.IDLE) {
+    if (state !== TransferState.IDLE) return;
+    if (isValidShareCode(code)) {
       handleConnectRef.current();
     }
   }, [code, state]);
@@ -545,7 +574,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }
       if (peerRef.current) peerRef.current.destroy();
       if (relayPeerRef.current) { try { relayPeerRef.current.destroy(); } catch {} }
-      deleteIndexedDbChunksForSession().catch(() => {});
+      // 卸载（切 tab / 刷新）不等于取消：保留本会话的 IndexedDB 分块以便续传，陈旧数据交给 24h prune。
       abortStreams();
       fileHasherRef.current?.terminate();
       fileHasherRef.current = null;
@@ -980,6 +1009,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   };
 
   const reopenNativeWriterForResume = async (targetFileIndex: number, byteOffset: number): Promise<boolean> => {
+    // 续传后本次会话的接收计数从「已落盘偏移」继续，否则进度快照会回退到 0，
+    // 被单调钳制冻结在断点值，发送端的信用窗口永远等不到新进度。
+    receivedSizeRef.current = Math.max(receivedSizeRef.current, byteOffset);
     const reopenStreamingTarget = async (
       factory: (resumeOffset: number) => Promise<ReceiveStreamingTarget>
     ): Promise<boolean> => {
@@ -1118,10 +1150,42 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     return { overallTransferredBytes, overallTotalBytes };
   };
 
+  // 检查点：刷新/崩溃后靠它恢复「第几个文件、已落盘多少字节」。写入节流 ≥1 MiB 或 2 s。
+  const maybeSaveResumeCheckpoint = () => {
+    const meta = metadataRef.current;
+    const fingerprint = metadataResumeFingerprintRef.current;
+    if (!meta || !fingerprint) return;
+    const fileIndex = currentFileIndexRef.current;
+    const file = meta.files?.[fileIndex];
+    if (!file || completedFileIndicesRef.current.has(fileIndex)) return;
+    const committedBytes = receiveStreamingWriter.isStreaming()
+      ? receiveStreamingWriter.getCommittedBytes()
+      : isIndexedDbBufferingRef.current
+        ? indexedDbBufferedBytesRef.current
+        : receivedSizeRef.current;
+    const previous = lastCheckpointWriteRef.current;
+    if (committedBytes - previous.bytes < 1024 * 1024 && Date.now() - previous.at < 2000) return;
+    lastCheckpointWriteRef.current = { bytes: committedBytes, at: Date.now() };
+    saveResumeCheckpoint({
+      sessionId: receiverSessionIdRef.current,
+      metadataFingerprint: fingerprint,
+      fileIndex,
+      committedBytes,
+      totalSize: file.size,
+    });
+  };
+
   const sendTransferProgress = (speedBytes: number) => {
+    maybeSaveResumeCheckpoint();
     const conn = connRef.current;
     if (!conn || !conn.open) return;
-    const { overallTransferredBytes, overallTotalBytes } = getOverallTransferSnapshot();
+    const snapshot = getOverallTransferSnapshot();
+    // 续传 / 自动修复会让快照回退；对发送端只上报高水位，避免进度倒退。
+    const overallTransferredBytes = Math.max(
+      lastProgressAckBytesRef.current,
+      snapshot.overallTransferredBytes
+    );
+    const overallTotalBytes = snapshot.overallTotalBytes;
     if (overallTransferredBytes > lastDurableProgressBytesRef.current) {
       lastDurableProgressBytesRef.current = overallTransferredBytes;
       lastDurableProgressAtRef.current = Date.now();
@@ -1263,13 +1327,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }
   };
 
-  const handleIncomingMessage = async (conn: DataConnection, msg: P2PMessage) => {
-    if (msg.type === 'DEVICE_INFO') {
-      const remoteName = typeof msg.payload?.deviceName === 'string' ? msg.payload.deviceName.trim().slice(0, 24) : '';
-      setSenderDeviceName(remoteName || '发送设备');
-    }
-    else if (msg.type === 'METADATA') {
-      const meta = msg.payload as FileMetadata;
+  const applyMetadataPayload = (meta: FileMetadata, conn: DataConnection) => {
+      if (!meta || !Array.isArray(meta.files)) {
+        setErrorMsg('收到的文件元数据无效，请重试。');
+        setState(TransferState.ERROR);
+        return;
+      }
       const remoteProtocolVersion = typeof meta.protocolVersion === 'number' ? meta.protocolVersion : 1;
       if (remoteProtocolVersion !== P2P_PROTOCOL_VERSION) {
           setErrorMsg(`发送方协议版本(${remoteProtocolVersion})与当前版本(${P2P_PROTOCOL_VERSION})不兼容，请升级两端后重试。`);
@@ -1295,7 +1358,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
       setMetadata(meta);
       metadataRef.current = meta;
-      receivedFileManifestRef.current.seedFromMetadata(meta.files || []);
+      try {
+        receivedFileManifestRef.current.seedFromMetadata(meta.files || []);
+      } catch (error) {
+        // 文件路径不合法（.. / 绝对路径 / 控制字符）说明发送端不可信，不能静默停在已连接态。
+        logDebug('warn', 'rejected invalid metadata paths:', error);
+        setErrorMsg('收到的文件元数据无效（文件名或路径不合法），请让对方重新发起传输。');
+        setState(TransferState.ERROR);
+        conn.close();
+        return;
+      }
       multiFileSaveModeRef.current = resolveMultiFileSaveMode({
         fileCount: meta.files?.length ?? 0,
         isIOS,
@@ -1306,7 +1378,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       setTotalFiles(meta.files?.length || 0);
       setState(TransferState.PEER_CONNECTED);
       setReconnectAttempt(0);
-      setCanResume(isResumable);
+      // 刷新/重连后内存里的 previousMeta 可能已经丢了，用本地检查点把「可续传」补回来。
+      const fingerprint = createResumeMetadataFingerprint(meta.files ?? []);
+      metadataResumeFingerprintRef.current = fingerprint;
+      const checkpoint = loadResumeCheckpoint({
+        sessionId: receiverSessionIdRef.current,
+        metadataFingerprint: fingerprint,
+      });
+      resumeCheckpointRef.current = checkpoint;
+      lastCheckpointWriteRef.current = { bytes: 0, at: 0 };
+      setCanResume(isResumable || checkpoint !== null);
       committedReconnectAttemptsRef.current = 0;
       isTransferActiveRef.current = false;
 
@@ -1324,25 +1405,173 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           if (onNotification) onNotification("连接已恢复，正在继续下载...", 'info');
           void receiveRecoveryCoordinator.resumeTransfer();
       }
+  };
+
+  // 分片 METADATA：按 transferId 重置缓冲、按 index 回填，收齐后 join + JSON.parse。
+  const handleMetadataChunkMessage = (conn: DataConnection, payload: MetadataChunkPayload) => {
+    const transferId = typeof payload?.transferId === 'string' ? payload.transferId : '';
+    const index = Number.isInteger(payload?.index) ? payload.index : -1;
+    const total = Number.isInteger(payload?.total) ? payload.total : -1;
+    const data = typeof payload?.data === 'string' ? payload.data : null;
+
+    if (!transferId || total <= 0 || index < 0 || index >= total || data === null) {
+      setErrorMsg('文件元数据分片格式不正确，请重试。');
+      setState(TransferState.ERROR);
+      return;
+    }
+
+    const existing = metadataChunkBufferRef.current;
+    if (!existing || existing.transferId !== transferId || existing.total !== total) {
+      metadataChunkBufferRef.current = {
+        transferId,
+        total,
+        received: 0,
+        chunks: new Map<number, string>(),
+      };
+    }
+
+    const buffer = metadataChunkBufferRef.current!;
+    if (!buffer.chunks.has(index)) {
+      buffer.chunks.set(index, data);
+      buffer.received += 1;
+    }
+
+    if (buffer.received < buffer.total) {
+      return;
+    }
+
+    metadataChunkBufferRef.current = null;
+
+    const parts: string[] = [];
+    for (let chunkIndex = 0; chunkIndex < buffer.total; chunkIndex += 1) {
+      const part = buffer.chunks.get(chunkIndex);
+      if (typeof part !== 'string') {
+        setErrorMsg('文件元数据分片不完整，请重试。');
+        setState(TransferState.ERROR);
+        return;
+      }
+      parts.push(part);
+    }
+
+    let parsed: FileMetadata;
+    try {
+      parsed = JSON.parse(parts.join('')) as FileMetadata;
+    } catch {
+      setErrorMsg('文件元数据解析失败，请重试。');
+      setState(TransferState.ERROR);
+      return;
+    }
+
+    applyMetadataPayload(parsed, conn);
+  };
+
+  // 读取磁盘上已落盘文件的区间（用于续传前缀 CRC 校验）。
+  const readPersistedFileRange = async (
+    relativePath: string,
+    offset: number,
+    end: number
+  ): Promise<Uint8Array | null> => {
+    try {
+      let fileHandle: FileSystemFileHandle | null = nativeFileHandleRef.current;
+      if (!fileHandle && multiFileSaveModeRef.current === 'directory-direct') {
+        const resolved = await directorySaveSessionRef.current.resolveFile(relativePath);
+        fileHandle = (resolved?.fileHandle as unknown as FileSystemFileHandle | undefined) ?? null;
+      }
+      if (!fileHandle) return null;
+      const file = await fileHandle.getFile();
+      if (file.size < end) return null;
+      return new Uint8Array(await file.slice(offset, end).arrayBuffer());
+    } catch {
+      return null;
+    }
+  };
+
+  const handleIncomingMessage = async (conn: DataConnection, msg: P2PMessage) => {
+    if (msg.type === 'DEVICE_INFO') {
+      const remoteName = typeof msg.payload?.deviceName === 'string' ? msg.payload.deviceName.trim().slice(0, 24) : '';
+      setSenderDeviceName(remoteName || '发送设备');
+    }
+    else if (msg.type === 'METADATA_CHUNK') {
+      handleMetadataChunkMessage(conn, msg.payload);
+    }
+    else if (msg.type === 'METADATA') {
+      applyMetadataPayload(msg.payload as FileMetadata, conn);
     }
     else if (msg.type === 'FILE_START') {
       const normalizedPath = sanitizeRelativeReceivePath(msg.payload.fileName || `file_${Date.now()}`);
-      receivedFileManifestRef.current.markReceiving(
-        msg.payload.fileIndex,
-        normalizedPath,
-        msg.payload.fileSize,
-        msg.payload.fileType
-      );
-      await receiveSessionCoordinator.handleFileStart({
-        ...msg.payload,
-        fileName: normalizedPath,
-      });
+      const resumeOffset = typeof msg.payload.resumeOffset === 'number' ? msg.payload.resumeOffset : 0;
+      if (resumeOffset > 0 && msg.payload.prefixCrc32) {
+        // 续传前先验证磁盘上已有的前缀，避免把新数据接在损坏/截断的旧数据后面。
+        const verdict = await verifyPersistedPrefix({
+          prefixLength: resumeOffset,
+          expectedCrc32: msg.payload.prefixCrc32,
+          readRange: (start, end) => readPersistedFileRange(normalizedPath, start, end),
+        }).catch(() => 'skipped' as const);
+        if (verdict === 'unreadable') {
+          logDebug('warn', 'resume prefix cannot be verified, continuing', { fileIndex: msg.payload.fileIndex });
+        }
+        if (verdict === 'mismatch') {
+          markSessionEvent(connectTelemetryRef.current, 'resume_prefix_mismatch', { fileIndex: msg.payload.fileIndex });
+          if (onNotification) {
+            onNotification('已落盘数据校验不一致，将从头重新接收该文件。', 'info');
+          }
+          // 丢掉本地保留的写入状态：否则下一次 FILE_START 会被当成「同一文件续写」，
+          // 沿用旧的 committedBytes，坏掉的旧前缀永远不会被覆盖。
+          try {
+            await abortStreams();
+          } catch {}
+          receivedSizeRef.current = 0;
+          isStreamingRef.current = false;
+          // 进度网关同样要归零：否则单调钳制会把上报值钉在旧值上，发送端信用窗口打不开。
+          lastProgressAckBytesRef.current = 0;
+          lastDurableProgressBytesRef.current = 0;
+          stallRecoveryBaselineBytesRef.current = 0;
+          lastDurableProgressAtRef.current = Date.now();
+          try {
+            resetFileBuffersForRepair(msg.payload.fileIndex);
+            resetHasherForRepair();
+          } catch {}
+          try {
+            conn.send({
+              type: 'RESUME_REQUEST',
+              payload: {
+                fileIndex: msg.payload.fileIndex,
+                byteOffset: 0,
+                receiveWindowBytes: TRANSFER_CONFIG.RECEIVE_WINDOW_BYTES,
+              },
+            });
+          } catch {}
+          return;
+        }
+      }
+      try {
+        // The manifest de-duplicates colliding relative paths; use its resolved
+        // path so directory-direct writes cannot overwrite a same-named file.
+        const manifestEntry = receivedFileManifestRef.current.markReceiving(
+          msg.payload.fileIndex,
+          normalizedPath,
+          msg.payload.fileSize,
+          msg.payload.fileType
+        );
+        await receiveSessionCoordinator.handleFileStart({
+          ...msg.payload,
+          fileName: manifestEntry?.relativePath ?? normalizedPath,
+        });
+      } catch (error) {
+        logDebug('warn', 'rejected invalid file start:', error);
+        setErrorMsg('收到的文件名不合法，传输已中止。请让对方重新发起传输。');
+        setState(TransferState.ERROR);
+        conn.close();
+      }
     }
     else if (msg.type === 'FILE_COMPLETE') {
        await receiveSessionCoordinator.handleFileComplete(msg.payload);
     }
     else if (msg.type === 'ALL_FILES_COMPLETE') {
        await receiveSessionCoordinator.handleAllFilesComplete();
+       clearResumeCheckpoint(receiverSessionIdRef.current);
+       resumeCheckpointRef.current = null;
+       metadataResumeFingerprintRef.current = null;
     }
     else if (msg.type === 'REJECT_TRANSFER') {
        markConnectionFailure(connectTelemetryRef.current, 'rejected_by_sender', { reason: msg.payload?.reason });
@@ -1403,7 +1632,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           return;
         }
         startConnectionAttempt(connectTelemetryRef.current, 'fast_retry');
-        const nextConn = activePeer.connect(`aerodrop-${codeRef.current}`, { serialization: 'binary' });
+        const fastRetryTarget = resolvedSenderPeerIdRef.current;
+        if (!fastRetryTarget) return false;
+        const nextConn = activePeer.connect(fastRetryTarget, { serialization: 'binary' });
         const nextAttemptId = getNextRouteAttemptId('all');
         setupConnListeners(nextConn, 'all', nextAttemptId, activityToken);
       }, delay);
@@ -1619,7 +1850,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
        if (
         shouldAutoReconnectCommittedSession({
           currentState,
-          hasCode: codeRef.current.length === 4,
+          hasCode: isValidShareCode(codeRef.current),
           intentionalClose,
         })
        ) {
@@ -1651,7 +1882,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         committedReconnectTimerRef.current = window.setTimeout(() => {
           committedReconnectTimerRef.current = null;
           if (!isCurrentActivity()) return;
-          if (codeRef.current.length !== 4) return;
+          if (!isValidShareCode(codeRef.current)) return;
           void handleConnectRef.current({
             preserveCommittedReconnectAttempts: true,
             forceRelay,
@@ -1699,7 +1930,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       if (
         shouldAutoReconnectCommittedSession({
           currentState: stateRef.current,
-          hasCode: codeRef.current.length === 4,
+          hasCode: isValidShareCode(codeRef.current),
           intentionalClose: intentionalConnectionCloseRef.current.has(conn),
         })
       ) {
@@ -1750,6 +1981,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       directorySaveSessionRef.current = createDirectorySaveSession();
       receivedFileManifestRef.current.reset();
       multiFileSaveModeRef.current = 'per-file-save-queue';
+      metadataChunkBufferRef.current = null;
       incomingDataProcessorRef.current.reset();
       receivePersistenceAdapter.reset();
       receivePersistenceOrchestrator.reset();
@@ -1882,6 +2114,51 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       getCurrentFileIndex: () => currentFileIndexRef.current,
       getReceivedSize: () => receivedSizeRef.current,
       getCommittedStreamBytes: () => receiveStreamingWriter.getCommittedBytes(),
+      getCurrentFileSize: () =>
+        currentFileSizeRef.current ||
+        (metadataRef.current?.files?.[currentFileIndexRef.current]?.size ?? 0),
+      getResumeCheckpoint: () => resumeCheckpointRef.current,
+      requestReselectReceiveTarget: async ({ fileIndex, byteOffset }) => {
+        // 刷新后原来的写入目标已经失效，需要用户重新授权一次保存位置才能按偏移续写。
+        currentFileIndexRef.current = fileIndex;
+        try {
+          if (multiFileSaveModeRef.current === 'directory-direct') {
+            const resolution = await resolveDirectoryHandleForResume({
+              getCachedHandle: () => sessionDirectoryHandleCacheRef.current.getReusableHandle(),
+              loadPersistedHandle: () => persistedDirectoryHandleRef.current.load(),
+              ensureWritePermission: async (handle) => {
+                const permissionApi = handle as FileSystemDirectoryHandle & {
+                  requestPermission?: (options?: { mode?: 'read' | 'write' | 'readwrite' }) => Promise<PermissionState>;
+                };
+                if (typeof permissionApi.requestPermission !== 'function') return true;
+                const state = await permissionApi.requestPermission({ mode: 'readwrite' });
+                return state === 'granted';
+              },
+              pickDirectory: async () =>
+                typeof window.showDirectoryPicker === 'function'
+                  ? window.showDirectoryPicker({ mode: 'readwrite' })
+                  : null,
+            });
+            if (!resolution) return false;
+            directorySaveSessionRef.current = createDirectorySaveSession({ rootDirectoryHandle: resolution.handle });
+            sessionDirectoryHandleCacheRef.current.remember(resolution.handle);
+            void persistedDirectoryHandleRef.current.save(resolution.handle);
+            return await reopenNativeWriterForResume(fileIndex, byteOffset);
+          }
+
+          if (typeof window.showSaveFilePicker !== 'function') return false;
+          const suggestedName = sanitizeFileName(
+            metadataRef.current?.files?.[fileIndex]?.name || `file_${Date.now()}.bin`
+          );
+          const fileHandle = await window.showSaveFilePicker({ suggestedName });
+          if (!fileHandle) return false;
+          nativeFileHandleRef.current = fileHandle;
+          preparedNativeWriterFileIndexRef.current = null;
+          return await reopenNativeWriterForResume(fileIndex, byteOffset);
+        } catch {
+          return false;
+        }
+      },
       isFileCompleted: (fileIndex) => completedFileIndicesRef.current.has(fileIndex),
       hasRetainedCurrentFileData,
       flushPendingStreamWrites,
@@ -1909,7 +2186,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       isSafari,
       isTransferActive: () => isTransferActiveRef.current,
       getReceivedSize: () => receivedSizeRef.current,
-      getCurrentFileSize: () => currentFileSizeRef.current,
+      getCurrentFileSize: () =>
+        currentFileSizeRef.current ||
+        (metadataRef.current?.files?.[currentFileIndexRef.current]?.size ?? 0),
       getCurrentFileIndex: () => currentFileIndexRef.current,
       getCurrentFileInfo: () => {
         const file = metadataRef.current?.files?.[currentFileIndexRef.current];
@@ -2057,7 +2336,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       },
       getCurrentFileIndex: () => currentFileIndexRef.current,
       getCurrentFileName: () => currentFileNameRef.current,
-      getCurrentFileSize: () => currentFileSizeRef.current,
+      getCurrentFileSize: () =>
+        currentFileSizeRef.current ||
+        (metadataRef.current?.files?.[currentFileIndexRef.current]?.size ?? 0),
       getReceivedSize: () => receivedSizeRef.current,
       getHashedBytes: () => hashedBytesRef.current,
       finalizeHasher: () => getFileHasher().finalizeHex(),
@@ -2086,11 +2367,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   }
   const receiveSessionCoordinator = receiveSessionCoordinatorRef.current!;
 
+  const resolveSenderPeerId = async (targetCode: string): Promise<string | null> => {
+    if (!isValidShareCode(targetCode)) return null;
+    return lookupSharePeerId(targetCode);
+  };
+
   const handleConnect = async (options?: {
     preserveCommittedReconnectAttempts?: boolean;
     forceRelay?: boolean;
   }) => {
-    if (!code || code.length !== 4) return;
+    if (!isValidShareCode(code)) return;
     const receiverActivityToken = receiverActivityTrackerRef.current.begin();
     clearCommittedReconnectTimer();
     backgroundTimeoutGroupRef.current.clearAll();
@@ -2099,6 +2385,15 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       pendingCommittedReconnectResumeRef.current = false;
       setReconnectAttempt(0);
     }
+    const resolvedPeerId = await resolveSenderPeerId(code);
+    if (!resolvedPeerId) {
+      if (receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) {
+        setErrorMsg('口令不存在或已过期，请确认后重试。');
+        setState(TransferState.ERROR);
+      }
+      return;
+    }
+    resolvedSenderPeerIdRef.current = resolvedPeerId;
     connectTelemetryRef.current = createConnectionSession('receiver', { code });
     setState(TransferState.WAITING_FOR_PEER);
     setConnectingStage('fetching_ice');
@@ -2300,7 +2595,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         markSignalingOpen(connectTelemetryRef.current);
         setConnectingStage('connecting_peer');
         markSessionEvent(connectTelemetryRef.current, 'peer_open', { iceTransportPolicy: policy });
-        const conn = peer.connect(`aerodrop-${code}`, { serialization: 'binary' });
+        const senderPeerId = resolvedSenderPeerIdRef.current;
+        if (!senderPeerId) {
+          setErrorMsg('口令不存在或已过期，请确认后重试。');
+          setState(TransferState.ERROR);
+          return;
+        }
+        const conn = peer.connect(senderPeerId, { serialization: 'binary' });
         const attemptKind: RouteAttemptKind = policy === 'relay' ? 'relay' : 'all';
         const attemptId = getNextRouteAttemptId(attemptKind);
         if (policy === 'relay') {
@@ -2331,7 +2632,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
             if (happyEyeballsWonRef.current) return;
             if (peer && !peer.destroyed) {
               startConnectionAttempt(connectTelemetryRef.current, 'peer_unavailable_retry');
-              const conn = peer.connect(`aerodrop-${code}`, { serialization: 'binary' });
+              const senderPeerId = resolvedSenderPeerIdRef.current;
+        if (!senderPeerId) {
+          setErrorMsg('口令不存在或已过期，请确认后重试。');
+          setState(TransferState.ERROR);
+          return;
+        }
+        const conn = peer.connect(senderPeerId, { serialization: 'binary' });
               const attemptId = getNextRouteAttemptId('all');
               setupConnListeners(conn, 'all', attemptId, receiverActivityToken);
             }
@@ -2419,7 +2726,37 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   };
 
   const acceptTransfer = async () => {
-    if (connRef.current?.open) {
+    if (acceptingRef.current) {
+      return;
+    }
+
+    const initialConn = connRef.current;
+    if (!initialConn || !initialConn.open) {
+      setErrorMsg("连接已断开，请重新连接发送方。");
+      setState(TransferState.ERROR);
+      if (onNotification) onNotification("连接已断开，请重试", 'error');
+      return;
+    }
+
+    acceptingRef.current = true;
+
+    // 保存对话框（目录 / 文件）可能停留几十秒，期间连接可能已断开或组件已卸载。
+    const getLiveConnection = (): DataConnection | null => {
+      const activeConn = connRef.current;
+      if (!isMountedRef.current || !activeConn || !activeConn.open) {
+        return null;
+      }
+      return activeConn;
+    };
+
+    const abortAcceptedTransfer = () => {
+      isTransferActiveRef.current = false;
+      setErrorMsg("连接已断开，请重新连接发送方。");
+      setState(TransferState.ERROR);
+      if (onNotification) onNotification("连接已断开，请重试", 'error');
+    };
+
+    try {
       resetStateForNewTransfer();
       if (metadataRef.current?.files) {
         receivedFileManifestRef.current.seedFromMetadata(metadataRef.current.files);
@@ -2438,6 +2775,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
       if (multiFileResolution.shouldPromptForDirectory && window.showDirectoryPicker) {
         const rememberedHandle = await sessionDirectoryHandleCacheRef.current.getReusableHandle();
+        if (!getLiveConnection()) {
+          abortAcceptedTransfer();
+          return;
+        }
 
         if (rememberedHandle) {
           directorySaveSessionRef.current.attachRootDirectory(rememberedHandle);
@@ -2449,6 +2790,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           try {
             const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
             sessionDirectoryHandleCacheRef.current.remember(directoryHandle);
+            void persistedDirectoryHandleRef.current.save(directoryHandle);
             directorySaveSessionRef.current.attachRootDirectory(directoryHandle);
             multiFileSaveModeRef.current = 'directory-direct';
             if (onNotification) {
@@ -2461,6 +2803,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
             if (onNotification) {
               onNotification('未授予目录保存权限，将回退到浏览器导出模式。', 'info');
             }
+          }
+
+          if (!getLiveConnection()) {
+            abortAcceptedTransfer();
+            return;
           }
         }
       }
@@ -2487,6 +2834,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
             onNotification("未授予本地保存权限，将回退到备用保存模式。", 'info');
           }
         }
+
+        if (!getLiveConnection()) {
+          abortAcceptedTransfer();
+          return;
+        }
       } else if (isIOS || isSafari) {
           isStreamingRef.current = false;
           if (onNotification) onNotification("iOS 模式：文件将在传输完成后导出保存", 'info');
@@ -2498,25 +2850,44 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           }
       }
 
+      const liveConn = getLiveConnection();
+      if (!liveConn) {
+        abortAcceptedTransfer();
+        return;
+      }
+
       const { overallTransferredBytes } = getOverallTransferSnapshot();
       lastDurableProgressBytesRef.current = overallTransferredBytes;
       lastDurableProgressAtRef.current = Date.now();
       stalledReconnectAttemptsRef.current = 0;
       stallRecoveryBaselineBytesRef.current = overallTransferredBytes;
-      connRef.current.send({
-        type: 'ACCEPT_TRANSFER',
-        payload: {
-          persistedOverallBytes: overallTransferredBytes,
-          receiveWindowBytes: TRANSFER_CONFIG.RECEIVE_WINDOW_BYTES,
-        },
-      });
+      const checkpointResume = resumeCheckpointRef.current;
+      if (checkpointResume && checkpointResume.metadataFingerprint === metadataResumeFingerprintRef.current) {
+        // 刷新/重新进入后的续传：不发 ACCEPT_TRANSFER，改由协调器按检查点偏移发 RESUME_REQUEST。
+        currentFileIndexRef.current = checkpointResume.fileIndex;
+        setState(TransferState.TRANSFERRING);
+        setReconnectAttempt(0);
+        resumeTransfer();
+        return;
+      }
+
+      try {
+        liveConn.send({
+          type: 'ACCEPT_TRANSFER',
+          payload: {
+            persistedOverallBytes: overallTransferredBytes,
+            receiveWindowBytes: TRANSFER_CONFIG.RECEIVE_WINDOW_BYTES,
+          },
+        });
+      } catch {
+        abortAcceptedTransfer();
+        return;
+      }
       lastProgressAckBytesRef.current = overallTransferredBytes;
       setState(TransferState.TRANSFERRING);
       setReconnectAttempt(0);
-    } else {
-      setErrorMsg("连接已断开，请重新连接发送方。");
-      setState(TransferState.ERROR);
-      if (onNotification) onNotification("连接已断开，请重试", 'error');
+    } finally {
+      acceptingRef.current = false;
     }
   };
 
@@ -2581,13 +2952,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         committedReconnectAttemptsRef.current = 0;
         rotateSessionId();
         resetStateForNewTransfer();
-        resetReceiverSnapshot();
+        metadataChunkBufferRef.current = null;
     });
   };
 
   
-  const handleRetry = () => { if (code.length === 4) handleConnect(); else reset(); };
-  const handleDigitClick = (digit: string) => { if (code.length < 4) setCode(prev => prev + digit); };
+  const handleRetry = () => { if (isValidShareCode(code)) handleConnect(); else reset(); };
+  const handleDigitClick = (digit: string) => { if (code.length < 6) setCode(prev => prev + digit); };
   const handleBackspace = () => { setCode(prev => prev.slice(0, -1)); };
   const handleClear = () => { setCode(''); };
   const handlePasteFromClipboard = async () => {
@@ -2602,7 +2973,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         setCode(match[1]);
         return;
       }
-      if (onNotification) onNotification("剪贴板中未找到 4 位口令", 'info');
+      if (onNotification) onNotification("剪贴板中未找到 6 位口令", 'info');
     } catch {
       if (onNotification) onNotification("无法读取剪贴板，请手动输入口令", 'info');
     }
@@ -2646,49 +3017,6 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const overallRemainingBytes = Math.max(0, totalBytes - overallTransferredBytes);
   const overallEta = downloadSpeedBytes > 0 ? formatEta(overallRemainingBytes / downloadSpeedBytes) : '--';
 
-  useEffect(() => {
-    setReceiverSnapshot({
-      state,
-      errorMsg,
-      code,
-      connectingStage,
-      reconnectAttempt,
-      metadata,
-      senderDeviceName,
-      canResume,
-      isStreaming: isStreamingRef.current,
-      progress,
-      downloadSpeed,
-      downloadSpeedBytes,
-      eta,
-      overallTransferredBytes,
-      totalBytes,
-      overallEta,
-      currentFileIndex: currentFileIndexRef.current,
-      totalFiles,
-      currentFileName,
-    });
-  }, [
-    canResume,
-    code,
-    connectingStage,
-    reconnectAttempt,
-    currentFileName,
-    downloadSpeed,
-    downloadSpeedBytes,
-    errorMsg,
-    eta,
-    metadata,
-    overallEta,
-    overallTransferredBytes,
-    progress,
-    senderDeviceName,
-    setReceiverSnapshot,
-    state,
-    totalBytes,
-    totalFiles,
-  ]);
-
 
   return (
     <ReceiverUI
@@ -2696,7 +3024,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       code={code}
       inputRef={inputRef}
       isMobileDevice={isMobileDevice}
-      onCodeChange={(value) => setCode(value.replace(/[^0-9]/g, '').slice(0, 4))}
+      onCodeChange={(value) => setCode(normalizeShareCodeInput(value))}
       onDigitClick={handleDigitClick}
       onPasteFromClipboard={handlePasteFromClipboard}
       onBackspace={handleBackspace}

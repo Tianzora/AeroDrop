@@ -195,7 +195,7 @@ export const SenderUI: React.FC<SenderUIProps> = ({
               </div>
               <div>
                 <label className="text-xs text-slate-500 dark:text-slate-400 mb-1 block">自定义口令</label>
-                <input type="text" inputMode="numeric" placeholder="随机" value={customCodeInput} onChange={(e) => setCustomCodeInput(e.target.value.replace(/[^0-9]/g, '').slice(0, 4))} className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm outline-none text-slate-800 dark:text-slate-100" />
+                <input type="text" inputMode="numeric" maxLength={6} placeholder="随机 6 位（可选）" value={customCodeInput} onChange={(e) => setCustomCodeInput(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))} className="w-full p-2 bg-white dark:bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-lg text-sm outline-none text-slate-800 dark:text-slate-100" />
               </div>
             </div>
             {errorMsg && <div className="text-red-500 text-sm flex items-center gap-2 bg-red-50 dark:bg-red-900/20 p-2 rounded"><AlertCircle size={14} /> {errorMsg}</div>}
