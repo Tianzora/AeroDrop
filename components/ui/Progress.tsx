@@ -23,7 +23,7 @@ export const Progress: React.FC<ProgressProps> = ({ value, tone = 'accent', labe
     >
       <ProgressPrimitive.Indicator
         className={cn(
-          'h-full w-full origin-left rounded-[1px] transition-transform duration-300 ease-out',
+          'h-full w-full origin-left rounded-[1px] transition-transform duration-[120ms] linear',
           tone === 'success' ? 'bg-success' : 'bg-accent',
         )}
         style={{ transform: `scaleX(${v / 100})` }}

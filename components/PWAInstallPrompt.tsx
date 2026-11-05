@@ -127,7 +127,7 @@ export const PWAInstallPrompt: React.FC = () => {
                 <div className="flex items-center gap-2">2. 选择 <PlusSquare size={14} className="inline text-muted" /> “添加到主屏幕”</div>
               </div>
             ) : (
-              <button onClick={handleInstallClick} className="w-full rounded-[8px] bg-accent py-2 text-[13px] font-bold text-accent-contrast shadow-sm transition-colors hover:bg-[#C94815] active:scale-[0.98]">
+              <button onClick={handleInstallClick} className="w-full rounded-[8px] bg-accent py-2 text-[13px] font-bold text-accent-contrast shadow-sm transition-colors hover:bg-accent/90 active:scale-[0.98]">
                 立即安装
               </button>
             )}

@@ -4,9 +4,9 @@
 :root {
   --surface:#F5F0E7; --raised:#FBF8F1; --sunken:#EDE6D8;
   --border:#DED5C5; --border-strong:#CFC4B1;
-  --text:#1B1A16; --text-muted:#5F594E; --text-subtle:#7C7466;
+  --text:#1B1A16; --text-muted:#5F594E; --text-subtle:#6B6457;
   --ink:#1B1A16; --accent:#2E5D4B; --accent-contrast:#F5F0E7;
-  --success:#3E6B52; --danger:#8F3A2F; --warning:#8A6A2A; --info:#3A5570;
+  --success:#3E6B52; --danger:#8F3A2F; --warning:#7A5C22; --info:#3A5570;
 
   --dur-1:120ms; --dur-2:180ms; --dur-3:240ms; --dur-4:320ms;
   --ease-out:cubic-bezier(.23,1,.32,1);
@@ -82,7 +82,7 @@ body {
 .motion-rise { animation: motion-rise-kf var(--dur-3) var(--ease-out) both; }
 .motion-fade { animation: motion-fade-kf var(--dur-3) var(--ease-out) both; }
 .motion-scale { animation: motion-scale-kf var(--dur-2) var(--ease-out) both; }
-.motion-shake { animation: motion-shake-kf var(--dur-2) var(--ease-out) both; }
+.motion-shake { animation: motion-shake-kf var(--dur-2) linear both; }
 .motion-sheet { animation: motion-sheet-up-kf var(--dur-4) var(--ease-drawer) both; }
 @keyframes ripple-ring-kf {
   0%   { transform: scale(.06); opacity: 0; }

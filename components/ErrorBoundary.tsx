@@ -46,8 +46,8 @@ export class ErrorBoundary extends Component<Props, State> {
 
       return (
         <div className="min-h-[50vh] flex items-center justify-center p-6">
-          <div className="max-w-md w-full bg-white dark:bg-slate-800 rounded-2xl shadow-xl border border-slate-100 dark:border-slate-700 p-8 text-center">
-            <div className="w-16 h-16 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded-full flex items-center justify-center mx-auto mb-6">
+          <div className="max-w-md w-full bg-raised rounded-[4px] shadow-[var(--shadow-2)] border border-border p-8 text-center">
+            <div className="w-16 h-16 bg-danger/10 text-danger rounded-full flex items-center justify-center mx-auto mb-6">
               <AlertTriangle size={32} />
             </div>
 
@@ -63,7 +63,7 @@ export class ErrorBoundary extends Component<Props, State> {
                 <summary className="cursor-pointer text-slate-600 dark:text-slate-300 font-medium mb-2">
                   错误详情 (开发模式)
                 </summary>
-                <pre className="overflow-auto text-red-600 dark:text-red-400 whitespace-pre-wrap break-words">
+                <pre className="overflow-auto text-danger whitespace-pre-wrap break-words">
                   {this.state.error.toString()}
                   {this.state.errorInfo?.componentStack}
                 </pre>
@@ -79,7 +79,7 @@ export class ErrorBoundary extends Component<Props, State> {
               </button>
               <button
                 onClick={this.handleReload}
-                className="px-5 py-2.5 bg-accent text-accent-contrast rounded-[4px] font-medium hover:bg-[#C94815] transition-colors flex items-center gap-2"
+                className="px-5 py-2.5 bg-accent text-accent-contrast rounded-[4px] font-medium hover:bg-accent/90 transition-colors flex items-center gap-2"
               >
                 <RefreshCw size={16} />
                 刷新页面

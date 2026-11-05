@@ -385,7 +385,7 @@ const App: React.FC = () => {
                 <button
                   onClick={applySwUpdate}
                   disabled={isApplyingSwUpdate}
-                  className="shrink-0 rounded-[8px] bg-accent px-3 py-1.5 text-[12px] font-semibold text-accent-contrast hover:bg-[#C94815] disabled:cursor-not-allowed disabled:opacity-70"
+                  className="shrink-0 rounded-[8px] bg-accent px-3 py-1.5 text-[12px] font-semibold text-accent-contrast hover:bg-accent/90 disabled:cursor-not-allowed disabled:opacity-70"
                 >
                   {isApplyingSwUpdate ? '更新中…' : '立即刷新'}
                 </button>
