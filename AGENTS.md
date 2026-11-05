@@ -32,6 +32,7 @@ npm run deploy                        # wrangler deploy
 - TURN 用 Cloudflare 短期凭证，Worker 端签发；前端不持有长期凭证，未配置时回退 STUN-only。
 - 传输协议版本改动要同时改 sender/receiver 两侧与 `types/`，不能只改一端。
 - 控制面消息（METADATA 等）的大小上限与分片统一走 `constants/transfer.ts` 的 `METADATA_CHUNKING`：分片发送在 `services/send/routeHandshake.ts`，单条消息不得超过 `MAX_MESSAGE_BYTES`（SCTP 单消息硬上限约 256 KiB）。改动分片格式要同时改两端的重组逻辑。
+- UI 原语基于 shadcn/ui（`@radix-ui/*` + `class-variance-authority` + `sonner`，见 `DESIGN.md`）；`lib/utils.ts` 的 `cn` 仅用 clsx，热路径不引 `tailwind-merge`；Sonner 走 `React.lazy` 异步分包，首屏 JS 增量须 ≤ +15KB gzip。
 
 ## 不要做
 
@@ -57,11 +58,11 @@ python D:/ovo/Documents/workspace/scripts/agents-md/render.py --root D:/ovo/Docu
 
 <!-- agents:auto:begin · scripts/agents-md/render.py 生成，勿手改 -->
 - 仓库：`https://github.com/Tianzora/AeroDrop.git`
-- 分支：`main`
+- 分支：`feat/ui-refresh-shadcn`
 - 运行时：Node 22.12.0（`.nvmrc`）、包管理器 npm@10.8.2
 - 脚本入口：`build` `deploy` `deploy:worker` `dev` `dev:worker` `preview` `preview:e2e` `test:all` `test:components` `test:e2e` `test:e2e:product-transfer` `test:e2e:product-transfer:raw` `test:e2e:raw` `test:e2e:rtc` `test:e2e:rtc:raw` `test:receive` `test:scripts` `test:send` `test:services` `typecheck`
 - 锁文件：`package-lock.json`
-- 顶层目录：`components/` `constants/` `docs/` `e2e/` `public/` `scripts/` `services/` `skills/` `src/` `types/`
+- 顶层目录：`components/` `constants/` `docs/` `e2e/` `lib/` `public/` `scripts/` `services/` `skills/` `src/` `types/`
 <!-- agents:auto:end -->
 
 ## 深入文档
