@@ -1,3 +1,4 @@
+import type { CSSProperties } from 'react';
 import { Toaster as SonnerToaster } from 'sonner';
 
 export function Toaster() {
@@ -7,12 +8,16 @@ export function Toaster() {
       position="bottom-right"
       closeButton
       toastOptions={{
+        style: {
+          background: 'color-mix(in srgb, var(--surface) 92%, var(--raised) 8%)',
+          color: 'var(--text)',
+          borderColor: 'var(--border)',
+        } as CSSProperties,
         classNames: {
-          toast:
-            'rounded-[4px] border border-border-strong/70 bg-sunken text-text shadow-[var(--shadow-2)] text-[13px]',
+          toast: 'rounded-[4px] border shadow-[var(--shadow-2)] text-[13px]',
           description: 'text-muted',
           actionButton: 'bg-ink text-surface',
-          cancelButton: 'bg-border/50 text-text',
+          cancelButton: 'bg-border/40 text-text',
         },
       }}
     />
