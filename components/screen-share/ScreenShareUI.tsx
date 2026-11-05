@@ -69,7 +69,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = (props) => {
   }
 
   return (
-    <div className={`mx-auto flex min-h-[560px] w-full flex-col justify-center ${isSharing || isViewing ? 'max-w-[960px]' : 'max-w-[880px]'}`}>
+    <div className={`mx-auto flex min-h-[560px] w-full flex-col ${viewState === 'idle' ? 'justify-start pt-[59px]' : 'justify-center'} ${isSharing || isViewing ? 'max-w-[960px]' : 'max-w-[880px]'}`}>
       <header className="mb-8 text-center">
         <h1 data-morph="title" className="font-serif font-normal text-[clamp(28px,3.6vw,40px)] leading-[1.1] tracking-[-.02em] text-ink">{title}</h1>
         {viewState === 'idle' && (
