@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useLayoutEffect, useRef, Suspense, lazy } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
+import { flushSync } from 'react-dom';
 import { Sender } from './components/Sender';
 import { Receiver } from './components/Receiver';
 import { ErrorBoundary } from './components/ErrorBoundary';
 import { ShieldAlert, X } from 'lucide-react';
 import { ScreenShare } from './components/ScreenShare';
 import { TopBar } from './components/layout/TopBar';
+import { ModeTabs } from './components/layout/ModeTabs';
 import { AppShell } from './components/layout/AppShell';
 const LazyToaster = lazy(() => import('./components/ui/sonner').then((m) => ({ default: m.Toaster })));
 import { AppNotification } from './types';
@@ -58,27 +60,28 @@ const NOTIFICATION_DEDUPE_WINDOW_MS = 1500;
 const App: React.FC = () => {
   const [initialRoute] = useState<InitialRouteState>(() => getInitialRouteState());
   const [mode, setMode] = useState<Mode>(initialRoute.mode);
+  const [pendingEnter, setPendingEnter] = useState(false);
   const stageRef = useRef<HTMLDivElement>(null);
   const changeMode = (next: Mode) => {
     if (next === mode) return;
-    const wrap = stageRef.current;
     const reduce = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    if (wrap && !reduce) {
-      const layer = wrap.querySelector<HTMLElement>('[data-mode-layer]');
-      if (layer) {
-        const ghost = layer.cloneNode(true) as HTMLElement;
-        ghost.removeAttribute('data-mode-layer');
-        ghost.setAttribute('inert', '');
-        ghost.style.cssText = 'position:absolute;inset:0;pointer-events:none;will-change:transform,opacity;';
-        wrap.appendChild(ghost);
-        requestAnimationFrame(() => {
-          const anim = ghost.animate(
-            [{ opacity: 1, transform: 'translateY(0)' }, { opacity: 0, transform: 'translateY(-14px)' }],
-            { duration: 220, easing: 'cubic-bezier(.22,1,.36,1)', fill: 'both' }
-          );
-          anim.onfinish = () => ghost.remove();
-        });
-      }
+    const wrap = stageRef.current;
+    const layer = wrap?.querySelector<HTMLElement>('[data-mode-layer]');
+    if (!reduce && wrap && layer) {
+      const ghost = layer.cloneNode(true) as HTMLElement;
+      ghost.removeAttribute('data-mode-layer');
+      ghost.setAttribute('inert', '');
+      ghost.style.cssText = 'position:absolute;inset:0;pointer-events:none;z-index:2;will-change:transform,opacity;';
+      wrap.appendChild(ghost);
+      requestAnimationFrame(() => {
+        const anim = ghost.animate(
+          [{ opacity: 1, transform: 'translateY(0)' }, { opacity: 0, transform: 'translateY(-8px)' }],
+          { duration: 140, easing: 'cubic-bezier(.4,0,1,1)', fill: 'both' }
+        );
+        anim.onfinish = () => ghost.remove();
+      });
+      setPendingEnter(true);
+      window.setTimeout(() => setPendingEnter(false), 620);
     }
     setMode(next);
   };
@@ -94,59 +97,7 @@ const App: React.FC = () => {
     window.addEventListener('keydown', onKey);
     return () => window.removeEventListener('keydown', onKey);
   }, [mode]);
-  useLayoutEffect(() => {
-    const wrap = stageRef.current;
-    if (!wrap || window.matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-    const layer = wrap.querySelector<HTMLElement>('[data-mode-layer]');
-    if (!layer) return;
-    layer.animate(
-      [{ opacity: 0, transform: 'translateY(18px)' }, { opacity: 1, transform: 'translateY(0)' }],
-      { duration: 340, easing: 'cubic-bezier(.22,1,.36,1)', fill: 'both' }
-    );
-    const lr = layer.getBoundingClientRect();
-    const title = layer.querySelector<HTMLElement>('h1');
-    if (!title) return;
-    const tr = title.getBoundingClientRect();
-    const clone = title.cloneNode(true) as HTMLElement;
-    clone.style.position = 'absolute';
-    clone.style.left = `${tr.left - lr.left}px`;
-    clone.style.top = `${tr.top - lr.top}px`;
-    clone.style.width = `${tr.width}px`;
-    clone.style.margin = '0';
-    clone.style.pointerEvents = 'none';
-    clone.style.zIndex = '2';
-    const text = title.textContent || '';
-    clone.textContent = '';
-    const frag = document.createDocumentFragment();
-    [...text].forEach((ch) => {
-      const sp = document.createElement('span');
-      sp.textContent = ch;
-      sp.style.display = 'inline-block';
-      sp.style.willChange = 'transform,opacity';
-      frag.appendChild(sp);
-    });
-    clone.appendChild(frag);
-    title.style.visibility = 'hidden';
-    layer.appendChild(clone);
-    [...clone.children].forEach((sp, i) =>
-      (sp as HTMLElement).animate(
-        [{ opacity: 0, transform: 'translateY(.5em)' }, { opacity: 1, transform: 'translateY(0)' }],
-        { duration: 460, delay: 40 + i * 16, easing: 'cubic-bezier(.16,1,.3,1)', fill: 'both' }
-      )
-    );
-    window.setTimeout(() => {
-      clone.remove();
-      title.style.visibility = '';
-    }, 40 + [...text].length * 16 + 500);
-    const line = document.createElement('div');
-    line.style.cssText = `position:absolute;left:0;right:0;top:${tr.top - lr.top + tr.height * 0.55}px;height:1px;background:linear-gradient(90deg,transparent,#1b1a1640,transparent);pointer-events:none;will-change:transform,opacity;z-index:3`;
-    layer.appendChild(line);
-    const la = line.animate(
-      [{ transform: 'translateX(-100%)', opacity: 0 }, { opacity: .55, offset: .15 }, { opacity: .55, offset: .8 }, { transform: 'translateX(100%)', opacity: 0 }],
-      { duration: 560, easing: 'cubic-bezier(.22,1,.36,1)', fill: 'both' }
-    );
-    la.onfinish = () => line.remove();
-  }, [mode]);
+
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [showRiskBanner, setShowRiskBanner] = useState(false);
   const [swUpdateReady, setSwUpdateReady] = useState(false);
@@ -470,8 +421,9 @@ const App: React.FC = () => {
         </>
       }
     >
+      <div className="mb-8 flex justify-center"><ModeTabs mode={mode} onModeChange={changeMode} /></div>
       <div ref={stageRef} className="relative flex w-full flex-1 flex-col" style={{ minHeight: 560 }}>
-        <div key={mode} data-mode-layer className="flex w-full flex-col">
+        <div key={mode} data-mode-layer className={pendingEnter ? 'mode-enter-delayed flex w-full flex-col' : 'flex w-full flex-col'}>
         <ErrorBoundary>
           {mode === 'send' && <Sender onNotification={addNotification} deviceName={deviceName} />}
           {mode === 'receive' && <Receiver initialCode={initialCode} onNotification={addNotification} deviceName={deviceName} />}

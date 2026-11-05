@@ -12,8 +12,8 @@ export const AppShell: React.FC<AppShellProps> = ({ topBar, notice, children, fo
   <div className="flex min-h-[100dvh] flex-col bg-surface text-text">
     {topBar}
     {notice && (
-      <div className="border-b border-warning/25 bg-warning/[.07]">
-        <div className="mx-auto flex w-full max-w-[1120px] items-center gap-2.5 px-5 py-2.5 text-[12.5px] leading-snug text-warning sm:px-10">
+      <div>
+        <div className="mx-auto flex w-full max-w-[1120px] items-center gap-2 px-5 py-1.5 text-[11.5px] leading-snug text-subtle sm:px-10">
           {notice}
         </div>
       </div>

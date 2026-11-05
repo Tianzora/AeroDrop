@@ -108,3 +108,8 @@ body {
   .motion-rise, .motion-scale, .motion-sheet, .stagger > * { transform: none !important; }
   .motion-shake { animation: none !important; }
 }
+
+/* Mode switch: single-layer sequential enter */
+.mode-enter-delayed { animation: mode-in 280ms cubic-bezier(.22,1,.36,1) 160ms both; }
+@keyframes mode-in { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
+@media (prefers-reduced-motion: reduce){ .mode-enter-delayed { animation: none !important; } }
