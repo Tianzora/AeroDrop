@@ -374,7 +374,7 @@ const App: React.FC = () => {
       ) : undefined}
       footer={
         <footer className="mt-10 text-center text-[12.5px] tracking-[.005em] text-muted">
-          Powered by WebRTC · 数据直接在设备间点对点传输，不经过云端存储
+          Powered by WebRTC
         </footer>
       }
       overlays={

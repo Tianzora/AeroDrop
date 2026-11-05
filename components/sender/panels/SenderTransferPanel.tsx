@@ -71,7 +71,7 @@ export const SenderTransferPanel: React.FC<SenderTransferPanelProps> = ({
             <div>
               <div className="mb-1.5 flex items-center justify-between text-[12px] text-muted">
                 <span>{activeConnectionsCount > 1 ? '所有设备总进度（平均）' : '总进度'}</span>
-                <span className="font-mono tabular-nums">{totalProgress}%</span>
+                <span className="tabular-nums">{totalProgress}%</span>
               </div>
               <Progress value={totalProgress} tone={complete ? 'success' : 'accent'} label="总进度" height={10} />
             </div>
@@ -85,7 +85,7 @@ export const SenderTransferPanel: React.FC<SenderTransferPanelProps> = ({
               <Stat label="平均速度" value={avgSpeed} />
             </div>
             <div className="flex items-center justify-between text-[12px] text-subtle">
-              <span className="font-mono tabular-nums">{formatFileSize(transferredBytes)} / {formatFileSize(totalBytes)}</span>
+              <span className="tabular-nums">{formatFileSize(transferredBytes)} / {formatFileSize(totalBytes)}</span>
               <span>预计剩余 {overallEta}</span>
             </div>
           </div>
@@ -99,7 +99,7 @@ export const SenderTransferPanel: React.FC<SenderTransferPanelProps> = ({
           <div className="grid h-10 w-10 shrink-0 place-items-center rounded-[4px] border border-border bg-sunken text-muted"><Monitor size={18} /></div>
           <div className="min-w-0 flex-1">
             <p className="text-[13px] font-semibold text-ink">{metadata.files.length} 个文件</p>
-            <p className="text-[12px] text-muted font-mono">{formatFileSize(metadata.totalSize)}</p>
+            <p className="text-[12px] text-muted tabular-nums">{formatFileSize(metadata.totalSize)}</p>
           </div>
           {complete && <Check size={20} className="text-success" />}
         </Card>

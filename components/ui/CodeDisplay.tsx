@@ -44,7 +44,7 @@ export const ShareLink: React.FC<ShareLinkProps> = ({ link, copied, onCopy }) =>
       type="button"
       onClick={onCopy}
       aria-label={copied ? '链接已复制' : '复制链接'}
-      className="inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[.14em] text-muted transition-colors hover:text-accent"
+      className="inline-flex items-center gap-1.5 font-sans text-[11px] uppercase tracking-[.14em] text-muted transition-colors hover:text-accent"
     >
       {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? '已复制' : '复制'}
     </button>

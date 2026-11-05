@@ -18,7 +18,7 @@ export const SenderDeviceList: React.FC<{ stats: SenderPeerTransferStat[] }> = (
                 <span className="truncate text-[13px] text-text" title={stat.peerId}>{stat.deviceName}</span>
                 <Badge tone="neutral" dot={false} className="shrink-0">{stat.connectionType}</Badge>
               </div>
-              <span className="shrink-0 font-mono text-[12px] tabular-nums text-muted">{stat.status === 'completed' ? '已完成' : stat.status === 'transferring' ? `${stat.progress}%` : '等待'}</span>
+              <span className="shrink-0 text-[12px] tabular-nums text-muted">{stat.status === 'completed' ? '已完成' : stat.status === 'transferring' ? `${stat.progress}%` : '等待'}</span>
             </div>
             <div className="mt-2"><Progress value={stat.progress} tone={stat.status === 'completed' ? 'success' : 'accent'} height={5} label="设备进度" /></div>
           </li>

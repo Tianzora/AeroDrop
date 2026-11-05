@@ -41,7 +41,7 @@ export const SenderConfigurePanel: React.FC<SenderConfigurePanelProps> = ({
             </div>
             <div className="min-w-0 flex-1">
               <h3 className="truncate text-[15px] font-bold text-ink">{selectedFiles[0].name}</h3>
-              <p className="mt-0.5 text-[12px] text-muted font-mono">{formatFileSize(selectedFiles[0].size)}</p>
+              <p className="mt-0.5 text-[12px] text-muted tabular-nums">{formatFileSize(selectedFiles[0].size)}</p>
             </div>
           </>
         ) : (
@@ -68,7 +68,7 @@ export const SenderConfigurePanel: React.FC<SenderConfigurePanelProps> = ({
                     <FileTypeIcon type={file.fileType} size={14} className="shrink-0 text-subtle" />
                     <span className="truncate text-text">{file.name}</span>
                   </div>
-                  <span className="shrink-0 font-mono tabular-nums text-subtle">{formatFileSize(file.size)}</span>
+                  <span className="shrink-0 tabular-nums text-subtle">{formatFileSize(file.size)}</span>
                 </div>
               ))}
             </div>

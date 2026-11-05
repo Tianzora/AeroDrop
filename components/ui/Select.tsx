@@ -23,7 +23,7 @@ export const Select: React.FC<SelectProps> = ({ id, value, onValueChange, option
       id={id}
       aria-label={rest['aria-label']}
       className={cn(
-        'inline-flex h-11 w-full items-center justify-between gap-2 rounded-[6px] border border-border bg-raised px-3 text-[16px] text-text transition-colors duration-200 hover:border-border-strong focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 data-[state=open]:border-accent data-[state=open]:ring-2 data-[state=open]:ring-accent/30 sm:text-sm',
+        'inline-flex h-11 w-full items-center justify-between gap-2 rounded-[6px] border border-border bg-raised px-3.5 text-[16px] shadow-[var(--shadow-1)] text-text transition-colors duration-200 hover:border-border-strong focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 data-[state=open]:border-accent data-[state=open]:ring-2 data-[state=open]:ring-accent/30 sm:text-sm',
         className,
       )}
     >

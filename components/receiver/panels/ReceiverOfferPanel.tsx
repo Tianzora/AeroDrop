@@ -38,7 +38,7 @@ export const ReceiverOfferPanel: React.FC<ReceiverOfferPanelProps> = ({
         </div>
         <div className="min-w-0 flex-1">
           <h3 className="truncate text-[17px] font-bold text-ink">{isMultiFile ? `${metadata.files.length} 个文件` : primaryFileName}</h3>
-          <p className="mt-1 text-[13px] text-muted font-mono">{formatFileSize(metadata.totalSize)}</p>
+          <p className="mt-1 text-[13px] text-muted tabular-nums">{formatFileSize(metadata.totalSize)}</p>
         </div>
       </div>
 
@@ -56,7 +56,7 @@ export const ReceiverOfferPanel: React.FC<ReceiverOfferPanelProps> = ({
                     <FileTypeIcon type={file.fileType} size={14} className="shrink-0 text-subtle" />
                     <span className="truncate text-text">{file.name}</span>
                   </div>
-                  <span className="shrink-0 font-mono tabular-nums text-subtle">{formatFileSize(file.size)}</span>
+                  <span className="shrink-0 tabular-nums text-subtle">{formatFileSize(file.size)}</span>
                 </div>
               ))}
             </div>
