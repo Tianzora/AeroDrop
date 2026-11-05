@@ -72,6 +72,7 @@ import {
   type ResumeCheckpoint,
 } from '../services/receive/resumeCheckpoint';
 import { restoreCompletedFilesForResume } from '../services/receive/completedFileRestore';
+import { countVerifiedCompletedFiles } from '../services/receive/verifyCompletedFiles';
 import { createMetadataChunkAssembler } from '../services/receive/metadataChunkAssembler';
 import { createReceivedFileManifest } from '../services/receive/receivedFileManifest';
 import { createArchiveExportSession } from '../services/receive/archiveExportSession';
@@ -2884,9 +2885,22 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         // 刷新发生在多文件传输的后续文件时，前面那些文件已经落盘完成，但内存里的
         // 完成集合是空的：不补回来，发送端的信用基线（前面文件大小 + 本文件偏移）
         // 会远高于我们上报的进度，信用窗口补不满、传输卡死，最终落盘数也校验不过。
+        // 检查点只说明「上次写到哪」，不代表那些文件现在还在目标目录里：用户可能
+        // 因为句柄失效被迫重新选了一个空目录。先确认前缀文件真的存在，否则整批重下。
+        let resumeFileIndex = checkpointResume.fileIndex;
+        if (resumeFileIndex > 0) {
+          const trustedPrefix = await trustCompletedPrefixFromCheckpoint(resumeFileIndex);
+          if (trustedPrefix === null) {
+            resumeCheckpointRef.current = null;
+            setCanResume(false);
+            resumeFileIndex = 0;
+          }
+        }
+
+        if (resumeFileIndex > 0) {
         restoreCompletedFilesForResume(
           {
-            checkpointFileIndex: checkpointResume.fileIndex,
+            checkpointFileIndex: resumeFileIndex,
             files: metadataRef.current?.files ?? [],
             markCompleted: (fileIndex, fileSize, directSaved) => {
               completedFileIndicesRef.current.add(fileIndex);
@@ -2900,10 +2914,29 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           },
           { directSaved: multiFileSaveModeRef.current === 'directory-direct' },
         );
-        currentFileIndexRef.current = checkpointResume.fileIndex;
+        currentFileIndexRef.current = resumeFileIndex;
         setState(TransferState.TRANSFERRING);
         setReconnectAttempt(0);
         resumeTransfer();
+        return;
+        }
+
+        // 目标目录无法确认（或是新选的空目录）：作废检查点，按整批重新下载。
+        try {
+          liveConn.send({
+            type: 'ACCEPT_TRANSFER',
+            payload: {
+              persistedOverallBytes: overallTransferredBytes,
+              receiveWindowBytes: TRANSFER_CONFIG.RECEIVE_WINDOW_BYTES,
+            },
+          });
+        } catch {
+          abortAcceptedTransfer();
+          return;
+        }
+        lastProgressAckBytesRef.current = overallTransferredBytes;
+        setState(TransferState.TRANSFERRING);
+        setReconnectAttempt(0);
         return;
       }
 
@@ -2924,6 +2957,45 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       setReconnectAttempt(0);
     } finally {
       acceptingRef.current = false;
+    }
+  };
+
+  // 只在「原目录还能拿到」时才信任检查点里的已完成文件；需要用户重新选目录时返回 null。
+  const trustCompletedPrefixFromCheckpoint = async (checkpointFileIndex: number): Promise<number | null> => {
+    try {
+      const resolution = await resolveDirectoryHandleForResume({
+        getCachedHandle: () => sessionDirectoryHandleCacheRef.current.getReusableHandle(),
+        loadPersistedHandle: () => persistedDirectoryHandleRef.current.load(),
+        ensureWritePermission: async (handle) => {
+          const permissionApi = handle as FileSystemDirectoryHandle & {
+            requestPermission?: (options?: { mode?: 'read' | 'write' | 'readwrite' }) => Promise<PermissionState>;
+          };
+          if (typeof permissionApi.requestPermission !== 'function') return true;
+          const state = await permissionApi.requestPermission({ mode: 'readwrite' });
+          return state === 'granted';
+        },
+        pickDirectory: async () => null,
+      });
+      if (!resolution) return null;
+
+      directorySaveSessionRef.current = createDirectorySaveSession({ rootDirectoryHandle: resolution.handle });
+      sessionDirectoryHandleCacheRef.current.remember(resolution.handle);
+
+      const verified = await countVerifiedCompletedFiles({
+        checkpointFileIndex,
+        files: metadataRef.current?.files ?? [],
+        fileExists: async (relativePath, expectedSize) => {
+          const resolved = await directorySaveSessionRef.current.resolveFile(relativePath);
+          const fileHandle = resolved?.fileHandle as unknown as FileSystemFileHandle | undefined;
+          if (!fileHandle || typeof fileHandle.getFile !== 'function') return false;
+          const file = await fileHandle.getFile();
+          return file.size >= expectedSize;
+        },
+      });
+
+      return verified >= checkpointFileIndex ? verified : null;
+    } catch {
+      return null;
     }
   };
 
