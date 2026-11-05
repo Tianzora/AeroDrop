@@ -5,7 +5,6 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { ShieldAlert, X } from 'lucide-react';
 import { ScreenShare } from './components/ScreenShare';
 import { TopBar } from './components/layout/TopBar';
-import { SegmentedControl } from './components/ui/SegmentedControl';
 import { AppShell } from './components/layout/AppShell';
 const LazyToaster = lazy(() => import('./components/ui/sonner').then((m) => ({ default: m.Toaster })));
 import { AppNotification } from './types';
@@ -59,6 +58,24 @@ const NOTIFICATION_DEDUPE_WINDOW_MS = 1500;
 const App: React.FC = () => {
   const [initialRoute] = useState<InitialRouteState>(() => getInitialRouteState());
   const [mode, setMode] = useState<Mode>(initialRoute.mode);
+  const [modeDir, setModeDir] = useState(1);
+  const MODE_ORDER: Record<Mode, number> = { send: 0, receive: 1, screen: 2 };
+  const changeMode = (next: Mode) => {
+    setModeDir(MODE_ORDER[next] >= MODE_ORDER[mode] ? 1 : -1);
+    setMode(next);
+  };
+  useEffect(() => {
+    const map: Record<string, Mode> = { '1': 'send', '2': 'receive', '3': 'screen' };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.metaKey || e.ctrlKey || e.altKey) return;
+      const el = e.target as HTMLElement | null;
+      if (el && (/^(INPUT|TEXTAREA|SELECT)$/.test(el.tagName) || el.isContentEditable)) return;
+      const next = map[e.key];
+      if (next) changeMode(next);
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [mode]);
   const [notifications, setNotifications] = useState<AppNotification[]>([]);
   const [showRiskBanner, setShowRiskBanner] = useState(false);
   const [swUpdateReady, setSwUpdateReady] = useState(false);
@@ -382,20 +399,7 @@ const App: React.FC = () => {
         </>
       }
     >
-      <div className="mb-10 flex justify-center">
-        <SegmentedControl
-          options={[
-            { value: 'send', label: '发送' },
-            { value: 'receive', label: '接收' },
-            { value: 'screen', label: '共享' },
-          ]}
-          value={mode}
-          onChange={(v) => setMode(v as Mode)}
-          ariaLabel="传输模式"
-          className="min-w-[300px]"
-        />
-      </div>
-      <div className="flex w-full flex-1 flex-col">
+      <div key={mode} className="stage-switch flex w-full flex-1 flex-col" style={{ ['--switch-x' as string]: `${modeDir * 14}px` } as React.CSSProperties}>
         <ErrorBoundary>
           {mode === 'send' && <Sender onNotification={addNotification} deviceName={deviceName} />}
           {mode === 'receive' && <Receiver initialCode={initialCode} onNotification={addNotification} deviceName={deviceName} />}
