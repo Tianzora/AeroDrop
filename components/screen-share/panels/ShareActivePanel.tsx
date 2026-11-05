@@ -58,7 +58,7 @@ export const ShareActivePanel: React.FC<ShareActivePanelProps> = ({
         )}
       </div>
       <div className="flex shrink-0 items-center">
-        <Button data-morph="action" variant="danger" icon={<StopCircle size={18} />} onClick={stopScreenShare}>停止共享</Button>
+        <Button variant="danger" icon={<StopCircle size={18} />} onClick={stopScreenShare}>停止共享</Button>
       </div>
     </div>
   </div>

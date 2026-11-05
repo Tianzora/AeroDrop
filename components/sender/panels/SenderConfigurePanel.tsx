@@ -107,7 +107,7 @@ export const SenderConfigurePanel: React.FC<SenderConfigurePanelProps> = ({
           <AlertCircle size={15} /> {errorMsg}
         </div>
       )}
-      <Button data-morph="action" fullWidth size="lg" onClick={startSharing}>创建分享</Button>
+      <Button fullWidth size="lg" onClick={startSharing}>创建分享</Button>
     </Card>
   </div>
 );

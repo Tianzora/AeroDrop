@@ -27,7 +27,7 @@ export const ViewerPanel: React.FC<ViewerPanelProps> = ({ viewerVideoRef, needsP
     <div className="flex flex-col gap-3 rounded-[4px] border border-border bg-raised p-4 sm:flex-row sm:items-center sm:justify-between">
       <div className="text-[12.5px] text-muted">画质 <span className="text-ink">{qualityLabel}</span> · 正在观看屏幕共享</div>
       <div className="flex shrink-0 items-center">
-        <Button data-morph="action" variant="danger" icon={<StopCircle size={18} />} onClick={stopViewing}>停止观看</Button>
+        <Button variant="danger" icon={<StopCircle size={18} />} onClick={stopViewing}>停止观看</Button>
       </div>
     </div>
   </div>

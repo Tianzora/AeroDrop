@@ -45,7 +45,6 @@ export const SenderIdlePanel: React.FC<SenderIdlePanelProps> = ({ isDragOver, ha
     </p>
     <div className="relative mt-10 flex items-center gap-6 sm:gap-8">
       <label
-        data-morph="action"
         htmlFor="file-upload"
         className="z-10 inline-flex cursor-pointer items-center rounded-[3px] bg-ink px-6 py-[13px] font-sans text-[14px] font-medium tracking-[.01em] text-surface transition-colors hover:bg-ink/90"
       >
