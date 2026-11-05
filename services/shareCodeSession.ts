@@ -149,6 +149,20 @@ export const revokeShareSession = async (input: {
   return result.status === 'ok' || result.status === 'not-found' || result.status === 'forbidden';
 };
 
+/**
+ * 从剪贴板文本里提取 6 位口令：可能是纯口令，也可能是带 `?code=` 的分享链接。
+ * 口令一律 6 位（4 位旧格式不再支持），找不到返回 null。
+ */
+export const parseShareCodeFromClipboard = (text: string | null | undefined): string | null => {
+  if (typeof text !== 'string') return null;
+  const trimmed = text.trim();
+  if (isValidShareCode(trimmed)) {
+    return normalizeShareCodeInput(trimmed);
+  }
+  const match = trimmed.match(/[?&]code=(\d{6})(?:&|#|$)/);
+  return match ? match[1] : null;
+};
+
 export const lookupSharePeerId = async (code: string): Promise<string | null> => {
   if (!isSixDigits(code)) {
     return null;

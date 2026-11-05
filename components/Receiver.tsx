@@ -80,7 +80,12 @@ import {
   type ReceiveSaveMode,
 } from '../services/receive/saveCapabilityResolver';
 import { createSerialAsyncProcessor } from '../services/receive/serialAsyncProcessor';
-import { isValidShareCode, lookupSharePeerId, normalizeShareCodeInput } from '../services/shareCodeSession';
+import {
+  isValidShareCode,
+  lookupSharePeerId,
+  normalizeShareCodeInput,
+  parseShareCodeFromClipboard,
+} from '../services/shareCodeSession';
 import { createSessionDirectoryHandleCache } from '../services/receive/sessionDirectoryHandleCache';
 import {
   getOrCreateReceiverRouteSessionId,
@@ -2995,13 +3000,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const handlePasteFromClipboard = async () => {
     try {
       const text = await navigator.clipboard.readText();
-      if (/^\d{4}$/.test(text)) {
-        setCode(text);
-        return;
-      }
-      const match = text.match(/[?&]code=(\d{4})(?:&|$)/);
-      if (match) {
-        setCode(match[1]);
+      const parsed = parseShareCodeFromClipboard(text);
+      if (parsed) {
+        setCode(parsed);
         return;
       }
       if (onNotification) onNotification("剪贴板中未找到 6 位口令", 'info');
