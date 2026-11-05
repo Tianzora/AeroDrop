@@ -1,4 +1,4 @@
-import React from 'react';
+import React, { Suspense } from 'react';
 import { X, ChevronDown, ChevronUp, AlertCircle } from 'lucide-react';
 import { FileMetadata } from '../../../types';
 import { formatFileSize } from '../../../services/fileUtils';
@@ -7,6 +7,9 @@ import { FileTypeIcon } from '../../FileTypeIcon';
 import { Button } from '../../ui/Button';
 import { Input } from '../../ui/Input';
 import { Field } from '../../ui/Field';
+
+const Select = React.lazy(() => import('../../ui/Select').then((m) => ({ default: m.Select })));
+
 import { Card } from '../../ui/Card';
 import type { SenderSelectedFile } from '../SenderUI';
 
@@ -28,7 +31,7 @@ export const SenderConfigurePanel: React.FC<SenderConfigurePanelProps> = ({
   metadata, selectedFiles, showFileList, onToggleFileList, stopSharing,
   expiryOption, setExpiryOption, customCodeInput, setCustomCodeInput, errorMsg, startSharing,
 }) => (
-  <div className="space-y-4">
+  <div className="mt-6 space-y-4">
     <Card className="p-4">
       <div className="flex items-center gap-4">
         {metadata.files.length === 1 && selectedFiles[0] ? (
@@ -77,25 +80,28 @@ export const SenderConfigurePanel: React.FC<SenderConfigurePanelProps> = ({
     <Card className="space-y-4 p-4">
       <div className="grid gap-4 sm:grid-cols-2">
         <Field label="有效期" htmlFor="expiry-select">
-          <select
-            id="expiry-select"
-            value={expiryOption}
-            onChange={(e) => setExpiryOption(e.target.value)}
-            className="h-11 w-full rounded-[6px] border border-border bg-raised px-3 text-[16px] text-text transition-colors duration-200 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 sm:text-sm"
-          >
-            <option value="10m">10 分钟</option>
-            <option value="1h">1 小时</option>
-            <option value="1d">1 天</option>
-            <option value="never">永久</option>
-          </select>
+          <Suspense fallback={<div className="h-11 w-full rounded-[6px] border border-border bg-raised" />}>
+            <Select
+              id="expiry-select"
+              aria-label="有效期"
+              value={expiryOption}
+              onValueChange={setExpiryOption}
+              options={[
+                { value: '10m', label: '10 分钟' },
+                { value: '1h', label: '1 小时' },
+                { value: '1d', label: '1 天' },
+                { value: 'never', label: '永久' },
+              ]}
+            />
+          </Suspense>
         </Field>
-        <Field label="自定义口令" htmlFor="custom-code" hint="留空则随机生成 6 位">
+        <Field label="自定义口令" htmlFor="custom-code">
           <Input
             id="custom-code"
             type="text"
             inputMode="numeric"
             maxLength={6}
-            placeholder="随机 6 位（可选）"
+            placeholder="留空则随机生成 6 位"
             value={customCodeInput}
             onChange={(e) => setCustomCodeInput(e.target.value.replace(/[^0-9]/g, '').slice(0, 6))}
             aria-label="自定义口令"
