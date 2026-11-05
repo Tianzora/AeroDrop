@@ -34,7 +34,7 @@ export const SegmentedControl: React.FC<SegmentedControlProps> = ({ options, val
               onClick={() => onChange(opt.value)}
               className={cn(
                 'relative z-10 inline-flex items-center justify-center gap-2 rounded-full font-semibold transition-colors duration-200 ease-out whitespace-nowrap',
-                size === 'sm' ? 'h-8 px-3 text-[12px]' : 'h-9 px-4 text-[13px]',
+                size === 'sm' ? 'h-8 px-3 text-[12px]' : 'h-10 px-5 text-[13.5px]',
                 active ? 'text-ink' : 'text-muted hover:text-text',
               )}
             >

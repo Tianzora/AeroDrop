@@ -5,6 +5,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { ShieldAlert, X } from 'lucide-react';
 import { ScreenShare } from './components/ScreenShare';
 import { TopBar } from './components/layout/TopBar';
+import { SegmentedControl } from './components/ui/SegmentedControl';
 import { AppShell } from './components/layout/AppShell';
 const LazyToaster = lazy(() => import('./components/ui/sonner').then((m) => ({ default: m.Toaster })));
 import { AppNotification } from './types';
@@ -381,6 +382,19 @@ const App: React.FC = () => {
         </>
       }
     >
+      <div className="mb-10 flex justify-center">
+        <SegmentedControl
+          options={[
+            { value: 'send', label: '发送' },
+            { value: 'receive', label: '接收' },
+            { value: 'screen', label: '共享' },
+          ]}
+          value={mode}
+          onChange={(v) => setMode(v as Mode)}
+          ariaLabel="传输模式"
+          className="min-w-[300px]"
+        />
+      </div>
       <div className="flex w-full flex-1 flex-col">
         <ErrorBoundary>
           {mode === 'send' && <Sender onNotification={addNotification} deviceName={deviceName} />}

@@ -89,7 +89,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = (props) => {
     : '接收文件';
 
   return (
-    <div className="mx-auto flex min-h-[540px] w-full max-w-[620px] flex-col justify-center">
+    <div className="mx-auto flex min-h-[560px] w-full max-w-[620px] flex-col justify-center">
       <header className="mb-8 text-center">
         <h1 className="font-serif font-normal text-[clamp(28px,3.6vw,40px)] leading-[1.1] tracking-[-.02em] text-ink">{title}</h1>
         {state === TransferState.IDLE && (
