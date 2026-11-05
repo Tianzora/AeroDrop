@@ -919,29 +919,46 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       // 口令一律 6 位、由服务端登记并与随机 peerId 绑定；用户手填的 6 位码同样走登记流程
       // （已被占用会返回 taken，不会悄悄降级成别的码）。
       const requestedCode = isValidShareCode(customCodeInput) ? customCodeInput : undefined;
-      const senderPeerId = `peer-${crypto.randomUUID()}`;
-      const registration = await requestShareCode({ peerId: senderPeerId, requestedCode });
+      // 信令建连超时后会重试：此时口令已经登记过，再调一次登记接口只会拿到 409
+      // （或者把码改绑）。直接复用上一次的 peerId + secret。
+      const previousRegistration = shareRegistrationRef.current;
+      const reuseRegistration = Boolean(
+        previousRegistration && (!requestedCode || previousRegistration.code === requestedCode),
+      );
 
-      if (registration.status !== 'ok') {
-        if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken)) return;
-        const message = registration.status === 'taken'
-          ? '该口令已被占用，请换一个 6 位口令'
-          : registration.status === 'rate-limited'
-            ? '创建口令过于频繁，请稍后再试'
-            : '创建分享口令失败，请重试';
-        setErrorMsg(message);
-        setState(TransferState.ERROR);
-        return;
+      let senderPeerId: string;
+      let displayCode: string;
+      let signalingToken: string;
+      if (reuseRegistration && previousRegistration) {
+        senderPeerId = previousRegistration.peerId;
+        displayCode = previousRegistration.code;
+        signalingToken = previousRegistration.secret;
+      } else {
+        senderPeerId = `peer-${crypto.randomUUID()}`;
+        const registration = await requestShareCode({ peerId: senderPeerId, requestedCode });
+
+        if (registration.status !== 'ok') {
+          if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken)) return;
+          const message = registration.status === 'taken'
+            ? '该口令已被占用，请换一个 6 位口令'
+            : registration.status === 'rate-limited'
+              ? '创建口令过于频繁，请稍后再试'
+              : '创建分享口令失败，请重试';
+          setErrorMsg(message);
+          setState(TransferState.ERROR);
+          return;
+        }
+
+        displayCode = registration.code;
+        signalingToken = registration.secret;
+        shareRegistrationRef.current = {
+          code: registration.code,
+          peerId: senderPeerId,
+          secret: registration.secret,
+        };
       }
 
-      const displayCode = registration.code;
-      const signalingCode = registration.code;
-      const signalingToken = registration.secret;
-      shareRegistrationRef.current = {
-        code: registration.code,
-        peerId: senderPeerId,
-        secret: registration.secret,
-      };
+      const signalingCode = displayCode;
 
       let customPeer: Peer;
       try {

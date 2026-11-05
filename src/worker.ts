@@ -4,6 +4,7 @@ import { createIceConfigRateLimiter, getIceConfigRetryAfterSeconds } from '../se
 import {
   SHARE_CODE_FORBIDDEN_BODY,
   SHARE_CODE_MAX_BODY_BYTES,
+  SHARE_CODE_REBIND_REJECTED_BODY,
   SHARE_CODE_TAKEN_BODY,
   allocateShareCode,
   isShareCodeRecordExpired,
@@ -1184,6 +1185,24 @@ export class SignalingHub extends DurableObject {
     return isShareCodeRecordExpired(record, now) ? null : record;
   }
 
+  private findActiveShareCodeByPeerId(peerId: string, now: number): ShareCodeRecord | null {
+    const rows = this.ctx.storage.sql
+      .exec<ShareCodeRow>(
+        'SELECT code, peer_id, secret_hash, expires_at FROM share_codes WHERE peer_id = ?',
+        peerId
+      )
+      .toArray();
+    const row = rows[0];
+    if (!row) return null;
+    const record: ShareCodeRecord = {
+      code: row.code,
+      peerId: row.peer_id,
+      secretHash: row.secret_hash,
+      expiresAt: row.expires_at,
+    };
+    return isShareCodeRecordExpired(record, now) ? null : record;
+  }
+
   private registerShareCode(
     peerId: string,
     secretHash: string,
@@ -1192,6 +1211,14 @@ export class SignalingHub extends DurableObject {
   ): ShareCodeAllocationResult {
     // 先清过期行：这样「冲突」只可能来自仍然有效的码，不会把 TTL 清理混进 409。
     this.deleteExpiredShareCodes(now);
+
+    // 改绑必须先证明自己就是原来的持有者：否则任何知道口令的人都能用「码 -> peerId」
+    // 查到发送方 id，再用自己的 HMAC 覆盖这行记录，把仍在进行的分享劫走。
+    const existingBinding = this.findActiveShareCodeByPeerId(peerId, now);
+    if (existingBinding && existingBinding.secretHash !== secretHash) {
+      return { status: 'rebind-rejected' };
+    }
+
     // 同一 peerId 只保留最新一张码，避免反复建码把表堆大。
     this.ctx.storage.sql.exec('DELETE FROM share_codes WHERE peer_id = ?', peerId);
 
@@ -1272,6 +1299,9 @@ export class SignalingHub extends DurableObject {
       const allocation = this.registerShareCode(payload.peerId, payload.secretHash, requestedCode, now);
       if (allocation.status === 'taken') {
         return Response.json(SHARE_CODE_TAKEN_BODY, { status: 409 });
+      }
+      if (allocation.status === 'rebind-rejected') {
+        return Response.json(SHARE_CODE_REBIND_REJECTED_BODY, { status: 409 });
       }
 
       return Response.json({ code: allocation.record.code, expiresAt: allocation.record.expiresAt });

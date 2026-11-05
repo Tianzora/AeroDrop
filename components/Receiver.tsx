@@ -71,6 +71,7 @@ import {
   saveResumeCheckpoint,
   type ResumeCheckpoint,
 } from '../services/receive/resumeCheckpoint';
+import { restoreCompletedFilesForResume } from '../services/receive/completedFileRestore';
 import { createReceivedFileManifest } from '../services/receive/receivedFileManifest';
 import { createArchiveExportSession } from '../services/receive/archiveExportSession';
 import {
@@ -1158,11 +1159,21 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     const fileIndex = currentFileIndexRef.current;
     const file = meta.files?.[fileIndex];
     if (!file || completedFileIndicesRef.current.has(fileIndex)) return;
+    // 只有「刷新后还能重新打开成文件前缀」的字节才配写进检查点：
+    // 内存 blob / StreamSaver 模式在刷新后就没了，按他们的进度续传会把缺掉的前缀
+    // 当成「未验证」继续写，最终产出一个内容损坏的文件。
+    const recoverable = receiveStreamingWriter.isStreaming() || isIndexedDbBufferingRef.current;
+    if (!recoverable) {
+      if (lastCheckpointWriteRef.current.bytes !== 0) {
+        lastCheckpointWriteRef.current = { bytes: 0, at: 0 };
+        clearResumeCheckpoint(receiverSessionIdRef.current);
+      }
+      return;
+    }
     const committedBytes = receiveStreamingWriter.isStreaming()
       ? receiveStreamingWriter.getCommittedBytes()
-      : isIndexedDbBufferingRef.current
-        ? indexedDbBufferedBytesRef.current
-        : receivedSizeRef.current;
+      : indexedDbBufferedBytesRef.current;
+    if (committedBytes <= 0) return;
     const previous = lastCheckpointWriteRef.current;
     if (committedBytes - previous.bytes < 1024 * 1024 && Date.now() - previous.at < 2000) return;
     lastCheckpointWriteRef.current = { bytes: committedBytes, at: Date.now() };
@@ -1501,17 +1512,31 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       const normalizedPath = sanitizeRelativeReceivePath(msg.payload.fileName || `file_${Date.now()}`);
       const resumeOffset = typeof msg.payload.resumeOffset === 'number' ? msg.payload.resumeOffset : 0;
       if (resumeOffset > 0 && msg.payload.prefixCrc32) {
+        // 先用 manifest 解析出真正会落盘的路径（同名冲突会被去重成 `xxx (2).ext`），
+        // 否则校验读到的是前一个文件的字节。
+        const manifestEntry = receivedFileManifestRef.current.markReceiving(
+          msg.payload.fileIndex,
+          normalizedPath,
+          msg.payload.fileSize,
+          msg.payload.fileType,
+        );
+        const persistedRelativePath = manifestEntry?.relativePath ?? normalizedPath;
         // 续传前先验证磁盘上已有的前缀，避免把新数据接在损坏/截断的旧数据后面。
+        // 读不到（句柄失效 / 文件不存在）同样按「前不可信」处理：宁可整文件重收，
+        // 也不能把缺失前缀当作已通过校验后继续写。
         const verdict = await verifyPersistedPrefix({
           prefixLength: resumeOffset,
           expectedCrc32: msg.payload.prefixCrc32,
-          readRange: (start, end) => readPersistedFileRange(normalizedPath, start, end),
-        }).catch(() => 'skipped' as const);
+          readRange: (start, end) => readPersistedFileRange(persistedRelativePath, start, end),
+        }).catch(() => 'unreadable' as const);
         if (verdict === 'unreadable') {
-          logDebug('warn', 'resume prefix cannot be verified, continuing', { fileIndex: msg.payload.fileIndex });
+          logDebug('warn', 'resume prefix cannot be verified, restarting the file', { fileIndex: msg.payload.fileIndex });
         }
-        if (verdict === 'mismatch') {
-          markSessionEvent(connectTelemetryRef.current, 'resume_prefix_mismatch', { fileIndex: msg.payload.fileIndex });
+        if (verdict === 'mismatch' || verdict === 'unreadable') {
+          markSessionEvent(connectTelemetryRef.current, 'resume_prefix_mismatch', {
+            fileIndex: msg.payload.fileIndex,
+            reason: verdict,
+          });
           if (onNotification) {
             onNotification('已落盘数据校验不一致，将从头重新接收该文件。', 'info');
           }
@@ -2864,6 +2889,25 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       const checkpointResume = resumeCheckpointRef.current;
       if (checkpointResume && checkpointResume.metadataFingerprint === metadataResumeFingerprintRef.current) {
         // 刷新/重新进入后的续传：不发 ACCEPT_TRANSFER，改由协调器按检查点偏移发 RESUME_REQUEST。
+        // 刷新发生在多文件传输的后续文件时，前面那些文件已经落盘完成，但内存里的
+        // 完成集合是空的：不补回来，发送端的信用基线（前面文件大小 + 本文件偏移）
+        // 会远高于我们上报的进度，信用窗口补不满、传输卡死，最终落盘数也校验不过。
+        restoreCompletedFilesForResume(
+          {
+            checkpointFileIndex: checkpointResume.fileIndex,
+            files: metadataRef.current?.files ?? [],
+            markCompleted: (fileIndex, fileSize, directSaved) => {
+              completedFileIndicesRef.current.add(fileIndex);
+              receivedFileManifestRef.current.markCompleted({
+                fileIndex,
+                bytesReceived: fileSize,
+                bytesPersisted: fileSize,
+                ...(directSaved ? { saveState: 'direct-saved' as const } : {}),
+              });
+            },
+          },
+          { directSaved: multiFileSaveModeRef.current === 'directory-direct' },
+        );
         currentFileIndexRef.current = checkpointResume.fileIndex;
         setState(TransferState.TRANSFERRING);
         setReconnectAttempt(0);

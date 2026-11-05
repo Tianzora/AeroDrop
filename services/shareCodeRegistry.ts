@@ -14,6 +14,8 @@ export const SHARE_CODE_MAX_TOKEN_LENGTH = 256;
 export const SHARE_CODE_HASH_ALGORITHM = 'HMAC-SHA-256';
 export const SHARE_CODE_TAKEN_BODY = { error: 'code already in use' } as const;
 
+export const SHARE_CODE_REBIND_REJECTED_BODY = { error: 'peer id already registered' } as const;
+
 // 旧版 4 位口令形状的 peerId：已不再支持，仅用于给出明确的拒绝理由。
 export const LEGACY_SHARE_PEER_ID_PATTERN = /^aerodrop-\d{4}$/;
 // 新 peerId：UUID 或 runtime 默认的 peer-<uuid>，只允许 URL 安全字符。
@@ -41,7 +43,9 @@ export type ValidatedShareCodeCreatePayload =
 
 export type ShareCodeAllocationResult =
   | { status: 'ok'; record: ShareCodeRecord }
-  | { status: 'taken' };
+  | { status: 'taken' }
+  // 客户端持有的 peerId 已被别的 secret 绑定：拒绝覆盖，避免知道口令的人把码劫走。
+  | { status: 'rebind-rejected' };
 
 const encoder = new TextEncoder();
 

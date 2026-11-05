@@ -91,3 +91,35 @@ test('every chunk shares one transfer id and stays inside the message budget', (
     );
   }
 });
+
+test('budgets chunks by encoded wire bytes, not code units', () => {
+  const encoder = new TextEncoder();
+  // 多字节 + 需要转义的字符：中文 3 字节/字，引号与反斜杠转义后 2 字节。
+  const metadata: FileMetadata = {
+    files: Array.from({ length: 2500 }, (_, index) => ({
+      name: `季度财务报表-第${index}版-"最终"\确认.xlsx`,
+      size: 1024,
+      type: 'application/vnd.ms-excel',
+      lastModified: 0,
+      fingerprint: `fp-${index}`,
+    })),
+    totalSize: 2500 * 1024,
+    protocolVersion: 4,
+  };
+
+  const sent = collectMetadataMessages(metadata);
+  assert.ok(sent.length > 1, 'expected chunked metadata');
+
+  const maxWireBytes = Math.max(
+    ...sent.map((message) => encoder.encode(JSON.stringify(message)).length),
+  );
+  assert.ok(
+    maxWireBytes <= METADATA_CHUNKING.MAX_MESSAGE_BYTES,
+    `wire size ${maxWireBytes} exceeds budget ${METADATA_CHUNKING.MAX_MESSAGE_BYTES}`,
+  );
+
+  const joined = sent
+    .map((message) => (message.type === 'METADATA_CHUNK' ? message.payload.data : ''))
+    .join('');
+  assert.deepEqual(JSON.parse(joined), metadata);
+});
