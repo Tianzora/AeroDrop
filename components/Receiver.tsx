@@ -1160,9 +1160,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     const file = meta.files?.[fileIndex];
     if (!file || completedFileIndicesRef.current.has(fileIndex)) return;
     // 只有「刷新后还能重新打开成文件前缀」的字节才配写进检查点：
-    // 内存 blob / StreamSaver 模式在刷新后就没了，按他们的进度续传会把缺掉的前缀
-    // 当成「未验证」继续写，最终产出一个内容损坏的文件。
-    const recoverable = receiveStreamingWriter.isStreaming() || isIndexedDbBufferingRef.current;
+    // 内存 blob / StreamSaver 模式在刷新后就没了；IndexedDB 缓冲虽然数据还在，
+    // 但刷新后既恢复不了 chunk 序号也重开不了写入器，续传同样会停住。
+    const recoverable = receiveStreamingWriter.isStreaming();
     if (!recoverable) {
       if (lastCheckpointWriteRef.current.bytes !== 0) {
         lastCheckpointWriteRef.current = { bytes: 0, at: 0 };

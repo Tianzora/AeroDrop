@@ -977,6 +977,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               peerId: current.peerId,
               requestedCode: current.code,
               ttlSeconds: 86_400,
+              secret: current.secret,
             }).catch(() => {});
           }, 30 * 60 * 1000);
         }

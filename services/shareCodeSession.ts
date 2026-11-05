@@ -56,12 +56,14 @@ export const requestShareCode = async (input: {
   requestedCode?: string;
   /** 可选有效期（秒），服务端限制 60..86400；不传按 1 小时。 */
   ttlSeconds?: number;
+  /** 重新登记/续期时复用已有 secret，保持 peerId 与 HMAC 的绑定不变。 */
+  secret?: string;
 }): Promise<ShareCodeRequestResult> => {
   if (input.requestedCode && !isSixDigits(input.requestedCode)) {
     return { status: 'failed' };
   }
 
-  const secret = createShareSecret();
+  const secret = input.secret && input.secret.length >= 16 ? input.secret : createShareSecret();
   const secretHash = await computeShareSecretHash(secret, input.peerId);
 
   const hooks = getAeroDropE2EHooks();
