@@ -109,43 +109,25 @@ export const PWAInstallPrompt: React.FC = () => {
   if (!showPrompt) return null;
 
   return (
-    <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-4 md:w-96 z-50 animate-slide-up">
-      <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 p-4 relative overflow-hidden">
-
-        <button
-          onClick={dismissPrompt}
-          className="absolute top-2 right-2 p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
-        >
+    <div className="fixed bottom-4 left-4 right-4 z-50 sm:left-auto sm:right-4 sm:w-96">
+      <div className="relative overflow-hidden rounded-[14px] border border-border bg-raised p-4 shadow-[var(--shadow-2)] motion-rise">
+        <button onClick={dismissPrompt} aria-label="关闭" className="absolute right-2 top-2 rounded-full p-1 text-subtle hover:bg-sunken hover:text-text">
           <X size={16} />
         </button>
-
         <div className="flex gap-4">
-          <div className="bg-brand-100 dark:bg-brand-900/30 rounded-xl p-3 h-fit shrink-0">
-            <Download size={24} className="text-brand-600 dark:text-brand-400" />
+          <div className="h-fit shrink-0 rounded-[10px] bg-accent/10 p-3">
+            <Download size={24} className="text-accent" />
           </div>
-
           <div className="flex-1">
-            <h3 className="font-bold text-slate-900 dark:text-white mb-1">
-              安装 AeroDrop
-            </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mb-3 leading-relaxed">
-              像原生应用一样使用，支持离线访问和全屏体验。
-            </p>
-
+            <h3 className="mb-1 text-[15px] font-bold text-ink">安装 AeroDrop</h3>
+            <p className="mb-3 text-[12px] leading-relaxed text-muted">像原生应用一样使用，支持离线访问和全屏体验。</p>
             {isIOS ? (
-              <div className="bg-slate-50 dark:bg-slate-900/50 rounded-lg p-3 text-xs text-slate-600 dark:text-slate-300 border border-slate-100 dark:border-slate-700/50">
-                <div className="flex items-center gap-2 mb-2">
-                  1. 点击浏览器底部的 <Share size={14} className="inline text-blue-500" /> 分享按钮
-                </div>
-                <div className="flex items-center gap-2">
-                  2. 选择 <PlusSquare size={14} className="inline text-slate-500" /> "添加到主屏幕"
-                </div>
+              <div className="rounded-[10px] border border-border bg-sunken p-3 text-[12px] text-muted">
+                <div className="mb-2 flex items-center gap-2">1. 点击浏览器底部的 <Share size={14} className="inline text-accent" /> 分享按钮</div>
+                <div className="flex items-center gap-2">2. 选择 <PlusSquare size={14} className="inline text-muted" /> “添加到主屏幕”</div>
               </div>
             ) : (
-              <button
-                onClick={handleInstallClick}
-                className="w-full bg-brand-600 hover:bg-brand-700 text-white text-sm font-bold py-2 rounded-lg transition-colors shadow-sm active:scale-[0.98]"
-              >
+              <button onClick={handleInstallClick} className="w-full rounded-[8px] bg-accent py-2 text-[13px] font-bold text-accent-contrast shadow-sm transition-colors hover:bg-[#C94815] active:scale-[0.98]">
                 立即安装
               </button>
             )}

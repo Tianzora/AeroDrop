@@ -73,13 +73,13 @@ export class ErrorBoundary extends Component<Props, State> {
             <div className="flex gap-3 justify-center">
               <button
                 onClick={this.handleReset}
-                className="px-5 py-2.5 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-lg font-medium hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
+                className="px-5 py-2.5 bg-sunken text-text rounded-[10px] font-medium hover:bg-border transition-colors"
               >
                 重试
               </button>
               <button
                 onClick={this.handleReload}
-                className="px-5 py-2.5 bg-brand-600 text-white rounded-lg font-medium hover:bg-brand-700 transition-colors flex items-center gap-2"
+                className="px-5 py-2.5 bg-accent text-accent-contrast rounded-[10px] font-medium hover:bg-[#C94815] transition-colors flex items-center gap-2"
               >
                 <RefreshCw size={16} />
                 刷新页面

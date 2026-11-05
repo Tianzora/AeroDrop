@@ -1,10 +1,12 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
 import { Sender } from './components/Sender';
 import { Receiver } from './components/Receiver';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { Share, DownloadCloud, Bell, Monitor, Package, ShieldAlert, X } from 'lucide-react';
+import { ShieldAlert, X } from 'lucide-react';
 import { ScreenShare } from './components/ScreenShare';
-import { GradientText } from './components/GradientText';
+import { TopBar } from './components/layout/TopBar';
+import { AppShell } from './components/layout/AppShell';
+const LazyToaster = lazy(() => import('./components/ui/sonner').then((m) => ({ default: m.Toaster })));
 import { AppNotification } from './types';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 import { getInitialDeviceName } from './services/deviceName';
@@ -327,200 +329,95 @@ const App: React.FC = () => {
     }, 4000);
   };
 
+  const seenToastIds = useRef<Set<string>>(new Set());
+  useEffect(() => {
+    notifications.forEach((n) => {
+      if (seenToastIds.current.has(n.id)) return;
+      seenToastIds.current.add(n.id);
+      import('sonner').then(({ toast }) => toast[n.type](n.message));
+    });
+  }, [notifications]);
+
+
   return (
-    <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-950 flex flex-col transition-colors duration-300 relative overflow-hidden">
-      {swUpdateReady && (
-        <div className="fixed top-4 left-4 right-4 md:left-auto md:right-4 z-50 pointer-events-auto">
-          <div className="flex items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50/95 px-4 py-3 text-blue-900 shadow-lg backdrop-blur dark:border-blue-900 dark:bg-slate-900/95 dark:text-blue-200">
-            <p className="text-sm font-medium">发现新版本，建议刷新以避免新旧版本混用导致连接异常。</p>
-            <button
-              onClick={applySwUpdate}
-              className="shrink-0 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-70"
-              disabled={isApplyingSwUpdate}
-            >
-              {isApplyingSwUpdate ? '更新中...' : '立即刷新'}
-            </button>
-          </div>
-        </div>
-      )}
-
-      <div
-        className="fixed inset-0 pointer-events-none z-0 transition-opacity duration-700"
-        style={{
-          background: `radial-gradient(circle 600px at var(--mouse-x, 50%) var(--mouse-y, 50%), rgba(100, 150, 255, 0.15), transparent 80%)`,
-          filter: 'blur(80px)',
-        }}
-      />
-
-      <div className="fixed top-20 left-4 right-4 md:left-auto md:right-4 z-50 flex flex-col gap-2 pointer-events-none">
-        {notifications.map(n => (
-          <div key={n.id} className={`pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border animate-pop-in ${
-            n.type === 'success' ? 'bg-white dark:bg-slate-800 border-green-200 dark:border-green-900 text-slate-800 dark:text-slate-100' : 
-            n.type === 'error' ? 'bg-red-50 dark:bg-slate-800 border-red-200 dark:border-red-900 text-red-800 dark:text-red-300' : 
-            'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100'
-          }`}>
-            <Bell size={16} className={n.type === 'success' ? 'text-green-500' : n.type === 'error' ? 'text-red-500' : 'text-blue-500'} />
-            <span className="text-sm font-medium">{n.message}</span>
-          </div>
-        ))}
-      </div>
-
-      <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-20 transition-colors duration-300">
-        <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-14 md:h-16 flex items-center justify-between">
-          <div className="flex items-center gap-3 cursor-pointer" onClick={() => setMode('send')}>
-            <div className="bg-brand-600 p-1.5 md:p-2 rounded-[26.5%] text-white shadow-sm">
-              <Package size={20} className="md:w-6 md:h-6" />
-            </div>
-            <div className="flex items-baseline gap-2">
-              <h1 className="text-xl md:text-2xl font-bold text-slate-900 dark:text-white tracking-tighter">AeroDrop</h1>
-              <GradientText
-                colors={["#2563eb", "#60a5fa", "#4f46e5", "#2563eb"]}
-                animationSpeed={8}
-                className="text-[10px] md:text-xs font-bold tracking-tight opacity-90 pb-0.5"
-              >
-                @Tianzora
-              </GradientText>
-            </div>
-          </div>
-
-          <div className="flex items-center gap-2">
-            {showRiskBanner && (
+    <AppShell
+      topBar={
+        <TopBar
+          mode={mode}
+          onModeChange={setMode}
+          onBrandClick={() => setMode('send')}
+          banner={
+            showRiskBanner ? (
               <>
-                {/* Desktop Badge */}
-                <div className="hidden sm:flex items-center gap-2 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 rounded-full px-3 py-1.5 animate-slide-up">
-                  <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-                  <span className="text-xs font-medium text-amber-700 dark:text-amber-300">
-                    检测到代理网络,点对点传输和屏幕共享可能失效,建议关闭代理
-                  </span>
-                  <button
-                    onClick={dismissRiskBanner}
-                    className="ml-1 p-0.5 rounded-full hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400 transition-colors"
-                    aria-label="关闭警告"
-                  >
+                <div className="hidden items-center gap-2 rounded-full border border-warning/30 bg-warning/10 px-3 py-1.5 sm:flex">
+                  <ShieldAlert className="h-4 w-4 text-warning" />
+                  <span className="text-[12px] font-medium text-warning">代理网络可能影响 P2P 传输与屏幕共享，建议关闭代理</span>
+                  <button onClick={dismissRiskBanner} aria-label="关闭警告" className="ml-1 rounded-full p-0.5 text-warning hover:bg-warning/15">
                     <X size={14} />
                   </button>
                 </div>
-
-                {/* Mobile Icon Button */}
                 <button
-                  className={`sm:hidden p-2 rounded-full transition-colors relative ${
-                    isRiskBannerExpanded
-                      ? 'bg-amber-100 dark:bg-amber-800/50 text-amber-600 dark:text-amber-400'
-                      : 'text-amber-500 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30'
-                  }`}
+                  type="button"
                   onClick={() => setIsRiskBannerExpanded(!isRiskBannerExpanded)}
                   aria-label="查看网络警告"
+                  className="relative rounded-full p-2 text-warning hover:bg-warning/10 sm:hidden"
                 >
-                  <ShieldAlert className="w-5 h-5" />
-                  {!isRiskBannerExpanded && (
-                    <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full ring-2 ring-white dark:ring-slate-900"></span>
-                  )}
+                  <ShieldAlert className="h-5 w-5" />
+                  {!isRiskBannerExpanded && <span className="absolute right-1.5 top-1.5 h-2 w-2 rounded-full bg-danger ring-2 ring-surface" />}
                 </button>
               </>
-            )}
-          </div>
-        </div>
-      </header>
-
-      {/* Mobile only banner - Expandable */}
+            ) : null
+          }
+        />
+      }
+      footer={
+        <footer className="mt-10 text-center text-[12px] text-subtle">
+          Powered by WebRTC · 数据直接在设备间点对点传输，不经过云端存储。
+        </footer>
+      }
+      overlays={
+        <>
+          <Suspense fallback={null}><LazyToaster /></Suspense>
+          {swUpdateReady && (
+            <div className="fixed inset-x-4 top-4 z-50 sm:left-auto sm:right-4 sm:w-96">
+              <div className="flex items-center justify-between gap-3 rounded-[14px] border border-info/30 bg-raised px-4 py-3 shadow-[var(--shadow-2)]">
+                <p className="text-[13px] font-medium text-text">发现新版本，刷新以避免新旧版本混用导致连接异常。</p>
+                <button
+                  onClick={applySwUpdate}
+                  disabled={isApplyingSwUpdate}
+                  className="shrink-0 rounded-[8px] bg-accent px-3 py-1.5 text-[12px] font-semibold text-accent-contrast hover:bg-[#C94815] disabled:cursor-not-allowed disabled:opacity-70"
+                >
+                  {isApplyingSwUpdate ? '更新中…' : '立即刷新'}
+                </button>
+              </div>
+            </div>
+          )}
+          <PWAInstallPrompt />
+        </>
+      }
+    >
       {showRiskBanner && isRiskBannerExpanded && (
-        <div className="sm:hidden bg-amber-50 dark:bg-amber-900/30 border-b border-amber-200 dark:border-amber-800 px-4 py-3 flex items-start gap-3 animate-slide-down relative z-10 shadow-sm">
-          <ShieldAlert className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+        <div className="mb-4 flex items-start gap-3 rounded-[12px] border border-warning/30 bg-warning/10 px-4 py-3 sm:hidden">
+          <ShieldAlert className="mt-0.5 h-5 w-5 shrink-0 text-warning" />
           <div className="flex-1">
-             <p className="text-xs font-medium text-amber-800 dark:text-amber-200 mb-1">
-                网络环境受限
-             </p>
-              <p className="text-xs text-amber-700/80 dark:text-amber-300/80 leading-relaxed">
-                 检测到当前网络可能限制 P2P 打洞（如代理、移动网络或跨境链路），系统会优先尝试更稳的连接方式。
-              </p>
-           </div>
-          <button
-            onClick={() => {
-              dismissRiskBanner();
-            }}
-            className="p-1 -mr-1 -mt-1 rounded-full hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400"
-          >
+            <p className="mb-1 text-[13px] font-semibold text-warning">网络环境受限</p>
+            <p className="text-[12px] leading-relaxed text-warning/90">
+              检测到当前网络可能限制 P2P 打洞（如代理、移动网络或跨境链路），系统会优先尝试更稳的连接方式。
+            </p>
+          </div>
+          <button onClick={dismissRiskBanner} aria-label="关闭警告" className="-mr-1 -mt-1 rounded-full p-1 text-warning hover:bg-warning/15">
             <X size={16} />
           </button>
         </div>
       )}
-
-      <main className="flex-1 flex flex-col items-center justify-start pt-4 md:pt-8 pb-8 px-3 md:px-4 w-full max-w-5xl mx-auto overflow-hidden">
-
-        <div className="w-full max-w-xl mb-8 relative z-10">
-            <div className="bg-white dark:bg-slate-900 p-1.5 rounded-full grid grid-cols-3 relative transition-all duration-300 shadow-[0_12px_30px_rgba(0,0,0,0.08)] border border-slate-50 dark:border-slate-800">
-              <div
-                  className="absolute top-1.5 left-1.5 bottom-1.5 w-[calc((100%-0.75rem)/3)] bg-brand-600 dark:bg-brand-500 rounded-full shadow-[inset_2px_2px_6px_rgba(0,0,0,0.2)]"
-                  style={{
-                    transform: `translateX(${mode === 'send' ? '0%' : mode === 'receive' ? '100%' : '200%'})`,
-                    transition: 'transform 300ms cubic-bezier(0.25, 0.8, 0.25, 1)'
-                  }}
-              ></div>
-
-              <button
-                onClick={() => setMode('send')}
-                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-all duration-300 whitespace-nowrap ${
-                  mode === 'send'
-                    ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:scale-105'
-                }`}
-              >
-                <Share size={18} className={`transition-transform duration-300 ${mode === 'send' ? 'scale-110' : ''}`} />
-                发送
-              </button>
-              <button
-                onClick={() => setMode('receive')}
-                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-all duration-300 whitespace-nowrap ${
-                  mode === 'receive'
-                    ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:scale-105'
-                }`}
-              >
-                <DownloadCloud size={18} className={`transition-transform duration-300 ${mode === 'receive' ? 'scale-110' : ''}`} />
-                接收
-              </button>
-              <button
-                onClick={() => setMode('screen')}
-                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-all duration-300 whitespace-nowrap ${
-                  mode === 'screen'
-                    ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:scale-105'
-                }`}
-              >
-                <Monitor size={18} className={`transition-transform duration-300 ${mode === 'screen' ? 'scale-110' : ''}`} />
-                共享
-              </button>
-            </div>
-        </div>
-
-        <div className="w-full flex-1 flex flex-col perspective-[2000px]">
-          <ErrorBoundary>
-            {mode === 'send' && (
-              <div className="block animate-flip-in h-full transform-style-3d">
-                <Sender onNotification={addNotification} deviceName={deviceName} />
-              </div>
-            )}
-            {mode === 'receive' && (
-              <div className="block animate-flip-in h-full transform-style-3d">
-                <Receiver initialCode={initialCode} onNotification={addNotification} deviceName={deviceName} />
-              </div>
-            )}
-            {mode === 'screen' && (
-              <div className="block animate-flip-in h-full transform-style-3d">
-                <ScreenShare initialViewId={initialViewId} onNotification={addNotification} />
-              </div>
-            )}
-          </ErrorBoundary>
-        </div>
-        
-        <div className="mt-8 text-center max-w-md mx-auto space-y-2 pb-4 md:pb-0">
-          <p className="text-[10px] md:text-xs text-slate-400 dark:text-slate-600">
-            Powered by WebRTC. 数据直接在设备间点对点传输，不经过云端存储。
-          </p>
-        </div>
-      </main>
-      <PWAInstallPrompt />
-    </div>
+      <div className="flex w-full flex-1 flex-col">
+        <ErrorBoundary>
+          {mode === 'send' && <Sender onNotification={addNotification} deviceName={deviceName} />}
+          {mode === 'receive' && <Receiver initialCode={initialCode} onNotification={addNotification} deviceName={deviceName} />}
+          {mode === 'screen' && <ScreenShare initialViewId={initialViewId} onNotification={addNotification} />}
+        </ErrorBoundary>
+      </div>
+    </AppShell>
   );
 };
 
