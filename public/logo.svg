@@ -1,9 +1,9 @@
 <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512">
-  <!-- Background: brand-600 (#2563eb) with rounded corners (26.5% of 512px ≈ 136px) -->
-  <rect width="512" height="512" rx="136" fill="#2563eb" />
+  <!-- Background: accent (#2E5D4B) with rounded corners (26.5% of 512px ≈ 136px) -->
+  <rect width="512" height="512" rx="136" fill="#2E5D4B" />
 
   <!-- Icon: Lucide Package, scaled and centered, white stroke -->
-  <g transform="translate(64, 64) scale(16)" stroke="white" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
+  <g transform="translate(64, 64) scale(16)" stroke="#F5F0E7" stroke-width="1.5" fill="none" stroke-linecap="round" stroke-linejoin="round">
     <path d="m16.5 9.4-9-5.19"/>
     <path d="M21 16V8a2 2 0 0 0-1-1.73l-7-4a2 2 0 0 0-2 0l-7 4A2 2 0 0 0 3 8v8a2 2 0 0 0 1 1.73l7 4a2 2 0 0 0 2 0l7-4A2 2 0 0 0 21 16z"/>
     <polyline points="3.27 6.96 12 12.01 20.73 6.96"/>
