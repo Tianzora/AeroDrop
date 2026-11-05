@@ -1,5 +1,4 @@
 import React, { useState, useEffect, useRef, Suspense, lazy } from 'react';
-import { flushSync } from 'react-dom';
 import { Sender } from './components/Sender';
 import { Receiver } from './components/Receiver';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -60,39 +59,8 @@ const NOTIFICATION_DEDUPE_WINDOW_MS = 1500;
 const App: React.FC = () => {
   const [initialRoute] = useState<InitialRouteState>(() => getInitialRouteState());
   const [mode, setMode] = useState<Mode>(initialRoute.mode);
-  const stageRef = useRef<HTMLDivElement>(null);
   const changeMode = (next: Mode) => {
-    if (next === mode) return;
-    const reduce = typeof window !== 'undefined' && window.matchMedia('(prefers-reduced-motion: reduce)').matches;
-    const wrap = stageRef.current;
-    const layer = wrap?.querySelector<HTMLElement>('[data-mode-layer]');
-    const prevRects = new Map<string, DOMRect>();
-    if (!reduce && wrap && layer) {
-      layer.querySelectorAll<HTMLElement>('[data-morph]').forEach((el) => {
-        const k = el.getAttribute('data-morph');
-        if (k) prevRects.set(k, el.getBoundingClientRect());
-      });
-    }
-    flushSync(() => setMode(next));
-    if (!reduce && prevRects.size) {
-      const nl = wrap?.querySelector<HTMLElement>('[data-mode-layer]');
-      nl?.querySelectorAll<HTMLElement>('[data-morph]').forEach((el) => {
-        const k = el.getAttribute('data-morph');
-        const prev = k ? prevRects.get(k) : undefined;
-        if (!prev) return;
-        const r = el.getBoundingClientRect();
-        const dx = (prev.left + prev.width / 2) - (r.left + r.width / 2);
-        const dy = prev.top - r.top;
-        if (Math.abs(dx) < 1 && Math.abs(dy) < 1) return;
-        const frames = k === 'title'
-          ? [
-              { transform: `translate(${dx}px, ${dy}px) scale(${prev.height / r.height})`, transformOrigin: 'center top' },
-              { transform: 'none', transformOrigin: 'center top' },
-            ]
-          : [{ transform: `translate(${dx}px, ${dy}px)` }, { transform: 'none' }];
-        el.animate(frames, { duration: 480, easing: 'cubic-bezier(.22,1,.36,1)', fill: 'both' });
-      });
-    }
+    if (next !== mode) setMode(next);
   };
   useEffect(() => {
     const map: Record<string, Mode> = { '1': 'send', '2': 'receive', '3': 'screen' };
@@ -431,7 +399,7 @@ const App: React.FC = () => {
       }
     >
       <div className="mb-8 flex justify-center"><ModeTabs mode={mode} onModeChange={changeMode} /></div>
-      <div ref={stageRef} className="relative flex w-full flex-1 flex-col" style={{ minHeight: 560 }}>
+      <div className="relative flex w-full flex-1 flex-col" style={{ minHeight: 560 }}>
         <div key={mode} data-mode-layer className="flex w-full flex-col">
         <ErrorBoundary>
           {mode === 'send' && <Sender onNotification={addNotification} deviceName={deviceName} />}

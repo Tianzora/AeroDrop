@@ -3,8 +3,7 @@ import { Play } from 'lucide-react';
 import { Button } from '../../ui/Button';
 
 export const ShareIdlePanel: React.FC<{ startScreenShare: () => void }> = ({ startScreenShare }) => (
-  <div className="flex flex-col items-center gap-5 pb-6 pt-2 text-center">
-    <Button size="lg" icon={<Play size={18} fill="currentColor" />} onClick={startScreenShare}>开始共享屏幕</Button>
-    <p className="text-[12px] text-subtle">共享内容点对点传输，不经过云端</p>
+  <div className="flex flex-col items-center pb-8 pt-6 text-center">
+    <Button data-morph="action" size="lg" icon={<Play size={18} fill="currentColor" />} onClick={startScreenShare}>开始共享屏幕</Button>
   </div>
 );

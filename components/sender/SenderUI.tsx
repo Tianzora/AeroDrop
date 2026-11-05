@@ -1,4 +1,5 @@
 import React from 'react';
+import { useMorphTransition } from '../../lib/useMorphTransition';
 import { TransferState, FileMetadata } from '../../types';
 import type { FileType } from '../../services/fileType';
 import { SenderIdlePanel } from './panels/SenderIdlePanel';
@@ -105,6 +106,8 @@ export const SenderUI: React.FC<SenderUIProps> = (props) => {
     panel = <SenderErrorPanel errorMsg={errorMsg} stopSharing={stopSharing} />;
   }
 
+  const rootRef = React.useRef<HTMLDivElement>(null);
+  useMorphTransition(rootRef);
   const title =
     state === TransferState.CONFIGURING ? '分享设置'
     : state === TransferState.WAITING_FOR_PEER || state === TransferState.PEER_CONNECTED ? '取件口令'
@@ -115,7 +118,7 @@ export const SenderUI: React.FC<SenderUIProps> = (props) => {
     : '发送文件';
 
   return (
-    <div className="mx-auto flex min-h-[560px] w-full max-w-[760px] flex-col justify-center">
+    <div ref={rootRef} className="mx-auto flex min-h-[560px] w-full max-w-[760px] flex-col justify-center">
       {state !== TransferState.IDLE && (
         <header className="mb-8 text-center">
           <h1 data-morph="title" className="font-serif font-normal text-[clamp(28px,3.6vw,40px)] leading-[1.1] tracking-[-.02em] text-ink">{title}</h1>

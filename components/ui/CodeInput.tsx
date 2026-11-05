@@ -19,7 +19,7 @@ export interface CodeInputProps {
 export const CodeInput: React.FC<CodeInputProps> = ({ value, onChange, inputRef, isMobile, length = 6, disabled, invalid, autoFocus }) => {
   const digits = Array.from({ length }, (_, i) => value[i] ?? '');
   return (
-    <div className={cn('relative mx-auto w-full max-w-[380px]', invalid && 'motion-shake')}>
+    <div data-morph="action" className={cn('relative mx-auto w-full max-w-[380px]', invalid && 'motion-shake')}>
       <div className="flex justify-center gap-2 pointer-events-none" aria-hidden>
         {digits.map((d, i) => (
           <div

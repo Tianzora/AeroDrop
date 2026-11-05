@@ -1,4 +1,5 @@
 import React from 'react';
+import { useMorphTransition } from '../../lib/useMorphTransition';
 import { Monitor, Eye } from 'lucide-react';
 import { ShareConnectingPanel } from './panels/ShareConnectingPanel';
 import { ViewerPanel } from './panels/ViewerPanel';
@@ -44,6 +45,8 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = (props) => {
     isPeerReady, viewerCount, qualityLevel, sharerVideoRef, changeScreenSource, startScreenShare, stopScreenShare,
   } = props;
 
+  const rootRef = React.useRef<HTMLDivElement>(null);
+  useMorphTransition(rootRef);
   const title = isViewing ? '正在观看屏幕' : isConnecting ? '正在连接…' : '屏幕共享';
   const isConnectFailed = Boolean(targetSharerId) && !isConnecting && !isViewing && !isSharing;
   const showTopError = Boolean(error) && !isConnectFailed;
@@ -69,7 +72,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = (props) => {
   }
 
   return (
-    <div className={`mx-auto flex min-h-[560px] w-full flex-col ${viewState === 'idle' ? 'justify-start pt-[59px]' : 'justify-center'} ${isSharing || isViewing ? 'max-w-[960px]' : 'max-w-[880px]'}`}>
+    <div ref={rootRef} className={`mx-auto flex min-h-[560px] w-full flex-col ${viewState === 'idle' ? 'justify-start pt-[59px]' : 'justify-center'} ${isSharing || isViewing ? 'max-w-[960px]' : 'max-w-[880px]'}`}>
       <header className="mb-8 text-center">
         <h1 data-morph="title" className="font-serif font-normal text-[clamp(28px,3.6vw,40px)] leading-[1.1] tracking-[-.02em] text-ink">{title}</h1>
         {viewState === 'idle' && (
