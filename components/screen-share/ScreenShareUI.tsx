@@ -45,7 +45,6 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = (props) => {
   } = props;
 
   const title = isViewing ? '正在观看屏幕' : isConnecting ? '正在连接…' : '屏幕共享';
-  const subtitle = isViewing || isConnecting ? '实时观看对方共享的屏幕内容' : '与其他设备实时共享您的屏幕内容';
   const isConnectFailed = Boolean(targetSharerId) && !isConnecting && !isViewing && !isSharing;
   const showTopError = Boolean(error) && !isConnectFailed;
   const viewState = isConnecting ? 'connecting' : isViewing ? 'viewing' : error && isConnectFailed ? 'error' : isSharing ? 'sharing' : 'idle';
@@ -71,8 +70,8 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = (props) => {
 
   return (
     <div className="mx-auto flex min-h-[480px] w-full max-w-[880px] flex-col justify-center">
-      <header className="mb-9 text-center">
-        <h1 className="font-serif font-normal text-[clamp(30px,4vw,44px)] leading-[1.08] tracking-[-.02em] text-ink">{title}</h1>
+      <header className="mb-8 text-center">
+        <h1 className="font-serif font-normal text-[clamp(28px,3.6vw,40px)] leading-[1.1] tracking-[-.02em] text-ink">{title}</h1>
       </header>
       {showTopError && <ShareErrorBanner error={error as string} />}
       <div key={viewState} className="motion-rise w-full">{body}</div>

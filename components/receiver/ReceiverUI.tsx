@@ -81,10 +81,17 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = (props) => {
     body = <ReceiverDonePanel onReset={props.onReset} />;
   }
 
+  const title =
+    state === TransferState.COMPLETED ? '接收完成'
+    : state === TransferState.ERROR ? '出错了'
+    : state === TransferState.WAITING_FOR_PEER ? '正在连接'
+    : (state === TransferState.PEER_CONNECTED || state === TransferState.TRANSFERRING) ? '正在接收'
+    : '接收文件';
+
   return (
     <div className="mx-auto flex min-h-[540px] w-full max-w-[620px] flex-col justify-center">
-      <header className="mb-9 text-center">
-        <h1 className="font-serif font-normal text-[clamp(30px,4vw,44px)] leading-[1.08] tracking-[-.02em] text-ink">接收文件</h1>
+      <header className="mb-8 text-center">
+        <h1 className="font-serif font-normal text-[clamp(28px,3.6vw,40px)] leading-[1.1] tracking-[-.02em] text-ink">{title}</h1>
         {state === TransferState.IDLE && (
           <p className="mt-4 text-[15px] leading-[1.7] text-muted">输入发送方给你的 6 位口令</p>
         )}

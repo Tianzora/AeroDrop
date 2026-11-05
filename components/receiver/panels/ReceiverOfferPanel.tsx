@@ -44,14 +44,14 @@ export const ReceiverOfferPanel: React.FC<ReceiverOfferPanelProps> = ({
 
       {isMultiFile && selectedFiles.length > 0 && (
         <div className="mt-4 overflow-hidden rounded-[4px] border border-border">
-          <button onClick={onToggleFileList} className="flex w-full items-center justify-between bg-sunken px-4 py-2.5 text-[13px] font-semibold text-muted hover:bg-border/40">
+          <button onClick={onToggleFileList} className="flex w-full items-center justify-between bg-sunken px-4 py-2.5 text-[13px] font-semibold text-muted transition-colors duration-200 hover:bg-border/40">
             <span>文件列表 ({selectedFiles.length})</span>
             {showFileList ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
           </button>
           {showFileList && (
             <div className="max-h-56 overflow-y-auto border-t border-border p-1">
               {selectedFiles.map((file, i) => (
-                <div key={`${file.name}-${i}`} className="flex items-center justify-between gap-3 rounded-md px-3 py-2 text-[12px] hover:bg-sunken">
+                <div key={`${file.name}-${i}`} className="flex items-center justify-between gap-3 rounded-md px-3 py-2 text-[12px] transition-colors duration-200 hover:bg-sunken">
                   <div className="flex min-w-0 flex-1 items-center gap-2">
                     <FileTypeIcon type={file.fileType} size={14} className="shrink-0 text-subtle" />
                     <span className="truncate text-text">{file.name}</span>

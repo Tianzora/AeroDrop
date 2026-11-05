@@ -47,20 +47,20 @@ export const SenderConfigurePanel: React.FC<SenderConfigurePanelProps> = ({
             <p className="mt-0.5 text-[12px] text-muted">总大小 {formatFileSize(metadata.totalSize)}</p>
           </div>
         )}
-        <button onClick={stopSharing} aria-label="移除所选文件" className="rounded-full p-1.5 text-subtle hover:bg-sunken hover:text-danger">
+        <button onClick={stopSharing} aria-label="移除所选文件" className="rounded-full p-1.5 text-subtle transition-colors duration-200 hover:bg-sunken hover:text-danger">
           <X size={18} />
         </button>
       </div>
       {metadata.files.length > 1 && (
         <div className="mt-4 overflow-hidden rounded-[4px] border border-border">
-          <button onClick={onToggleFileList} className="flex w-full items-center justify-between bg-sunken px-4 py-2.5 text-[13px] font-semibold text-muted hover:bg-border/40">
+          <button onClick={onToggleFileList} className="flex w-full items-center justify-between bg-sunken px-4 py-2.5 text-[13px] font-semibold text-muted transition-colors duration-200 hover:bg-border/40">
             <span>文件列表 ({metadata.files.length})</span>
             {showFileList ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
           </button>
           {showFileList && (
             <div className="max-h-56 overflow-y-auto border-t border-border p-1">
               {selectedFiles.map((file, i) => (
-                <div key={i} className="flex items-center justify-between gap-3 rounded-md px-3 py-2 text-[12px] hover:bg-sunken">
+                <div key={i} className="flex items-center justify-between gap-3 rounded-md px-3 py-2 text-[12px] transition-colors duration-200 hover:bg-sunken">
                   <div className="flex min-w-0 flex-1 items-center gap-2">
                     <FileTypeIcon type={file.fileType} size={14} className="shrink-0 text-subtle" />
                     <span className="truncate text-text">{file.name}</span>
@@ -81,7 +81,7 @@ export const SenderConfigurePanel: React.FC<SenderConfigurePanelProps> = ({
             id="expiry-select"
             value={expiryOption}
             onChange={(e) => setExpiryOption(e.target.value)}
-            className="h-11 w-full rounded-[4px] border border-border bg-raised px-3 text-[16px] text-text focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 sm:text-sm"
+            className="h-11 w-full rounded-[6px] border border-border bg-raised px-3 text-[16px] text-text transition-colors duration-200 focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 sm:text-sm"
           >
             <option value="10m">10 分钟</option>
             <option value="1h">1 小时</option>

@@ -25,10 +25,10 @@ export const ShareActivePanel: React.FC<ShareActivePanelProps> = ({
         <p className="mb-2 text-center text-[12px] text-muted">将此链接分享给观看者</p>
         <div className="flex items-center justify-center gap-2">
           <a href={shareLink} target="_blank" rel="noopener noreferrer" className="max-w-[300px] truncate font-mono text-[13px] text-accent hover:underline" title={shareLink}>{shareLink}</a>
-          <button onClick={copyShareLink} aria-label="复制分享链接" title="复制分享链接" className="shrink-0 rounded-md p-2 text-accent hover:bg-accent/10">
+          <button onClick={copyShareLink} aria-label="复制分享链接" title="复制分享链接" className="shrink-0 rounded-md p-2 text-accent transition-colors duration-200 hover:bg-accent/10">
             {copied ? <Check size={18} className="text-success" /> : <Copy size={18} />}
           </button>
-          <a href={shareLink} target="_blank" rel="noopener noreferrer" aria-label="在新窗口打开" title="在新窗口打开" className="shrink-0 rounded-md p-2 text-accent hover:bg-accent/10">
+          <a href={shareLink} target="_blank" rel="noopener noreferrer" aria-label="在新窗口打开" title="在新窗口打开" className="shrink-0 rounded-md p-2 text-accent transition-colors duration-200 hover:bg-accent/10">
             <ExternalLink size={18} />
           </a>
         </div>
