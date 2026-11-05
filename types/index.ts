@@ -18,7 +18,6 @@ export interface FileInfo {
   size: number;
   type: string;
   lastModified: number;
-  preview?: string; 
   fingerprint?: string; 
 }
 
@@ -107,6 +106,10 @@ export interface FileStartPayload {
   fileName: string;
   fileSize: number;
   fileType: string;
+  /** 续传时的起始偏移（0 表示从头传）。 */
+  resumeOffset?: number;
+  /** 断点之前已落盘前缀的 CRC32（8 位十六进制），接收端据此校验磁盘数据。 */
+  prefixCrc32?: string;
 }
 
 export interface FileCompletePayload {
@@ -127,7 +130,16 @@ export interface ResumePayload {
   chunkIndex?: number;
 }
 
-export const P2P_PROTOCOL_VERSION = 3;
+// 4: METADATA 可以是分片（METADATA_CHUNK）发送，避免超过 SCTP 单消息上限。
+export const P2P_PROTOCOL_VERSION = 4;
+
+export interface MetadataChunkPayload {
+  transferId: string;
+  index: number;
+  total: number;
+  // 完整 metadata JSON 的一个片段，接收端按 index 拼接后再 JSON.parse。
+  data: string;
+}
 
 export interface AcceptTransferPayload {
   persistedOverallBytes: number;
@@ -184,6 +196,7 @@ export interface RouteAbortPayload {
 
 export type P2PMessageMap = {
   METADATA: FileMetadata;
+  METADATA_CHUNK: MetadataChunkPayload;
   FILE_START: FileStartPayload;
   FILE_CHUNK: ChunkPayload;
   FILE_COMPLETE: FileCompletePayload;
