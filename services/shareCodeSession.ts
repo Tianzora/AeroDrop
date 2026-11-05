@@ -54,6 +54,8 @@ const isSixDigits = (value: unknown): value is string =>
 export const requestShareCode = async (input: {
   peerId: string;
   requestedCode?: string;
+  /** 可选有效期（秒），服务端限制 60..86400；不传按 1 小时。 */
+  ttlSeconds?: number;
 }): Promise<ShareCodeRequestResult> => {
   if (input.requestedCode && !isSixDigits(input.requestedCode)) {
     return { status: 'failed' };
@@ -89,6 +91,7 @@ export const requestShareCode = async (input: {
         peerId: input.peerId,
         secretHash,
         ...(input.requestedCode ? { code: input.requestedCode } : {}),
+        ...(typeof input.ttlSeconds === 'number' ? { ttlSeconds: input.ttlSeconds } : {}),
       }),
       cache: 'no-store',
     });

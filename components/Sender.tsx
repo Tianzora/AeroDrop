@@ -113,6 +113,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const [expiryOption, setExpiryOption] = useState<string>('1h');
   // 当前分享的口令登记（结束分享时用它带凭证注销，避免码在 TTL 内继续可被抢占）。
   const shareRegistrationRef = useRef<{ code: string; peerId: string; secret: string } | null>(null);
+  const shareRenewalTimerRef = useRef<number | null>(null);
   const [remainingTime, setRemainingTime] = useState<string>('');
 
   const [copied, setCopied] = useState(false);
@@ -926,6 +927,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         previousRegistration && (!requestedCode || previousRegistration.code === requestedCode),
       );
 
+      // 口令有效期跟随用户选择（服务端上限 24h）；「永久」按上限登记并在分享期间自动续期。
+      const shareTtlSeconds = Math.min(
+        86_400,
+        Math.max(60, Math.round((expiryDuration ?? 86_400_000) / 1000)),
+      );
+
       let senderPeerId: string;
       let displayCode: string;
       let signalingToken: string;
@@ -935,7 +942,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         signalingToken = previousRegistration.secret;
       } else {
         senderPeerId = `peer-${crypto.randomUUID()}`;
-        const registration = await requestShareCode({ peerId: senderPeerId, requestedCode });
+        const registration = await requestShareCode({ peerId: senderPeerId, requestedCode, ttlSeconds: shareTtlSeconds });
 
         if (registration.status !== 'ok') {
           if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken)) return;
@@ -956,6 +963,23 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           peerId: senderPeerId,
           secret: registration.secret,
         };
+
+        if (expiryOption === 'never') {
+          if (shareRenewalTimerRef.current !== null) {
+            window.clearInterval(shareRenewalTimerRef.current);
+          }
+          // 同 peerId + 同 secret 的重新登记只是延长过期时间，不会换码。
+          shareRenewalTimerRef.current = window.setInterval(() => {
+            if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken)) return;
+            const current = shareRegistrationRef.current;
+            if (!current) return;
+            void requestShareCode({
+              peerId: current.peerId,
+              requestedCode: current.code,
+              ttlSeconds: 86_400,
+            }).catch(() => {});
+          }, 30 * 60 * 1000);
+        }
       }
 
       const signalingCode = displayCode;
@@ -1838,6 +1862,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   };
 
   const stopSharing = () => {
+    if (shareRenewalTimerRef.current !== null) {
+      window.clearInterval(shareRenewalTimerRef.current);
+      shareRenewalTimerRef.current = null;
+    }
     const registration = shareRegistrationRef.current;
     shareRegistrationRef.current = null;
     if (registration) {

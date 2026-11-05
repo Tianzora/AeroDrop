@@ -2887,7 +2887,18 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       stalledReconnectAttemptsRef.current = 0;
       stallRecoveryBaselineBytesRef.current = overallTransferredBytes;
       const checkpointResume = resumeCheckpointRef.current;
-      if (checkpointResume && checkpointResume.metadataFingerprint === metadataResumeFingerprintRef.current) {
+      // 多文件的检查点只在「目录直写」下可信：刷新后已完成的文件仍以真实文件形式存在。
+      // 归档 / 逐个保存模式下这些字节只存在于内存，续传等于承诺一个不存在的前缀，
+      // 此时宁可整批重新下载（文件索引 0 不受影响）。
+      const canResumeFromCheckpoint = Boolean(
+        checkpointResume &&
+          (checkpointResume.fileIndex === 0 || multiFileSaveModeRef.current === 'directory-direct'),
+      );
+      if (
+        checkpointResume &&
+        canResumeFromCheckpoint &&
+        checkpointResume.metadataFingerprint === metadataResumeFingerprintRef.current
+      ) {
         // 刷新/重新进入后的续传：不发 ACCEPT_TRANSFER，改由协调器按检查点偏移发 RESUME_REQUEST。
         // 刷新发生在多文件传输的后续文件时，前面那些文件已经落盘完成，但内存里的
         // 完成集合是空的：不补回来，发送端的信用基线（前面文件大小 + 本文件偏移）

@@ -193,6 +193,10 @@ const toWebSocketUrl = (base: string): string => {
   return `${window.location.protocol === 'https:' ? 'wss://' : 'ws://'}${base}`;
 };
 
+// 信令 URL 里的 token 等价于发送方凭证：只允许真正用于建连，日志/指标一律脱敏。
+const redactSignalingUrl = (url: string): string =>
+  url.replace(/([?&]token=)[^&]*/i, '$1<redacted>');
+
 const createSignalingUrl = (peerId: string, options: PeerOptions = {}): string => {
   const baseUrl = new URL(toWebSocketUrl(SIGNALING_BASE));
   const wsUrl = new URL(SIGNALING_PATH, baseUrl);
@@ -640,7 +644,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     }
     const url = createSignalingUrl(this.id, this.options);
     this.log('info', 'signaling_ws_connect_start', {
-      url,
+      url: redactSignalingUrl(url),
       signalingBase: SIGNALING_BASE,
       signalingPath: SIGNALING_PATH,
     });
@@ -649,7 +653,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       this.disconnected = false;
       this.reconnectAttempts = 0;
       this.startHeartbeat();
-      this.log('info', 'signaling_ws_open', { url });
+      this.log('info', 'signaling_ws_open', { url: redactSignalingUrl(url) });
     };
     this.websocket.onmessage = (event) => {
       this.handleSignalingMessage(event.data);

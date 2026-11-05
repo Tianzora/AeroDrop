@@ -6,6 +6,16 @@ export const SHARE_CODE_MIN_VALUE = 100000;
 export const SHARE_CODE_SPAN = 900000;
 export const SHARE_CODE_PATTERN = /^\d{6}$/;
 export const SHARE_CODE_TTL_MS = 60 * 60 * 1000;
+/** 发送方可以要求更长的有效期（10m / 1h / 1d），但服务端最多给 24 小时。 */
+export const SHARE_CODE_MIN_TTL_MS = 60 * 1000;
+export const SHARE_CODE_MAX_TTL_MS = 24 * 60 * 60 * 1000;
+
+export const normalizeShareCodeTtlMs = (ttlMs?: number | null): number => {
+  if (typeof ttlMs !== 'number' || !Number.isFinite(ttlMs)) {
+    return SHARE_CODE_TTL_MS;
+  }
+  return Math.min(SHARE_CODE_MAX_TTL_MS, Math.max(SHARE_CODE_MIN_TTL_MS, Math.floor(ttlMs)));
+};
 export const SHARE_CODE_MAX_INSERT_ATTEMPTS = 8;
 export const SHARE_CODE_MAX_BODY_BYTES = 4096;
 export const SHARE_CODE_SECRET_HASH_PATTERN = /^[0-9a-f]{64}$/;
@@ -38,7 +48,7 @@ export type ShareCodeRegistrationDecision =
   | { allowed: false; reason: ShareCodeRegistrationReason };
 
 export type ValidatedShareCodeCreatePayload =
-  | { ok: true; peerId: string; secretHash: string; code: string | null }
+  | { ok: true; peerId: string; secretHash: string; code: string | null; ttlMs?: number }
   | { ok: false; error: string };
 
 export type ShareCodeAllocationResult =
@@ -111,11 +121,12 @@ export const createShareCodeRecord = (input: {
   peerId: string;
   secretHash: string;
   now: number;
+  ttlMs?: number;
 }): ShareCodeRecord => ({
   code: input.code,
   peerId: input.peerId,
   secretHash: input.secretHash,
-  expiresAt: input.now + SHARE_CODE_TTL_MS,
+  expiresAt: input.now + normalizeShareCodeTtlMs(input.ttlMs),
 });
 
 export const isShareCodeRecordExpired = (record: ShareCodeRecord, now: number): boolean =>
@@ -148,7 +159,12 @@ export const validateShareCodeCreatePayload = (payload: unknown): ValidatedShare
     return { ok: false, error: 'Body must be a JSON object' };
   }
 
-  const { peerId, secretHash, code } = payload as { peerId?: unknown; secretHash?: unknown; code?: unknown };
+  const { peerId, secretHash, code, ttlSeconds } = payload as {
+    peerId?: unknown;
+    secretHash?: unknown;
+    code?: unknown;
+    ttlSeconds?: unknown;
+  };
   if (typeof peerId !== 'string' || !isValidSharePeerId(peerId.trim())) {
     return { ok: false, error: 'peerId must be a random 8-128 char [A-Za-z0-9_-] id' };
   }
@@ -159,11 +175,21 @@ export const validateShareCodeCreatePayload = (payload: unknown): ValidatedShare
     return { ok: false, error: 'code must be six digits' };
   }
 
+  if (ttlSeconds !== undefined && ttlSeconds !== null) {
+    if (typeof ttlSeconds !== 'number' || !Number.isFinite(ttlSeconds)) {
+      return { ok: false, error: 'ttlSeconds must be a number' };
+    }
+    if (ttlSeconds < SHARE_CODE_MIN_TTL_MS / 1000 || ttlSeconds > SHARE_CODE_MAX_TTL_MS / 1000) {
+      return { ok: false, error: 'ttlSeconds must be between 60 and 86400' };
+    }
+  }
+
   return {
     ok: true,
     peerId: peerId.trim(),
     secretHash: secretHash.toLowerCase(),
     code: normalizeShareCode(typeof code === 'string' ? code : null),
+    ...(typeof ttlSeconds === 'number' ? { ttlMs: Math.floor(ttlSeconds * 1000) } : {}),
   };
 };
 
@@ -177,6 +203,7 @@ export const allocateShareCode = (input: {
   secretHash: string;
   code?: string | null;
   now: number;
+  ttlMs?: number;
   tryInsert: (record: ShareCodeRecord) => boolean;
   nextInt?: (maxExclusive: number) => number;
   maxAttempts?: number;
@@ -190,6 +217,7 @@ export const allocateShareCode = (input: {
       peerId: input.peerId,
       secretHash: input.secretHash,
       now: input.now,
+      ttlMs: input.ttlMs,
     });
     return input.tryInsert(record) ? { status: 'ok', record } : { status: 'taken' };
   }
@@ -201,6 +229,7 @@ export const allocateShareCode = (input: {
       peerId: input.peerId,
       secretHash: input.secretHash,
       now: input.now,
+      ttlMs: input.ttlMs,
     });
     if (input.tryInsert(record)) return { status: 'ok', record };
   }
@@ -218,6 +247,7 @@ export const resolveShareCodeRegistration = async (input: {
   token?: string | null;
   now: number;
   findShareCode: (code: string) => ShareCodeRecord | null;
+  findShareCodeByPeerId?: (peerId: string) => ShareCodeRecord | null;
 }): Promise<ShareCodeRegistrationDecision> => {
   const peerId = input.peerId.trim();
   if (isLegacySharePeerId(peerId)) {
@@ -230,6 +260,12 @@ export const resolveShareCodeRegistration = async (input: {
   const hasCode = typeof input.code === 'string' && input.code.trim().length > 0;
   const hasToken = typeof input.token === 'string' && input.token.length > 0;
   if (!hasCode && !hasToken) {
+    // 无凭证注册只允许给「没有被分享口令绑定」的 id（接收方/观看端）。
+    // 否则任何拿到 6 位码的人都能查到发送方 peerId，抢在发送方重连前占住它。
+    const binding = input.findShareCodeByPeerId?.(peerId);
+    if (binding && !isShareCodeRecordExpired(binding, input.now)) {
+      return { allowed: false, reason: 'unauthorized' };
+    }
     return { allowed: true };
   }
 

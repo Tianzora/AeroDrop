@@ -340,3 +340,76 @@ test('rejects a revoke for an unknown code without revealing it is unknown', () 
     { allowed: false }
   );
 });
+
+test('honours the sender-selected TTL within the server cap', () => {
+  const now = 1_700_000_000_000;
+  const tenMinutes = createShareCodeRecord({ code: '123456', peerId: PEER_ID, secretHash: 'a'.repeat(64), now, ttlMs: 10 * 60 * 1000 });
+  assert.equal(tenMinutes.expiresAt, now + 10 * 60 * 1000);
+
+  const capped = createShareCodeRecord({ code: '123456', peerId: PEER_ID, secretHash: 'a'.repeat(64), now, ttlMs: 90 * 24 * 60 * 60 * 1000 });
+  assert.equal(capped.expiresAt, now + 24 * 60 * 60 * 1000);
+
+  const floor = createShareCodeRecord({ code: '123456', peerId: PEER_ID, secretHash: 'a'.repeat(64), now, ttlMs: 1 });
+  assert.equal(floor.expiresAt, now + 60 * 1000);
+
+  const fallback = createShareCodeRecord({ code: '123456', peerId: PEER_ID, secretHash: 'a'.repeat(64), now });
+  assert.equal(fallback.expiresAt, now + SHARE_CODE_TTL_MS);
+});
+
+test('validates ttlSeconds in the create payload', () => {
+  const base = { peerId: PEER_ID, secretHash: 'a'.repeat(64) };
+
+  const accepted = validateShareCodeCreatePayload({ ...base, ttlSeconds: 600 });
+  assert.equal(accepted.ok, true);
+  assert.equal(accepted.ok && accepted.ttlMs, 600_000);
+
+  assert.equal(validateShareCodeCreatePayload({ ...base, ttlSeconds: 30 }).ok, false);
+  assert.equal(validateShareCodeCreatePayload({ ...base, ttlSeconds: 90_000 }).ok, false);
+  assert.equal(validateShareCodeCreatePayload({ ...base, ttlSeconds: '1h' }).ok, false);
+  assert.equal(validateShareCodeCreatePayload(base).ok, true);
+});
+
+test('rejects credentialless registration for a peer id that is bound to a share code', async () => {
+  const now = 1_700_000_000_000;
+  const TOKEN = 'secret-value-0123456789';
+  const binding: ShareCodeRecord = {
+    code: '654321',
+    peerId: PEER_ID,
+    secretHash: await computeShareCodeSecretHash(TOKEN, PEER_ID),
+    expiresAt: now + 60_000,
+  };
+
+  const anonymous = await resolveShareCodeRegistration({
+    peerId: PEER_ID,
+    now,
+    findShareCode: () => null,
+    findShareCodeByPeerId: () => binding,
+  });
+  assert.deepEqual(anonymous, { allowed: false, reason: 'unauthorized' });
+
+  const unrelatedId = await resolveShareCodeRegistration({
+    peerId: 'aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee',
+    now,
+    findShareCode: () => null,
+    findShareCodeByPeerId: () => null,
+  });
+  assert.deepEqual(unrelatedId, { allowed: true });
+
+  const expiredBinding = await resolveShareCodeRegistration({
+    peerId: PEER_ID,
+    now,
+    findShareCode: () => null,
+    findShareCodeByPeerId: () => ({ ...binding, expiresAt: now - 1 }),
+  });
+  assert.deepEqual(expiredBinding, { allowed: true });
+
+  const withCredentials = await resolveShareCodeRegistration({
+    peerId: PEER_ID,
+    code: '654321',
+    token: TOKEN,
+    now,
+    findShareCode: () => binding,
+    findShareCodeByPeerId: () => binding,
+  });
+  assert.deepEqual(withCredentials, { allowed: true });
+});

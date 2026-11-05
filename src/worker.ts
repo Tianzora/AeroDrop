@@ -707,13 +707,42 @@ const readShareCodeBody = async (request: Request): Promise<ShareCodeBodyResult>
     return { ok: false, tooLarge: true };
   }
 
-  const text = await request.text();
-  if (text.length > SHARE_CODE_MAX_BODY_BYTES) {
-    return { ok: false, tooLarge: true };
+  // 没有 Content-Length 的分块上传也必须边读边限：先 request.text() 再判断长度
+  // 等于让调用方用超大 body 吃掉 Worker 内存。
+  if (!request.body) {
+    return { ok: false, tooLarge: false };
+  }
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      received += value.byteLength;
+      if (received > SHARE_CODE_MAX_BODY_BYTES) {
+        await reader.cancel().catch(() => {});
+        return { ok: false, tooLarge: true };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { ok: false, tooLarge: false };
+  } finally {
+    reader.releaseLock?.();
+  }
+
+  const bytes = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
   }
 
   try {
-    return { ok: true, tooLarge: false, value: JSON.parse(text) as unknown };
+    return { ok: true, tooLarge: false, value: JSON.parse(new TextDecoder().decode(bytes)) as unknown };
   } catch {
     return { ok: false, tooLarge: false };
   }
@@ -753,6 +782,7 @@ const handleShareCodeCreate = async (request: Request, env: Env): Promise<Respon
     peerId: validated.peerId,
     secretHash: validated.secretHash,
     ...(validated.code ? { code: validated.code } : {}),
+    ...(validated.ttlMs ? { ttlMs: validated.ttlMs } : {}),
   });
   if (storeResponse.status === 409) {
     return shareCodeJson(SHARE_CODE_TAKEN_BODY, 409);
@@ -979,6 +1009,7 @@ export class SignalingHub extends DurableObject {
       token: url.searchParams.get('token'),
       now: Date.now(),
       findShareCode: (candidate) => this.findActiveShareCode(candidate, Date.now()),
+      findShareCodeByPeerId: (candidate) => this.findActiveShareCodeByPeerId(candidate, Date.now()),
     });
     if (!registration.allowed) {
       const legacyPeerId = registration.reason === 'legacy-peer-id';
@@ -1207,7 +1238,8 @@ export class SignalingHub extends DurableObject {
     peerId: string,
     secretHash: string,
     requestedCode: string | null,
-    now: number
+    now: number,
+    ttlMs?: number
   ): ShareCodeAllocationResult {
     // 先清过期行：这样「冲突」只可能来自仍然有效的码，不会把 TTL 清理混进 409。
     this.deleteExpiredShareCodes(now);
@@ -1227,6 +1259,7 @@ export class SignalingHub extends DurableObject {
       secretHash,
       code: requestedCode,
       now,
+      ttlMs,
       tryInsert: (record) => {
         const inserted = this.ctx.storage.sql
           .exec<{ code: string }>(
@@ -1276,7 +1309,13 @@ export class SignalingHub extends DurableObject {
   }
 
   private async handleShareCodeInternalRequest(request: Request): Promise<Response> {
-    let payload: { op?: unknown; peerId?: unknown; secretHash?: unknown; code?: unknown };
+    let payload: {
+      op?: unknown;
+      peerId?: unknown;
+      secretHash?: unknown;
+      code?: unknown;
+      ttlMs?: unknown;
+    };
     try {
       payload = (await request.json()) as typeof payload;
     } catch {
@@ -1296,7 +1335,14 @@ export class SignalingHub extends DurableObject {
         return new Response('code must be six digits', { status: 400 });
       }
 
-      const allocation = this.registerShareCode(payload.peerId, payload.secretHash, requestedCode, now);
+      const requestedTtlMs = typeof payload.ttlMs === 'number' ? payload.ttlMs : undefined;
+      const allocation = this.registerShareCode(
+        payload.peerId,
+        payload.secretHash,
+        requestedCode,
+        now,
+        requestedTtlMs
+      );
       if (allocation.status === 'taken') {
         return Response.json(SHARE_CODE_TAKEN_BODY, { status: 409 });
       }
