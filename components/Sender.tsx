@@ -7,14 +7,20 @@ import {
   FileCompletePayload,
   P2P_PROTOCOL_VERSION,
   type ConnectionTypeLabel,
-  type PeerConnectionSnapshot,
 } from '../types';
-import { formatFileSize, generatePreview, generateFileFingerprint } from '../services/fileUtils';
+import { formatFileSize, generateFileFingerprint } from '../services/fileUtils';
 import { createCrc32Hasher } from '../services/crc32WorkerClient';
+import { DEFAULT_MAX_PREFIX_CRC_BYTES, computePrefixCrc32 } from '../services/send/prefixCrc';
+import { isValidShareCode, requestShareCode, revokeShareSession } from '../services/shareCodeSession';
 import { loadPeerRuntime, type Peer, type DataConnection } from '../services/peerRuntime';
 import { NO_TURN_WARNING_MESSAGE } from '../services/connectionGuidance';
 import { getIceConfig } from '../services/stunService';
-import { TRANSFER_CONFIG } from '../constants/transfer'; 
+import {
+  CONNECTION_TIMINGS,
+  EXPIRY_DURATIONS,
+  TRANSFER_CONFIG,
+  type ExpiryOption,
+} from '../constants/transfer';
 import {
   attachIceRouteToSession,
   collectIceRouteWithRetry,
@@ -42,7 +48,6 @@ import {
   waitForDataChannelDrain,
 } from '../services/transfer/DataChannelTransmitter';
 import { StreamingFileChunkReader } from '../services/transfer/StreamingFileChunkReader';
-import { useTransferStore } from '../stores/transferStore';
 import { createRouteProbeLogPayload } from '../services/routeProbeLog';
 import { getRouteSelectionDecision } from '../services/routeSelectionPolicy';
 import { createSessionActivityTracker } from '../services/sessionActivityTracker';
@@ -84,8 +89,6 @@ type PeerTransferStat = {
 
 export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) => {
   type PreparingStage = 'fetching_ice' | 'connecting_signaling';
-  const setSenderSnapshot = useTransferStore((store) => store.setSenderSnapshot);
-  const resetSenderSnapshot = useTransferStore((store) => store.resetSenderSnapshot);
   const [state, setState] = useState<TransferState>(TransferState.IDLE);
   const [fileList, setFileList] = useState<File[]>([]);
   const [metadata, setMetadata] = useState<FileMetadata | null>(null);
@@ -108,6 +111,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const [peerNames, setPeerNames] = useState<Record<string, string>>({});
 
   const [expiryOption, setExpiryOption] = useState<string>('1h');
+  // 当前分享的口令登记（结束分享时用它带凭证注销，避免码在 TTL 内继续可被抢占）。
+  const shareRegistrationRef = useRef<{ code: string; peerId: string; secret: string } | null>(null);
+  const shareRenewalTimerRef = useRef<number | null>(null);
   const [remainingTime, setRemainingTime] = useState<string>('');
 
   const [copied, setCopied] = useState(false);
@@ -136,6 +142,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const peerTransferEpochRef = useRef<Map<string, number>>(new Map());
   const pendingSendPeersRef = useRef<Set<string>>(new Set());
   const peerReceiveCreditRef = useRef<Map<string, ReceiveCreditGate>>(new Map());
+  // 最近一次创建的信用门闸，即使 map 里已被清理也保留引用：续传时必须取消它，
+  // 否则上一条发送序列会永久卡在 waitForAvailable 上，把新序列堵在活动集合外。
+  const lastReceiveCreditRef = useRef<Map<string, ReceiveCreditGate>>(new Map());
+  // 当前持有一条发送序列的连接，用于判断「活动集合里的旧序列」是否真的还活着。
+  const activeSendConnRef = useRef<Map<string, DataConnection>>(new Map());
   const peerReceiveCreditOwnerRef = useRef<Map<string, string>>(new Map());
 
   const peerProgress = useRef<Map<string, number>>(new Map());
@@ -149,12 +160,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const shareTelemetryRef = useRef<ConnectionSession | null>(null);
   const localDeviceNameRef = useRef<string>(deviceName);
   const peerNamesRef = useRef<Record<string, string>>(peerNames);
-  const GHOST_SWEEP_INTERVAL_MS = 4000;
-  const GHOST_GRACE_MS = 10000;
-  const HEARTBEAT_TIMEOUT_MS = 30000;
-  const HARD_HEARTBEAT_TIMEOUT_MS = 5 * 60 * 1000;
-  const SIGNALING_OPEN_TIMEOUT_MS = 10000;
-  const MAX_SIGNALING_OPEN_RETRY = 1;
   const lastStatsPollIndexRef = useRef(0);
   const signalingOpenTimeoutRef = useRef<number | null>(null);
   const receiverSessionRegistryRef = useRef(createReceiverSessionRegistry());
@@ -710,17 +715,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     const filesInfo = [];
     for (const f of files) {
         totalSize += f.size;
-        let preview = undefined;
-        if (files.length === 1) {
-            preview = await generatePreview(f);
-        }
         const name = f.fullPath || (f as any).webkitRelativePath || f.name;
         filesInfo.push({
             name: decodeFileName(name),
             size: f.size,
             type: f.type,
             lastModified: f.lastModified,
-            preview,
             fingerprint: generateFileFingerprint(f)
         });
     }
@@ -762,38 +762,49 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     });
   };
 
-  const handleDirectoryDrop = async (entry: FileSystemEntry) => {
-      try {
-          const files = await traverseFileTree(entry, ""); 
-          if (files.length === 0) throw new Error("文件夹为空");
-          processFiles(files);
-      } catch (err) {
-          console.error("Folder processing failed", err);
-          onNotification("文件夹解析失败", "error");
-      }
-  };
-
   const handleDragEvents = useCallback((e: DragEvent) => {
       e.preventDefault();
       if (e.type === 'dragover') setIsDragOver(true);
       if (e.type === 'dragleave' && e.clientX === 0 && e.clientY === 0) setIsDragOver(false);
       if (e.type === 'drop') {
           setIsDragOver(false);
-          const items = e.dataTransfer?.items;
-          if (items && items.length > 0) {
-              const item = items[0];
-              const entry = item.webkitGetAsEntry ? item.webkitGetAsEntry() : null;
-              if (entry && entry.isDirectory) {
-                  handleDirectoryDrop(entry);
-                  return;
+          const dataTransfer = e.dataTransfer;
+          if (!dataTransfer) return;
+
+          // webkitGetAsEntry() entries are only readable during the synchronous
+          // drop dispatch, so resolve every dropped item before any await.
+          const entries: FileSystemEntry[] = [];
+          for (const item of Array.from(dataTransfer.items || [])) {
+              const entry = typeof item.webkitGetAsEntry === 'function' ? item.webkitGetAsEntry() : null;
+              if (entry) entries.push(entry);
+          }
+          const droppedFiles = Array.from(dataTransfer.files || []);
+          if (entries.length === 0 && droppedFiles.length === 0) return;
+
+          void (async () => {
+              try {
+                  const files: File[] = [];
+                  for (const entry of entries) {
+                      files.push(...(await traverseFileTree(entry, "")));
+                  }
+                  // Browsers without webkitGetAsEntry only expose plain files.
+                  if (files.length === 0) {
+                      files.push(
+                          ...droppedFiles.map((f) =>
+                              new File([f], f.name, { type: f.type, lastModified: f.lastModified })
+                          )
+                      );
+                  }
+                  if (files.length === 0) {
+                      onNotification("拖拽内容中没有可发送的文件", "info");
+                      return;
+                  }
+                  await processFiles(files);
+              } catch (err) {
+                  console.error("Drop processing failed", err);
+                  onNotification("拖拽内容解析失败", "error");
               }
-          }
-          if (e.dataTransfer?.files.length) {
-             const files = Array.from(e.dataTransfer.files).map((f: any) => 
-                new File([f], f.name, { type: f.type, lastModified: f.lastModified })
-             );
-             processFiles(files);
-          }
+          })();
       }
   }, [processFiles]);
 
@@ -835,7 +846,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     shareTelemetryRef.current = createConnectionSession('sender', {
       fileCount: fileList.length,
       totalSize: metadata.totalSize,
-      customCode: customCodeInput.length === 4,
+      customCode: isValidShareCode(customCodeInput),
     });
     startConnectionAttempt(shareTelemetryRef.current, 'create_share');
     isDestroyingRef.current = false;
@@ -860,11 +871,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     setState(TransferState.GENERATING_CODE);
     setPreparingStage('fetching_ice');
     setConnectionStatus('');
-    let expiresAt: number | undefined;
-    const now = Date.now();
-    if (expiryOption === '10m') expiresAt = now + 10 * 60 * 1000;
-    if (expiryOption === '1h') expiresAt = now + 60 * 60 * 1000;
-    if (expiryOption === '1d') expiresAt = now + 24 * 60 * 60 * 1000;
+    const expiryDuration = EXPIRY_DURATIONS[expiryOption as ExpiryOption];
+    const expiresAt = expiryDuration === undefined ? undefined : Date.now() + expiryDuration;
     const metadataWithConstraints: FileMetadata = { ...metadata, protocolVersion: P2P_PROTOCOL_VERSION, constraints: { expiresAt } };
     setMetadata(metadataWithConstraints);
     const iceConfig = await getIceConfig();
@@ -909,18 +917,82 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     };
 
     const createSharePeer = async (attempt: number) => {
-      const finalCode = customCodeInput.length === 4 ? customCodeInput : (() => {
-        const arr = new Uint32Array(1);
-        crypto.getRandomValues(arr);
-        return (1000 + (arr[0] % 9000)).toString();
-      })();
+      // 口令一律 6 位、由服务端登记并与随机 peerId 绑定；用户手填的 6 位码同样走登记流程
+      // （已被占用会返回 taken，不会悄悄降级成别的码）。
+      const requestedCode = isValidShareCode(customCodeInput) ? customCodeInput : undefined;
+      // 信令建连超时后会重试：此时口令已经登记过，再调一次登记接口只会拿到 409
+      // （或者把码改绑）。直接复用上一次的 peerId + secret。
+      const previousRegistration = shareRegistrationRef.current;
+      const reuseRegistration = Boolean(
+        previousRegistration && (!requestedCode || previousRegistration.code === requestedCode),
+      );
+
+      // 口令有效期跟随用户选择（服务端上限 24h）；「永久」按上限登记并在分享期间自动续期。
+      const shareTtlSeconds = Math.min(
+        86_400,
+        Math.max(60, Math.round((expiryDuration ?? 86_400_000) / 1000)),
+      );
+
+      let senderPeerId: string;
+      let displayCode: string;
+      let signalingToken: string;
+      if (reuseRegistration && previousRegistration) {
+        senderPeerId = previousRegistration.peerId;
+        displayCode = previousRegistration.code;
+        signalingToken = previousRegistration.secret;
+      } else {
+        senderPeerId = `peer-${crypto.randomUUID()}`;
+        const registration = await requestShareCode({ peerId: senderPeerId, requestedCode, ttlSeconds: shareTtlSeconds });
+
+        if (registration.status !== 'ok') {
+          if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken)) return;
+          const message = registration.status === 'taken'
+            ? '该口令已被占用，请换一个 6 位口令'
+            : registration.status === 'rate-limited'
+              ? '创建口令过于频繁，请稍后再试'
+              : '创建分享口令失败，请重试';
+          setErrorMsg(message);
+          setState(TransferState.ERROR);
+          return;
+        }
+
+        displayCode = registration.code;
+        signalingToken = registration.secret;
+        shareRegistrationRef.current = {
+          code: registration.code,
+          peerId: senderPeerId,
+          secret: registration.secret,
+        };
+
+        if (expiryOption === 'never') {
+          if (shareRenewalTimerRef.current !== null) {
+            window.clearInterval(shareRenewalTimerRef.current);
+          }
+          // 同 peerId + 同 secret 的重新登记只是延长过期时间，不会换码。
+          shareRenewalTimerRef.current = window.setInterval(() => {
+            if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken)) return;
+            const current = shareRegistrationRef.current;
+            if (!current) return;
+            void requestShareCode({
+              peerId: current.peerId,
+              requestedCode: current.code,
+              ttlSeconds: 86_400,
+              secret: current.secret,
+            }).catch(() => {});
+          }, CONNECTION_TIMINGS.SHARE_CODE_RENEWAL_INTERVAL_MS);
+        }
+      }
+
+      const signalingCode = displayCode;
 
       let customPeer: Peer;
       try {
         const { default: PeerRuntime } = await loadPeerRuntime();
-        customPeer = new PeerRuntime(`aerodrop-${finalCode}`, {
+        customPeer = new PeerRuntime(senderPeerId, {
           debug: peerDebugLevel,
           pingInterval: 5000,
+          signalingCode,
+          signalingToken,
           config: {
             iceServers: iceConfig.iceServers,
             iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
@@ -951,18 +1023,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         if (peerRef.current !== customPeer) return;
         markSessionEvent(shareTelemetryRef.current, 'signaling_open_timeout', { attempt });
         try { customPeer.destroy(); } catch {}
-        if (attempt < MAX_SIGNALING_OPEN_RETRY) {
+        if (attempt < CONNECTION_TIMINGS.SENDER_MAX_SIGNALING_OPEN_RETRY) {
           setPreparingStage('connecting_signaling');
           void createSharePeer(attempt + 1);
           return;
         }
         setErrorMsg('准备传输节点超时，请重试');
         setState(TransferState.ERROR);
-      }, SIGNALING_OPEN_TIMEOUT_MS);
+      }, CONNECTION_TIMINGS.SENDER_SIGNALING_OPEN_TIMEOUT_MS);
 
       customPeer.on('open', clearSignalingOpenTimeout);
       customPeer.on('error', clearSignalingOpenTimeout);
-      setupPeerListeners(customPeer, finalCode, metadataWithConstraints, shareActivityToken);
+      setupPeerListeners(customPeer, displayCode, metadataWithConstraints, shareActivityToken);
     };
 
     void createSharePeer(0);
@@ -1093,7 +1165,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               // is still healthy, trust WebRTC transport keepalive and avoid heartbeat-based kills.
               if (transportHealthy) {
                   peerHeartbeatAtRef.current.set(conn.peer, now);
-              } else if (heartbeatGapMs >= HARD_HEARTBEAT_TIMEOUT_MS) {
+              } else if (heartbeatGapMs >= CONNECTION_TIMINGS.SENDER_HARD_HEARTBEAT_TIMEOUT_MS) {
                   markSessionEvent(shareTelemetryRef.current, 'heartbeat_hard_timeout_kill', {
                     peer: conn.peer,
                     timeoutMs: heartbeatGapMs,
@@ -1103,7 +1175,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                   try { if (conn.open) conn.close(); } catch {}
                   cleanupConnectionState(conn);
                   return;
-              } else if (heartbeatGapMs >= HEARTBEAT_TIMEOUT_MS) {
+              } else if (heartbeatGapMs >= CONNECTION_TIMINGS.SENDER_HEARTBEAT_TIMEOUT_MS) {
                   markSessionEvent(shareTelemetryRef.current, 'heartbeat_stale_signal', {
                     peer: conn.peer,
                     timeoutMs: heartbeatGapMs,
@@ -1115,7 +1187,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               if (unstableByState) {
                   const firstSeen = ghostCandidateSinceRef.current.get(conn.peer) ?? now;
                   ghostCandidateSinceRef.current.set(conn.peer, firstSeen);
-                  if (now - firstSeen >= GHOST_GRACE_MS) {
+                  if (now - firstSeen >= CONNECTION_TIMINGS.SENDER_GHOST_GRACE_MS) {
                       markSessionEvent(shareTelemetryRef.current, 'ghost_sweep_kill', {
                         peer: conn.peer,
                         pcState: pcState ?? 'unknown',
@@ -1132,7 +1204,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           });
       };
 
-      const timer = window.setInterval(sweep, GHOST_SWEEP_INTERVAL_MS);
+      const timer = window.setInterval(sweep, CONNECTION_TIMINGS.SENDER_GHOST_SWEEP_INTERVAL_MS);
       return () => clearInterval(timer);
   }, []);
 
@@ -1195,7 +1267,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     receiveWindowBytes: number,
   ) => {
       const peerId = conn.peer;
-      const previous = peerReceiveCreditRef.current.get(peerId);
+      const previous = peerReceiveCreditRef.current.get(peerId) ?? lastReceiveCreditRef.current.get(peerId);
       previous?.cancel('New transfer sequence started');
       const credit = new ReceiveCreditGate(
         getTotalFileBytes(),
@@ -1203,6 +1275,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         receiveWindowBytes,
       );
       peerReceiveCreditRef.current.set(peerId, credit);
+      lastReceiveCreditRef.current.set(peerId, credit);
       peerReceiveCreditOwnerRef.current.set(peerId, getOrCreateConnectionId(conn));
       return credit;
   };
@@ -1297,7 +1370,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
                 });
               }
 
-              setState(TransferState.PEER_CONNECTED);
+              setState((prevState) =>
+                prevState === TransferState.TRANSFERRING ? prevState : TransferState.PEER_CONNECTED
+              );
           });
           
           conn.on('data', (data: any) => {
@@ -1525,7 +1600,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         await new Promise(r => setTimeout(r, 50));
         waitAttempts++;
         if (waitAttempts > 120) {
+            // 旧序列卡在死连接的 await 上时不会自己退出。若它持有的连接已经不可用，
+            // 直接接管：旧序列的 conn 已关闭，无法再写入，不会污染新的数据流。
+            const staleConn = activeSendConnRef.current.get(conn.peer);
+            if (!staleConn || !staleConn.open) {
+                logDebug('warn', 'resume sequence released a stale send loop', { peerId: conn.peer });
+                // 只释放活动集合，不要取消信用闸门：此刻地图里已经是本次新序列的闸门。
+                activeSendingPeersRef.current.delete(conn.peer);
+                activeSendConnRef.current.delete(conn.peer);
+                break;
+            }
             // Safety cap — clean up pending since this attempt failed.
+            logDebug('warn', 'send sequence gave up waiting for a live previous loop', { peerId: conn.peer });
             pendingSendPeersRef.current.delete(conn.peer);
             return;
         }
@@ -1541,6 +1627,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     // Transition from pending → active now that the previous sequence exited.
     pendingSendPeersRef.current.delete(conn.peer);
     activeSendingPeersRef.current.add(conn.peer);
+    activeSendConnRef.current.set(conn.peer, conn);
 
     const currentSessionId = transferSessionId.current;
     activeTransfersCount.current += 1;
@@ -1620,18 +1707,25 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
             const file = files[i];
             const fName = file.fullPath || (file as any).webkitRelativePath || file.name;
 
+            let fileOffset = i === startFileIndex ? Math.min(Math.max(0, fileStartByteOffset), file.size) : 0;
+            fileStartByteOffset = 0;
+
+            // 续传时把已落盘前缀的 CRC 一起发过去，接收端才能验证磁盘上的旧数据没被截断。
             const startPayload: FileStartPayload = {
                 fileIndex: i,
                 fileName: decodeFileName(fName),
                 fileSize: file.size,
                 fileType: file.type
             };
+            if (fileOffset > 0) {
+                startPayload.resumeOffset = fileOffset;
+                if (fileOffset <= DEFAULT_MAX_PREFIX_CRC_BYTES) {
+                    startPayload.prefixCrc32 = await computePrefixCrc32(file, fileOffset);
+                }
+            }
             try {
                 conn.send({ type: 'FILE_START', payload: startPayload });
             } catch(e) { throw new Error("Failed to send FILE_START"); }
-
-            let fileOffset = i === startFileIndex ? Math.min(Math.max(0, fileStartByteOffset), file.size) : 0;
-            fileStartByteOffset = 0;
             const hashStartOffset = fileOffset;
             await fileHasher.reset();
             if (!isCurrentSequence()) return;
@@ -1757,6 +1851,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
         // Always remove — the new sequence adds itself only after this
         // sequence has exited, so there is no ownership conflict.
         activeSendingPeersRef.current.delete(peerId);
+        if (activeSendConnRef.current.get(peerId) === conn) {
+            activeSendConnRef.current.delete(peerId);
+        }
         if (transferSessionId.current === currentSessionId) {
             if (!sendCompleted) {
                 activeTransfersCount.current = Math.max(0, activeTransfersCount.current - 1);
@@ -1766,6 +1863,16 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   };
 
   const stopSharing = () => {
+    if (shareRenewalTimerRef.current !== null) {
+      window.clearInterval(shareRenewalTimerRef.current);
+      shareRenewalTimerRef.current = null;
+    }
+    const registration = shareRegistrationRef.current;
+    shareRegistrationRef.current = null;
+    if (registration) {
+      // 注销失败不影响本地停止分享（码会在 TTL 后自然过期）。
+      void revokeShareSession(registration).catch(() => {});
+    }
     isDestroyingRef.current = true;
     shareActivityTrackerRef.current.begin();
     if (signalingOpenTimeoutRef.current !== null) {
@@ -1833,7 +1940,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     setAvgSpeedBytes(0);
     fileListRef.current = [];
     if (timerRef.current) clearInterval(timerRef.current);
-    resetSenderSnapshot();
   };
 
   const handleCopyCode = async () => {
@@ -1899,59 +2005,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           onNotification('复制失败，请手动复制', 'error');
       }
   };
-
-  useEffect(() => {
-    const peers: PeerConnectionSnapshot[] = individualStats.map((peer) => ({
-      peerId: peer.peerId,
-      deviceName: peer.deviceName,
-      connectionType: peer.connectionType,
-      speed: peer.speed,
-      progress: peer.progress,
-      status: peer.status,
-    }));
-
-    setSenderSnapshot({
-      state,
-      errorMsg,
-      transferCode,
-      shareLink,
-      connectionStatus,
-      remainingTime,
-      totalProgress,
-      currentFileIndex,
-      currentSpeed,
-      avgSpeed,
-      currentSpeedBytes,
-      avgSpeedBytes,
-      activeTransfersCount: activeTransfersCount.current,
-      activeConnectionsCount: getVisibleConnections().length,
-      totalBytes,
-      transferredBytes,
-      overallEta,
-      metadata,
-      peers,
-    });
-  }, [
-    avgSpeed,
-    avgSpeedBytes,
-    connectionStatus,
-    currentFileIndex,
-    currentSpeed,
-    currentSpeedBytes,
-    errorMsg,
-    individualStats,
-    metadata,
-    overallEta,
-    remainingTime,
-    setSenderSnapshot,
-    shareLink,
-    state,
-    totalBytes,
-    totalProgress,
-    transferCode,
-    transferredBytes,
-  ]);
-
 
   return (
     <SenderUI

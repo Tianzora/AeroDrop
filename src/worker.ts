@@ -1,6 +1,35 @@
 import { DurableObject } from 'cloudflare:workers';
 import { resolveIceTransportPolicyDecision } from '../services/iceConfigPolicy';
-import { createSignalingRateLimiter } from '../services/signalingRateLimitPolicy';
+import { createIceConfigRateLimiter, getIceConfigRetryAfterSeconds } from '../services/iceConfigRateLimitPolicy';
+import {
+  SHARE_CODE_FORBIDDEN_BODY,
+  SHARE_CODE_MAX_BODY_BYTES,
+  SHARE_CODE_REBIND_REJECTED_BODY,
+  SHARE_CODE_TAKEN_BODY,
+  allocateShareCode,
+  isShareCodeRecordExpired,
+  isValidShareCodeSecretHash,
+  normalizeShareCode,
+  resolveShareCodeRegistration,
+  validateShareCodeCreatePayload,
+  verifyShareCodeRevoke,
+  type ShareCodeAllocationResult,
+  type ShareCodeRecord,
+} from '../services/shareCodeRegistry.ts';
+import { createIceConfigGlobalLimiter } from '../services/iceConfigGlobalRateLimit.ts';
+import {
+  createShareCodeRateLimiters,
+  getShareCodeRetryAfterSeconds,
+} from '../services/shareCodeRateLimitPolicy.ts';
+import {
+  createSignalingRateLimiter,
+  createSignalingSessionLimiter,
+  isSignalingMessageTooLarge,
+  recordSignalingMessage,
+  MAX_ACTIVE_SIGNALING_SESSIONS_PER_CLIENT,
+  type SignalingMessageWindow,
+  type SignalingSessionLimiter,
+} from '../services/signalingRateLimitPolicy';
 import {
   createSelfHostedTurnIceServer,
   hasTurnIceServers,
@@ -14,6 +43,8 @@ interface AssetBinding {
 interface Env {
   ASSETS: AssetBinding;
   SIGNALING_HUB: DurableObjectNamespace;
+  // 同一出口 IP 的并发信令上限，默认 12；CGNAT 部署可调高。
+  SIGNALING_MAX_SESSIONS_PER_CLIENT?: string;
   CF_TURN_TOKEN_ID?: string;
   CF_TURN_KEY_ID?: string;
   CF_TURN_API_TOKEN?: string;
@@ -106,6 +137,31 @@ let inflightCfIceConfig: Promise<IceConfigPayload | null> | null = null;
 
 const SIGNALING_DO_NAME = 'global-signaling-hub';
 const SIGNALING_PATH = '/ws-signaling';
+
+// Per-isolate budget for TURN credential issuance; see iceConfigRateLimitPolicy.
+const iceConfigRateLimiter = createIceConfigRateLimiter();
+
+// /api/share-code 的固定窗口预算（POST 10/10s、GET 30/10s）。
+const shareCodeRateLimiters = createShareCodeRateLimiters();
+
+const SHARE_CODE_DO_PATH = '/internal/share-codes';
+const SHARE_CODE_DO_URL = 'https://signaling-hub.internal' + SHARE_CODE_DO_PATH;
+
+const ICE_LIMIT_DO_PATH = '/internal/ice-limit';
+const ICE_LIMIT_DO_URL = 'https://signaling-hub.internal' + ICE_LIMIT_DO_PATH;
+// 一次 DO 往返的上限；超时就退回 isolate 内限流，不给 ice-config 加不可控延迟。
+const ICE_LIMIT_DO_TIMEOUT_MS = 800;
+
+type ShareCodeRow = {
+  code: string;
+  peer_id: string;
+  secret_hash: string;
+  expires_at: number;
+};
+
+type ShareCodeBodyResult =
+  | { ok: true; tooLarge: false; value: unknown }
+  | { ok: false; tooLarge: boolean };
 
 const setSecurityHeaders = (headers: Headers) => {
   headers.set('X-Content-Type-Options', 'nosniff');
@@ -236,6 +292,11 @@ const createIceConfigPayload = (
   relayReason,
 });
 
+/**
+ * CSRF-only gate. Browsers send Origin/Referer/Sec-Fetch-Site, but every one of
+ * those headers is client-controlled, so a non-browser client can always forge
+ * one. This is not authentication and must not be relied on as such.
+ */
 const isAllowedSameOriginRequest = (request: Request): boolean => {
   const requestOrigin = request.headers.get('Origin');
   const requestReferer = request.headers.get('Referer');
@@ -434,6 +495,66 @@ const createSelfHostedTurnIceConfig = async (env: Env): Promise<IceConfigPayload
   }
 };
 
+const iceConfigRateLimitedResponse = (retryAfterSeconds: number): Response =>
+  json(
+    { error: 'Too Many Requests' },
+    {
+      status: 429,
+      headers: {
+        'Cache-Control': 'no-store',
+        'Retry-After': String(retryAfterSeconds),
+      },
+    }
+  );
+
+type IceConfigGlobalLimitOutcome =
+  | { kind: 'allowed' }
+  | { kind: 'limited'; retryAfterSeconds: number }
+  | { kind: 'unavailable' };
+
+/**
+ * 全局限流计数放在单例 SignalingHub DO 里，跨 colo 共享；isolate 内的限流器只在
+ * DO 不可用/超时时降级使用。传输失败一律当作 unavailable，不阻断正常用户。
+ */
+const consumeIceConfigGlobalLimit = async (
+  env: Env,
+  clientKey: string
+): Promise<IceConfigGlobalLimitOutcome> => {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), ICE_LIMIT_DO_TIMEOUT_MS);
+
+  try {
+    const stub = env.SIGNALING_HUB.get(env.SIGNALING_HUB.idFromName(SIGNALING_DO_NAME));
+    const response = await stub.fetch(
+      new Request(ICE_LIMIT_DO_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ clientKey }),
+        signal: controller.signal,
+      })
+    );
+    if (!response.ok) return { kind: 'unavailable' };
+
+    const payload = (await response.json()) as { allowed?: unknown; retryAfterSeconds?: unknown };
+    if (payload.allowed === true) return { kind: 'allowed' };
+    if (payload.allowed === false) {
+      const retryAfterSeconds =
+        typeof payload.retryAfterSeconds === 'number'
+        && Number.isFinite(payload.retryAfterSeconds)
+        && payload.retryAfterSeconds > 0
+          ? Math.ceil(payload.retryAfterSeconds)
+          : 60;
+      return { kind: 'limited', retryAfterSeconds };
+    }
+
+    return { kind: 'unavailable' };
+  } catch {
+    return { kind: 'unavailable' };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+};
+
 const handleIceConfig = async (request: Request, env: Env): Promise<Response> => {
   if (!isAllowedSameOriginRequest(request)) {
     return json(
@@ -445,6 +566,19 @@ const handleIceConfig = async (request: Request, env: Env): Promise<Response> =>
         },
       }
     );
+  }
+
+    const clientKey = getSignalingClientKey(request);
+  const globalLimit = await consumeIceConfigGlobalLimit(env, clientKey);
+  if (globalLimit.kind === 'limited') {
+    return iceConfigRateLimitedResponse(globalLimit.retryAfterSeconds);
+  }
+  if (globalLimit.kind === 'unavailable') {
+    // 降级：全局计数不可用时至少限制本 isolate 的用量（多实例下仍会放大）。
+    const localLimit = iceConfigRateLimiter.consume(clientKey, Date.now());
+    if (!localLimit.allowed) {
+      return iceConfigRateLimitedResponse(getIceConfigRetryAfterSeconds(localLimit.retryAfterMs));
+    }
   }
 
   const networkRisk = assessNetworkRisk(request);
@@ -545,6 +679,207 @@ const handlePing = async (request: Request): Promise<Response> => {
   });
 };
 
+const shareCodeJson = (data: unknown, status = 200, extraHeaders: Record<string, string> = {}): Response =>
+  json(data, { status, headers: { 'Cache-Control': 'no-store', ...extraHeaders } });
+
+const shareCodeRateLimitedResponse = (retryAfterMs: number): Response =>
+  shareCodeJson(
+    { error: 'Too Many Requests' },
+    429,
+    { 'Retry-After': String(getShareCodeRetryAfterSeconds(retryAfterMs)) }
+  );
+
+const callShareCodeStore = async (env: Env, body: Record<string, unknown>): Promise<Response> => {
+  const hubId = env.SIGNALING_HUB.idFromName(SIGNALING_DO_NAME);
+  const stub = env.SIGNALING_HUB.get(hubId);
+  return stub.fetch(
+    new Request(SHARE_CODE_DO_URL, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(body),
+    })
+  );
+};
+
+const readShareCodeBody = async (request: Request): Promise<ShareCodeBodyResult> => {
+  const contentLength = Number(request.headers.get('Content-Length') ?? '');
+  if (Number.isFinite(contentLength) && contentLength > SHARE_CODE_MAX_BODY_BYTES) {
+    return { ok: false, tooLarge: true };
+  }
+
+  // 没有 Content-Length 的分块上传也必须边读边限：先 request.text() 再判断长度
+  // 等于让调用方用超大 body 吃掉 Worker 内存。
+  if (!request.body) {
+    return { ok: false, tooLarge: false };
+  }
+
+  const reader = request.body.getReader();
+  const chunks: Uint8Array[] = [];
+  let received = 0;
+  try {
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      if (!value) continue;
+      received += value.byteLength;
+      if (received > SHARE_CODE_MAX_BODY_BYTES) {
+        await reader.cancel().catch(() => {});
+        return { ok: false, tooLarge: true };
+      }
+      chunks.push(value);
+    }
+  } catch {
+    return { ok: false, tooLarge: false };
+  } finally {
+    reader.releaseLock?.();
+  }
+
+  const bytes = new Uint8Array(received);
+  let offset = 0;
+  for (const chunk of chunks) {
+    bytes.set(chunk, offset);
+    offset += chunk.byteLength;
+  }
+
+  try {
+    return { ok: true, tooLarge: false, value: JSON.parse(new TextDecoder().decode(bytes)) as unknown };
+  } catch {
+    return { ok: false, tooLarge: false };
+  }
+};
+
+const handleShareCodeCreate = async (request: Request, env: Env): Promise<Response> => {
+  if (!isAllowedSameOriginRequest(request)) {
+    return shareCodeJson({ error: 'Forbidden' }, 403);
+  }
+  if (request.method !== 'POST') {
+    return new Response('Method Not Allowed', {
+      status: 405,
+      headers: { Allow: 'POST', 'Cache-Control': 'no-store' },
+    });
+  }
+
+  const rateLimit = shareCodeRateLimiters.post.consume(getSignalingClientKey(request), Date.now());
+  if (!rateLimit.allowed) {
+    return shareCodeRateLimitedResponse(rateLimit.retryAfterMs);
+  }
+
+  const body = await readShareCodeBody(request);
+  if (!body.ok && body.tooLarge) {
+    return shareCodeJson({ error: 'Body too large' }, 413);
+  }
+  if (!body.ok) {
+    return shareCodeJson({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const validated = validateShareCodeCreatePayload(body.value);
+  if (!validated.ok) {
+    return shareCodeJson({ error: validated.error }, 400);
+  }
+
+  const storeResponse = await callShareCodeStore(env, {
+    op: 'create',
+    peerId: validated.peerId,
+    secretHash: validated.secretHash,
+    ...(validated.code ? { code: validated.code } : {}),
+    ...(validated.ttlMs ? { ttlMs: validated.ttlMs } : {}),
+  });
+  if (storeResponse.status === 409) {
+    return shareCodeJson(SHARE_CODE_TAKEN_BODY, 409);
+  }
+  if (!storeResponse.ok) {
+    return shareCodeJson({ error: 'Share code allocation failed' }, 503);
+  }
+
+  return shareCodeJson(await storeResponse.json());
+};
+
+const handleShareCodeLookup = async (request: Request, env: Env): Promise<Response> => {
+  if (!isAllowedSameOriginRequest(request)) {
+    return shareCodeJson({ error: 'Forbidden' }, 403);
+  }
+  if (request.method !== 'GET') {
+    return new Response('Method Not Allowed', {
+      status: 405,
+      headers: { Allow: 'GET', 'Cache-Control': 'no-store' },
+    });
+  }
+
+  const rateLimit = shareCodeRateLimiters.get.consume(getSignalingClientKey(request), Date.now());
+  if (!rateLimit.allowed) {
+    return shareCodeRateLimitedResponse(rateLimit.retryAfterMs);
+  }
+
+  const code = normalizeShareCode(new URL(request.url).searchParams.get('code'));
+  if (!code) {
+    return shareCodeJson({ error: 'code must be six digits' }, 400);
+  }
+
+  const storeResponse = await callShareCodeStore(env, { op: 'lookup', code });
+  if (storeResponse.status === 404) {
+    return shareCodeJson({ error: 'Share code not found or expired' }, 404);
+  }
+  if (!storeResponse.ok) {
+    return shareCodeJson({ error: 'Share code lookup failed' }, 503);
+  }
+
+  return shareCodeJson(await storeResponse.json());
+};
+
+const handleShareCodeRevoke = async (request: Request, env: Env, rawCode: string): Promise<Response> => {
+  if (!isAllowedSameOriginRequest(request)) {
+    return shareCodeJson({ error: 'Forbidden' }, 403);
+  }
+  if (request.method !== 'POST') {
+    return new Response('Method Not Allowed', {
+      status: 405,
+      headers: { Allow: 'POST', 'Cache-Control': 'no-store' },
+    });
+  }
+
+  const rateLimit = shareCodeRateLimiters.post.consume(getSignalingClientKey(request), Date.now());
+  if (!rateLimit.allowed) {
+    return shareCodeRateLimitedResponse(rateLimit.retryAfterMs);
+  }
+
+  const code = normalizeShareCode(rawCode);
+  if (!code) {
+    return shareCodeJson({ error: 'code must be six digits' }, 400);
+  }
+
+  const body = await readShareCodeBody(request);
+  if (!body.ok && body.tooLarge) {
+    return shareCodeJson({ error: 'Body too large' }, 413);
+  }
+  if (!body.ok) {
+    return shareCodeJson({ error: 'Invalid JSON body' }, 400);
+  }
+
+  const payload = body.value as { peerId?: unknown; secretHash?: unknown };
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
+    return shareCodeJson({ error: 'Body must be a JSON object' }, 400);
+  }
+
+  const peerId = typeof payload.peerId === 'string' ? payload.peerId.trim() : '';
+  const secretHash = typeof payload.secretHash === 'string' ? payload.secretHash.toLowerCase() : '';
+  if (!peerId || !isValidShareCodeSecretHash(secretHash)) {
+    return shareCodeJson({ error: 'peerId and secretHash are required' }, 400);
+  }
+
+  const storeResponse = await callShareCodeStore(env, { op: 'revoke', code, peerId, secretHash });
+  if (storeResponse.status === 403) {
+    return shareCodeJson(SHARE_CODE_FORBIDDEN_BODY, 403);
+  }
+  if (storeResponse.status === 404) {
+    return shareCodeJson({ error: 'Share code not found' }, 404);
+  }
+  if (!storeResponse.ok) {
+    return shareCodeJson({ error: 'Share code revoke failed' }, 503);
+  }
+
+  return shareCodeJson(await storeResponse.json());
+};
+
 const handleApiRequest = async (request: Request, env: Env, pathname: string): Promise<Response> => {
   switch (pathname) {
     case '/api/ice-config':
@@ -569,6 +904,21 @@ export default {
 
     if (pathname === SIGNALING_PATH) {
       return await handleSignalingUpgrade(request, env);
+    }
+
+    if (pathname === '/api/share-code') {
+      const response = request.method === 'GET'
+        ? await handleShareCodeLookup(request, env)
+        : await handleShareCodeCreate(request, env);
+      return applyResponsePolicies(request, response);
+    }
+
+    const shareCodeRevokeMatch = /^\/api\/share-code\/([^/]+)\/revoke$/.exec(pathname);
+    if (shareCodeRevokeMatch) {
+      return applyResponsePolicies(
+        request,
+        await handleShareCodeRevoke(request, env, shareCodeRevokeMatch[1])
+      );
     }
 
     if (pathname.startsWith('/api/')) {
@@ -601,9 +951,20 @@ export class SignalingHub extends DurableObject {
   private peerBySocket = new Map<WebSocket, string>();
   private clientBySocket = new Map<WebSocket, string>();
   private rateLimiter = createSignalingRateLimiter();
+  private sessionLimiter: SignalingSessionLimiter;
+  private messageWindows = new Map<WebSocket, SignalingMessageWindow>();
+  // 全局 /api/ice-config 限流计数（住在单例 DO 里，跨 colo 共享）。
+  private iceConfigGlobalLimiter = createIceConfigGlobalLimiter();
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
+
+    // 同一出口 IP 的并发信令上限；CGNAT 场景下可由部署方调高。
+    this.sessionLimiter = createSignalingSessionLimiter(
+      parsePositiveInt(env.SIGNALING_MAX_SESSIONS_PER_CLIENT, MAX_ACTIVE_SIGNALING_SESSIONS_PER_CLIENT)
+    );
+
+    this.initializeShareCodeSchema();
 
     for (const ws of this.ctx.getWebSockets()) {
       const attachment = ws.deserializeAttachment() as SessionAttachment | null;
@@ -611,16 +972,24 @@ export class SignalingHub extends DurableObject {
       this.sessionsByPeer.set(attachment.peerId, ws);
       this.peerBySocket.set(ws, attachment.peerId);
       this.clientBySocket.set(ws, attachment.clientKey || 'ip:unknown');
+      this.sessionLimiter.tryAcquire(attachment.clientKey || 'ip:unknown');
     }
   }
 
   async fetch(request: Request): Promise<Response> {
+    const url = new URL(request.url);
+    if (url.pathname === SHARE_CODE_DO_PATH) {
+      return this.handleShareCodeInternalRequest(request);
+    }
+    if (url.pathname === ICE_LIMIT_DO_PATH) {
+      return this.handleIceConfigLimitRequest(request);
+    }
+
     const upgradeHeader = request.headers.get('Upgrade');
     if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
       return new Response('Expected websocket', { status: 426 });
     }
 
-    const url = new URL(request.url);
     const peerId = url.searchParams.get('peerId')?.trim() || '';
     if (!peerId) {
       return new Response('Missing peerId', { status: 400 });
@@ -634,8 +1003,47 @@ export class SignalingHub extends DurableObject {
     server.serializeAttachment({ clientKey, peerId } satisfies SessionAttachment);
     this.ctx.acceptWebSocket(server);
 
+    const registration = await resolveShareCodeRegistration({
+      peerId,
+      code: url.searchParams.get('code'),
+      token: url.searchParams.get('token'),
+      now: Date.now(),
+      findShareCode: (candidate) => this.findActiveShareCode(candidate, Date.now()),
+      findShareCodeByPeerId: (candidate) => this.findActiveShareCodeByPeerId(candidate, Date.now()),
+    });
+    if (!registration.allowed) {
+      const legacyPeerId = registration.reason === 'legacy-peer-id';
+      const invalidPeerId = registration.reason === 'invalid-peer-id';
+      server.send(
+        JSON.stringify({
+          type: 'error',
+          code: legacyPeerId || invalidPeerId ? 'invalid-id' : 'unauthorized',
+          message: legacyPeerId
+            ? '4-digit peer ids are no longer supported'
+            : invalidPeerId
+              ? 'Peer id must be a random 8-128 char id'
+              : 'Share code or token is invalid',
+        } satisfies SignalingEnvelope)
+      );
+      server.close(4009, 'Signaling registration rejected');
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
+    if (!this.sessionLimiter.tryAcquire(clientKey)) {
+      server.send(
+        JSON.stringify({
+          type: 'error',
+          code: 'rate-limited',
+          message: 'Too many signaling sessions',
+        } satisfies SignalingEnvelope)
+      );
+      server.close(4029, 'Too many sessions');
+      return new Response(null, { status: 101, webSocket: client });
+    }
+
     const existing = this.sessionsByPeer.get(peerId);
     if (existing && existing !== server) {
+      this.sessionLimiter.release(clientKey);
       server.send(
         JSON.stringify({
           type: 'error',
@@ -655,8 +1063,36 @@ export class SignalingHub extends DurableObject {
   }
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+    // 计数必须在类型检查之前：否则二进制帧可以绕过节流无限发送。
+    const messageWindow = recordSignalingMessage(this.messageWindows.get(ws), Date.now());
+    this.messageWindows.set(ws, messageWindow.state);
+    if (!messageWindow.allowed) {
+      this.sendError(ws, 'rate-limited', 'Too many signaling messages');
+      try {
+        ws.close(1008, 'Too many signaling messages');
+      } catch {
+        // The peer may already be closed.
+      }
+      return;
+    }
+
     if (typeof message !== 'string') {
       this.sendError(ws, 'invalid-message', 'Only text signaling messages are supported');
+      try {
+        ws.close(1003, 'Binary messages are not supported');
+      } catch {
+        // The peer may already be closed.
+      }
+      return;
+    }
+
+    if (isSignalingMessageTooLarge(message)) {
+      this.sendError(ws, 'invalid-message', 'Signaling message too large');
+      try {
+        ws.close(1009, 'Message too large');
+      } catch {
+        // The peer may already be closed.
+      }
       return;
     }
 
@@ -698,7 +1134,6 @@ export class SignalingHub extends DurableObject {
       const rateLimitDecision = this.rateLimiter.recordOfferAttempt({
         clientKey: this.clientBySocket.get(ws) || 'ip:unknown',
         now: Date.now(),
-        targetPeerId: payload.targetPeerId,
       });
       if (!rateLimitDecision.allowed) {
         this.sendError(
@@ -736,13 +1171,221 @@ export class SignalingHub extends DurableObject {
   }
 
   private unregisterSocket(ws: WebSocket): void {
+    this.messageWindows.delete(ws);
+
+    const clientKey = this.clientBySocket.get(ws);
+    if (clientKey) {
+      this.clientBySocket.delete(ws);
+      this.sessionLimiter.release(clientKey);
+    }
+
     const peerId = this.peerBySocket.get(ws);
     if (!peerId) return;
     this.peerBySocket.delete(ws);
-    this.clientBySocket.delete(ws);
     if (this.sessionsByPeer.get(peerId) === ws) {
       this.sessionsByPeer.delete(peerId);
     }
+  }
+
+  private initializeShareCodeSchema(): void {
+    this.ctx.storage.sql.exec(
+      'CREATE TABLE IF NOT EXISTS share_codes (' +
+        'code TEXT PRIMARY KEY, ' +
+        'peer_id TEXT NOT NULL, ' +
+        'secret_hash TEXT NOT NULL, ' +
+        'expires_at INTEGER NOT NULL, ' +
+        'created_at INTEGER NOT NULL)'
+    );
+  }
+
+  private deleteExpiredShareCodes(now: number): void {
+    this.ctx.storage.sql.exec('DELETE FROM share_codes WHERE expires_at <= ?', now);
+  }
+
+  private findActiveShareCode(code: string, now: number): ShareCodeRecord | null {
+    this.deleteExpiredShareCodes(now);
+    const rows = this.ctx.storage.sql
+      .exec<ShareCodeRow>(
+        'SELECT code, peer_id, secret_hash, expires_at FROM share_codes WHERE code = ?',
+        code
+      )
+      .toArray();
+    const row = rows[0];
+    if (!row) return null;
+
+    const record: ShareCodeRecord = {
+      code: row.code,
+      peerId: row.peer_id,
+      secretHash: row.secret_hash,
+      expiresAt: row.expires_at,
+    };
+    return isShareCodeRecordExpired(record, now) ? null : record;
+  }
+
+  private findActiveShareCodeByPeerId(peerId: string, now: number): ShareCodeRecord | null {
+    const rows = this.ctx.storage.sql
+      .exec<ShareCodeRow>(
+        'SELECT code, peer_id, secret_hash, expires_at FROM share_codes WHERE peer_id = ?',
+        peerId
+      )
+      .toArray();
+    const row = rows[0];
+    if (!row) return null;
+    const record: ShareCodeRecord = {
+      code: row.code,
+      peerId: row.peer_id,
+      secretHash: row.secret_hash,
+      expiresAt: row.expires_at,
+    };
+    return isShareCodeRecordExpired(record, now) ? null : record;
+  }
+
+  private registerShareCode(
+    peerId: string,
+    secretHash: string,
+    requestedCode: string | null,
+    now: number,
+    ttlMs?: number
+  ): ShareCodeAllocationResult {
+    // 先清过期行：这样「冲突」只可能来自仍然有效的码，不会把 TTL 清理混进 409。
+    this.deleteExpiredShareCodes(now);
+
+    // 改绑必须先证明自己就是原来的持有者：否则任何知道口令的人都能用「码 -> peerId」
+    // 查到发送方 id，再用自己的 HMAC 覆盖这行记录，把仍在进行的分享劫走。
+    const existingBinding = this.findActiveShareCodeByPeerId(peerId, now);
+    if (existingBinding && existingBinding.secretHash !== secretHash) {
+      return { status: 'rebind-rejected' };
+    }
+
+    // 同一 peerId 只保留最新一张码，避免反复建码把表堆大。
+    this.ctx.storage.sql.exec('DELETE FROM share_codes WHERE peer_id = ?', peerId);
+
+    return allocateShareCode({
+      peerId,
+      secretHash,
+      code: requestedCode,
+      now,
+      ttlMs,
+      tryInsert: (record) => {
+        const inserted = this.ctx.storage.sql
+          .exec<{ code: string }>(
+            'INSERT INTO share_codes (code, peer_id, secret_hash, expires_at, created_at) ' +
+              'VALUES (?, ?, ?, ?, ?) ON CONFLICT(code) DO NOTHING RETURNING code',
+            record.code,
+            record.peerId,
+            record.secretHash,
+            record.expiresAt,
+            now
+          )
+          .toArray();
+        return inserted.length > 0;
+      },
+    });
+  }
+
+  /**
+   * 仅 Worker 内部通过 DO stub 调用；Durable Object 没有公网路由，外部无法直接
+   * 请求 /internal/* 路径。这里仍校验方法/字段，避免误用。
+   */
+  private async handleIceConfigLimitRequest(request: Request): Promise<Response> {
+    if (request.method !== 'POST') {
+      return new Response('Method Not Allowed', { status: 405 });
+    }
+
+    let payload: { clientKey?: unknown };
+    try {
+      payload = (await request.json()) as typeof payload;
+    } catch {
+      return new Response('Bad Request', { status: 400 });
+    }
+
+    if (typeof payload.clientKey !== 'string' || payload.clientKey.length === 0 || payload.clientKey.length > 128) {
+      return new Response('Bad Request', { status: 400 });
+    }
+
+    const decision = this.iceConfigGlobalLimiter.check(payload.clientKey, Date.now());
+    return Response.json(decision);
+  }
+
+  private revokeShareCode(code: string): boolean {
+    const deleted = this.ctx.storage.sql
+      .exec<{ code: string }>('DELETE FROM share_codes WHERE code = ? RETURNING code', code)
+      .toArray();
+    return deleted.length > 0;
+  }
+
+  private async handleShareCodeInternalRequest(request: Request): Promise<Response> {
+    let payload: {
+      op?: unknown;
+      peerId?: unknown;
+      secretHash?: unknown;
+      code?: unknown;
+      ttlMs?: unknown;
+    };
+    try {
+      payload = (await request.json()) as typeof payload;
+    } catch {
+      return new Response('Bad Request', { status: 400 });
+    }
+
+    const now = Date.now();
+    const code = normalizeShareCode(typeof payload.code === 'string' ? payload.code : null);
+
+    if (payload.op === 'create') {
+      if (typeof payload.peerId !== 'string' || typeof payload.secretHash !== 'string') {
+        return new Response('Bad Request', { status: 400 });
+      }
+
+      const requestedCode = typeof payload.code === 'string' ? normalizeShareCode(payload.code) : null;
+      if (payload.code !== undefined && requestedCode === null) {
+        return new Response('code must be six digits', { status: 400 });
+      }
+
+      const requestedTtlMs = typeof payload.ttlMs === 'number' ? payload.ttlMs : undefined;
+      const allocation = this.registerShareCode(
+        payload.peerId,
+        payload.secretHash,
+        requestedCode,
+        now,
+        requestedTtlMs
+      );
+      if (allocation.status === 'taken') {
+        return Response.json(SHARE_CODE_TAKEN_BODY, { status: 409 });
+      }
+      if (allocation.status === 'rebind-rejected') {
+        return Response.json(SHARE_CODE_REBIND_REJECTED_BODY, { status: 409 });
+      }
+
+      return Response.json({ code: allocation.record.code, expiresAt: allocation.record.expiresAt });
+    }
+
+    if (payload.op === 'lookup') {
+      if (!code) return new Response('Bad Request', { status: 400 });
+      const record = this.findActiveShareCode(code, now);
+      if (!record) return new Response('Not Found', { status: 404 });
+      return Response.json({ peerId: record.peerId, expiresAt: record.expiresAt });
+    }
+
+    if (payload.op === 'revoke') {
+      if (!code) return new Response('Bad Request', { status: 400 });
+
+      const peerId = typeof payload.peerId === 'string' ? payload.peerId : '';
+      const secretHash = typeof payload.secretHash === 'string' ? payload.secretHash : '';
+      if (!peerId || !secretHash) return new Response('Bad Request', { status: 400 });
+
+      // 码不存在与凭证不匹配都回 403：不让调用方把 revoke 当「这个码是否已占用」的探测口。
+      const record = this.findActiveShareCode(code, now);
+      if (!verifyShareCodeRevoke({ record, peerId, secretHash }).allowed) {
+        return Response.json(SHARE_CODE_FORBIDDEN_BODY, { status: 403 });
+      }
+      if (!this.revokeShareCode(code)) {
+        return Response.json(SHARE_CODE_FORBIDDEN_BODY, { status: 403 });
+      }
+
+      return Response.json({ revoked: true, code });
+    }
+
+    return new Response('Bad Request', { status: 400 });
   }
 
   private sendError(

@@ -6,6 +6,7 @@ type Listener = (...args: any[]) => void;
 type PeerRuntimeErrorType =
   | 'unavailable-id'
   | 'invalid-id'
+  | 'unauthorized'
   | 'peer-unavailable'
   | 'rate-limited'
   | 'disconnected'
@@ -19,6 +20,8 @@ type ChannelKind = 'data' | 'media';
 type PeerOptions = {
   debug?: number;
   pingInterval?: number;
+  signalingCode?: string;
+  signalingToken?: string;
   config?: RTCConfiguration;
   host?: string;
   port?: number;
@@ -111,7 +114,7 @@ type SignalingEnvelope =
 const JSON_ENVELOPE = '__aerodrop_json__';
 const TEXT_ENVELOPE = '__aerodrop_text__';
 const SIGNALING_LOG_KEY = '__AERODROP_SIGNALING_METRICS__';
-const DEFAULT_DEV_SIGNALING_BASE = 'http://127.0.0.1:8787';
+
 const DEFAULT_SIGNALING_PING_INTERVAL_MS = 20_000;
 const DEFAULT_SIGNALING_PONG_TIMEOUT_MS = 10_000;
 const DEFAULT_SIGNALING_RECONNECT_BASE_MS = 1_000;
@@ -123,7 +126,10 @@ const runtimeEnv =
 const SIGNALING_BASE =
   (runtimeEnv.VITE_SIGNALING_WS_URL as string | undefined)?.trim() ||
   (runtimeEnv.VITE_SIGNALING_BASE_URL as string | undefined)?.trim() ||
-  (runtimeEnv.DEV ? DEFAULT_DEV_SIGNALING_BASE : window.location.origin);
+  // Always go through the page origin: in `npm run dev` the Vite proxy forwards
+  // /ws-signaling to wrangler, and the Worker's same-origin gate rejects a
+  // cross-origin handshake (browser always sends Origin on WebSocket upgrades).
+  window.location.origin;
 const SIGNALING_PATH =
   ((runtimeEnv.VITE_SIGNALING_PATH as string | undefined)?.trim() || '/ws-signaling').replace(/\/?$/, '');
 const QUIET_SIGNAL_EVENTS = new Set([
@@ -149,6 +155,8 @@ const IMPORTANT_SIGNAL_INFO_EVENTS = new Set([
   'data_channel_open',
   'data_channel_close',
 ]);
+
+const TERMINAL_SIGNALING_ERROR_CODES = new Set(['unavailable-id', 'invalid-id', 'unauthorized']);
 
 const createRuntimeError = (
   type: PeerRuntimeErrorType,
@@ -185,10 +193,16 @@ const toWebSocketUrl = (base: string): string => {
   return `${window.location.protocol === 'https:' ? 'wss://' : 'ws://'}${base}`;
 };
 
-const createSignalingUrl = (peerId: string): string => {
+// 信令 URL 里的 token 等价于发送方凭证：只允许真正用于建连，日志/指标一律脱敏。
+const redactSignalingUrl = (url: string): string =>
+  url.replace(/([?&]token=)[^&]*/i, '$1<redacted>');
+
+const createSignalingUrl = (peerId: string, options: PeerOptions = {}): string => {
   const baseUrl = new URL(toWebSocketUrl(SIGNALING_BASE));
   const wsUrl = new URL(SIGNALING_PATH, baseUrl);
   wsUrl.searchParams.set('peerId', peerId);
+  if (options.signalingCode) wsUrl.searchParams.set('code', options.signalingCode);
+  if (options.signalingToken) wsUrl.searchParams.set('token', options.signalingToken);
   return wsUrl.toString();
 };
 
@@ -553,6 +567,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
   private reconnectTimer: number | null = null;
   private reconnectAttempts = 0;
   private awaitingPong = false;
+  private registrationRejected = false;
 
   constructor(id?: string, options?: PeerOptions);
   constructor(options?: PeerOptions);
@@ -627,9 +642,9 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
-    const url = createSignalingUrl(this.id);
+    const url = createSignalingUrl(this.id, this.options);
     this.log('info', 'signaling_ws_connect_start', {
-      url,
+      url: redactSignalingUrl(url),
       signalingBase: SIGNALING_BASE,
       signalingPath: SIGNALING_PATH,
     });
@@ -638,7 +653,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       this.disconnected = false;
       this.reconnectAttempts = 0;
       this.startHeartbeat();
-      this.log('info', 'signaling_ws_open', { url });
+      this.log('info', 'signaling_ws_open', { url: redactSignalingUrl(url) });
     };
     this.websocket.onmessage = (event) => {
       this.handleSignalingMessage(event.data);
@@ -660,6 +675,10 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
         return;
       }
       this.disconnected = true;
+      if (this.registrationRejected) {
+        this.log('warn', 'signaling_registration_rejected_close');
+        return;
+      }
       this.log(wasOpened ? 'warn' : 'error', 'signaling_ws_close', {
         code: event.code,
         reason: event.reason || undefined,
@@ -729,7 +748,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
   }
 
   private scheduleReconnect(): void {
-    if (this.destroyed || this.isManualClose || this.reconnectTimer !== null) {
+    if (this.destroyed || this.isManualClose || this.registrationRejected || this.reconnectTimer !== null) {
       return;
     }
     this.reconnectAttempts += 1;
@@ -798,6 +817,13 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
         (message.code as PeerRuntimeErrorType) ?? 'server-error',
         message.message || String(message.code || 'Signaling error')
       );
+      if (TERMINAL_SIGNALING_ERROR_CODES.has(message.code)) {
+        this.registrationRejected = true;
+        this.log('warn', 'signaling_registration_rejected', { code: message.code });
+        if (!this.openedOnce) {
+          this.rejectReadyPromise(error);
+        }
+      }
       if (message.connectionId) {
         const connection = this.connectionIndex.get(message.connectionId);
         if (connection) {
@@ -1080,10 +1106,6 @@ export const loadPeerRuntime = (): Promise<PeerRuntimeModule> => {
     });
   }
   return peerRuntimePromise;
-};
-
-export const preloadPeerRuntime = (): void => {
-  void loadPeerRuntime();
 };
 
 export type { PeerOptions, DataConnectionOptions };

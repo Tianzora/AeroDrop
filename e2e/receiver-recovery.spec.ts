@@ -134,7 +134,7 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
       }
 
       connect(targetPeerId: string) {
-        const code = targetPeerId.replace(/^aerodrop-/, '');
+        const code = targetPeerId.replace(/^(?:aerodrop-|peer-)/, '');
         const scenario = ensureScenario(code);
         scenario.connectionCount += 1;
         scenario.connectionPolicies.push(this.iceTransportPolicy);
@@ -184,7 +184,7 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
               },
             ],
             totalSize: 2 * 1024 * 1024,
-            protocolVersion: 3,
+            protocolVersion: 4,
           },
           holdNextOpen: false,
           connectionCount: 0,
@@ -215,6 +215,15 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
       }),
       createPeerRuntimeModule: () => ({
         default: FakePeer,
+      }),
+      // 口令服务在 vite preview 下不可用：任何 6 位码都映射到固定的假对端。
+      createShareCodeOverride: ({ code }: { code?: string }) => ({
+        code: code ?? '111111',
+        expiresAt: Date.now() + 3_600_000,
+      }),
+      resolveShareCodeOverride: (code: string) => ({
+        peerId: `peer-${code}`,
+        expiresAt: Date.now() + 3_600_000,
       }),
     };
 
@@ -371,41 +380,41 @@ const getReadyToReceiveButton = (page: import('@playwright/test').Page) =>
 
 test('receiver auto-recovers after a disconnect and returns to resumable state', async ({ page }) => {
   await page.goto('/');
-  await setScenario(page, '1111');
+  await setScenario(page, '111111');
   await page.getByRole('button', { name: '接收' }).click();
-  await page.locator('input[type="text"]').fill('1111');
+  await page.locator('input[type="text"]').fill('111111');
 
   await expect(getReadyToReceiveButton(page)).toBeVisible();
 
-  await disconnectLatest(page, '1111');
+  await disconnectLatest(page, '111111');
 
   await expect(page.getByText('连接中断，正在尝试恢复...')).toBeVisible();
   await expect(page.getByText('第 1 次自动重连中，请保持此页面打开，无需重新输入口令。')).toBeVisible();
 
   await expect(page.getByRole('button', { name: '继续下载' })).toBeVisible();
-  await expect.poll(async () => getConnectionCount(page, '1111')).toBe(2);
+  await expect.poll(async () => getConnectionCount(page, '111111')).toBe(2);
 });
 
 test('stalled persisted progress reconnects through relay and resumes from the committed offset', async ({ page }) => {
   await page.clock.install();
   await page.goto('/');
-  await setScenario(page, '4444');
+  await setScenario(page, '444444');
   await page.getByRole('button', { name: '接收' }).click();
-  await page.locator('input[type="text"]').fill('4444');
+  await page.locator('input[type="text"]').fill('444444');
 
   await expect(page.getByRole('button', { name: '确认并下载' })).toBeVisible();
   await page.getByRole('button', { name: '确认并下载' }).click();
   await expect(page.getByText('当前文件进度')).toBeVisible();
 
   const committedBytes = 1024 * 1024;
-  await sendCommittedChunk(page, '4444', committedBytes);
-  await expect.poll(async () => getPersistedProgress(page, '4444')).toContain(committedBytes);
+  await sendCommittedChunk(page, '444444', committedBytes);
+  await expect.poll(async () => getPersistedProgress(page, '444444')).toContain(committedBytes);
 
   await page.clock.fastForward(14_000);
 
-  await expect.poll(async () => getConnectionCount(page, '4444')).toBe(2);
-  await expect.poll(async () => getConnectionPolicies(page, '4444')).toEqual(['all', 'relay']);
-  await expect.poll(async () => getResumeRequests(page, '4444')).toEqual([
+  await expect.poll(async () => getConnectionCount(page, '444444')).toBe(2);
+  await expect.poll(async () => getConnectionPolicies(page, '444444')).toEqual(['all', 'relay']);
+  await expect.poll(async () => getResumeRequests(page, '444444')).toEqual([
     {
       type: 'RESUME_REQUEST',
       payload: {
@@ -420,44 +429,44 @@ test('stalled persisted progress reconnects through relay and resumes from the c
 
 test('cancel during reconnect clears stale timers and allows a clean reconnect', async ({ page }) => {
   await page.goto('/');
-  await setScenario(page, '2222');
+  await setScenario(page, '222222');
   await page.getByRole('button', { name: '接收' }).click();
-  await page.locator('input[type="text"]').fill('2222');
+  await page.locator('input[type="text"]').fill('222222');
 
   await expect(page.getByRole('button', { name: '确认并下载' })).toBeVisible();
 
-  await disconnectLatest(page, '2222');
+  await disconnectLatest(page, '222222');
   await expect(page.getByText('连接中断，正在尝试恢复...')).toBeVisible();
 
   await page.getByRole('button', { name: /停止重连|取消/ }).click({ force: true });
   await expect(page.getByRole('button', { name: '0', exact: true })).toBeVisible();
   await expect(page.getByText('连接中断，正在尝试恢复...')).toHaveCount(0);
 
-  await enterCodeWithKeypad(page, '2222');
+  await enterCodeWithKeypad(page, '222222');
   await expect(getReadyToReceiveButton(page)).toBeVisible();
 
   await page.waitForTimeout(1200);
   await expect(getReadyToReceiveButton(page)).toBeVisible();
-  await expect.poll(async () => getConnectionCount(page, '2222')).toBe(2);
+  await expect.poll(async () => getConnectionCount(page, '222222')).toBe(2);
 });
 
 test('cancelled receive stays idle even if a stale reconnect connection opens later', async ({ page }) => {
   await page.goto('/');
-  await setScenario(page, '3333');
+  await setScenario(page, '333333');
   await page.getByRole('button', { name: '接收' }).click();
-  await page.locator('input[type="text"]').fill('3333');
+  await page.locator('input[type="text"]').fill('333333');
 
   await expect(page.getByRole('button', { name: '确认并下载' })).toBeVisible();
 
-  await holdNextOpen(page, '3333');
-  await disconnectLatest(page, '3333');
+  await holdNextOpen(page, '333333');
+  await disconnectLatest(page, '333333');
   await expect(page.getByText('连接中断，正在尝试恢复...')).toBeVisible();
-  await expect.poll(async () => getConnectionCount(page, '3333')).toBe(2);
+  await expect.poll(async () => getConnectionCount(page, '333333')).toBe(2);
 
   await page.getByRole('button', { name: /停止重连|取消/ }).click({ force: true });
   await expect(page.getByRole('button', { name: '0', exact: true })).toBeVisible();
 
-  await openLatest(page, '3333');
+  await openLatest(page, '333333');
 
   await page.waitForTimeout(300);
   await expect(page.getByRole('button', { name: '0', exact: true })).toBeVisible();

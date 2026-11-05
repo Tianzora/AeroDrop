@@ -1,6 +1,91 @@
 import type { FileMetadata, P2PMessage } from '../../types';
+import { METADATA_CHUNKING } from '../../constants/transfer.ts';
 import type { createReceiverSessionRegistry } from './receiverSessionRegistry';
 import type { createRouteCommitGate } from './routeCommitGate';
+
+// The SCTP data channel rejects messages above ~256 KiB (Chrome). Send metadata
+// either as one METADATA message or as a sequence of METADATA_CHUNK messages
+// that the receiver rejoins before parsing. Budgets are measured on the encoded
+// wire form (UTF-8 bytes + JSON escaping), not on JS code units: a CJK filename
+// is one code unit but three bytes, and a quote becomes two bytes when escaped.
+const encoder = new TextEncoder();
+
+const METADATA_ENVELOPE_OVERHEAD_BYTES = 256;
+
+const estimateEscapedUtf8Bytes = (text: string): number => {
+  let bytes = 0;
+  for (let index = 0; index < text.length; index += 1) {
+    const code = text.charCodeAt(index);
+    if (code < 0x80) {
+      bytes += code === 0x22 || code === 0x5c ? 2 : 1;
+    } else if (code < 0x800) {
+      bytes += 2;
+    } else if (code >= 0xd800 && code <= 0xdbff) {
+      bytes += 4;
+      index += 1;
+    } else {
+      bytes += 3;
+    }
+  }
+  return bytes;
+};
+
+const wireMessageBytes = (message: P2PMessage): number =>
+  encoder.encode(JSON.stringify(message)).length;
+
+export const splitMetadataJson = (
+  json: string,
+  maxMessageBytes: number = METADATA_CHUNKING.MAX_MESSAGE_BYTES,
+): string[] => {
+  const budget = Math.max(1024, maxMessageBytes - METADATA_ENVELOPE_OVERHEAD_BYTES);
+  const chunks: string[] = [];
+  let start = 0;
+
+  while (start < json.length) {
+    let bytes = 0;
+    let end = start;
+    while (end < json.length) {
+      const code = json.charCodeAt(end);
+      const charBytes =
+        code < 0x80 ? (code === 0x22 || code === 0x5c ? 2 : 1) : code < 0x800 ? 2 : code >= 0xd800 && code <= 0xdbff ? 4 : 3;
+      if (bytes + charBytes > budget && end > start) break;
+      bytes += charBytes;
+      end += code >= 0xd800 && code <= 0xdbff ? 2 : 1;
+    }
+    // Defensive: never emit a chunk whose real envelope is over budget.
+    let sliceEnd = Math.min(end, json.length);
+    while (sliceEnd > start + 1) {
+      const candidate = json.slice(start, sliceEnd);
+      if (estimateEscapedUtf8Bytes(candidate) + METADATA_ENVELOPE_OVERHEAD_BYTES <= maxMessageBytes) break;
+      sliceEnd = start + Math.max(1, Math.floor((sliceEnd - start) * 0.9));
+    }
+    chunks.push(json.slice(start, sliceEnd));
+    start = sliceEnd;
+  }
+
+  return chunks;
+};
+
+export const sendMetadataMessages = (
+  send: (message: P2PMessage) => void,
+  metadata: FileMetadata,
+): void => {
+  const single: P2PMessage = { type: 'METADATA', payload: metadata };
+
+  if (wireMessageBytes(single) <= METADATA_CHUNKING.MAX_MESSAGE_BYTES) {
+    send(single);
+    return;
+  }
+
+  const json = JSON.stringify(metadata);
+  const chunks = splitMetadataJson(json);
+  const total = chunks.length;
+  const transferId = `metadata-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  chunks.forEach((data, index) => {
+    send({ type: 'METADATA_CHUNK', payload: { transferId, index, total, data } });
+  });
+};
 
 export type SenderRouteHandshakeConnection = {
   peer: string;
@@ -95,7 +180,7 @@ export const createSenderRouteHandshakeHandler = <TConn extends SenderRouteHands
           type: 'DEVICE_INFO',
           payload: { deviceName: options.deviceName },
         });
-        conn.send({ type: 'METADATA', payload: options.metadata });
+        sendMetadataMessages((message) => conn.send(message), options.metadata);
         const committedArgs = {
           conn,
           receiverSessionId: msg.payload.receiverSessionId,

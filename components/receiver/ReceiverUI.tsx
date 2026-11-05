@@ -93,15 +93,15 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
     <div className="max-w-xl mx-auto p-6 bg-white dark:bg-slate-800 rounded-3xl shadow-xl border border-slate-100 dark:border-slate-700 transition-colors">
       <div className="text-center mb-6">
         <h2 className="text-2xl font-bold text-slate-800 dark:text-white">接收文件</h2>
-        <p className="text-slate-500 dark:text-slate-400">输入 4 位口令</p>
+        <p className="text-slate-500 dark:text-slate-400">输入 6 位口令</p>
       </div>
 
       {state === TransferState.IDLE && (
         <div className="flex flex-col items-center">
-          <div className="relative mb-8 max-w-[280px] mx-auto group">
-            <div className="flex gap-4 justify-center pointer-events-none">
-              {[0, 1, 2, 3].map((i) => (
-                <div key={i} className={`w-14 h-16 border-2 rounded-xl flex items-center justify-center text-3xl font-bold font-mono transition-all duration-200 ${code[i] ? 'border-brand-500 text-brand-600 dark:text-brand-400 shadow-sm bg-white dark:bg-slate-700' : 'border-slate-200 dark:border-slate-600 text-slate-300 dark:text-slate-600 bg-white dark:bg-slate-700'}`}>
+          <div className="relative mb-8 max-w-[380px] mx-auto group">
+            <div className="flex gap-2 justify-center pointer-events-none">
+              {[0, 1, 2, 3, 4, 5].map((i) => (
+                <div key={i} className={`w-12 h-16 border-2 rounded-xl flex items-center justify-center text-2xl font-bold font-mono transition-all duration-200 ${code[i] ? 'border-brand-500 text-brand-600 dark:text-brand-400 shadow-sm bg-white dark:bg-slate-700' : 'border-slate-200 dark:border-slate-600 text-slate-300 dark:text-slate-600 bg-white dark:bg-slate-700'}`}>
                   {code[i] || ''}
                 </div>
               ))}
@@ -110,7 +110,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
               ref={inputRef}
               type="text"
               inputMode="numeric"
-              maxLength={4}
+              maxLength={6}
               value={code}
               onChange={(e) => onCodeChange(e.target.value)}
               className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
@@ -123,7 +123,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
                 {num}
               </button>
             ))}
-            <button onClick={onPasteFromClipboard} className="h-16 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-brand-600 dark:text-brand-400 flex items-center justify-center hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors shadow-sm border border-blue-100 dark:border-blue-900/30">
+            <button onClick={onPasteFromClipboard} aria-label="粘贴 6 位口令" title="粘贴 6 位口令" className="h-16 rounded-xl bg-blue-50 dark:bg-blue-900/20 text-brand-600 dark:text-brand-400 flex items-center justify-center hover:bg-blue-100 dark:hover:bg-blue-900/30 transition-colors shadow-sm border border-blue-100 dark:border-blue-900/30">
               <ClipboardPaste size={20} />
             </button>
             <button onClick={() => onDigitClick('0')} className="h-16 rounded-xl bg-slate-50 dark:bg-slate-700 text-slate-700 dark:text-slate-200 text-2xl font-semibold hover:bg-slate-100 dark:hover:bg-slate-600 transition-colors shadow-sm border border-slate-100 dark:border-slate-600">

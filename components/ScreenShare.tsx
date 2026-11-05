@@ -12,6 +12,7 @@ import {
 } from '../services/screenShareViewerSession';
 import { ScreenShareUI, ScreenShareViewerConnectingStage } from './screen-share/ScreenShareUI';
 import { logDebug } from '../services/diagnostics';
+import { CONNECTION_TIMINGS } from '../constants/transfer';
 
 interface ScreenShareProps {
   onNotification: (message: string, type: 'success' | 'info' | 'error') => void;
@@ -19,6 +20,93 @@ interface ScreenShareProps {
 }
 
 type NetworkRouteClass = 'lan' | 'wan' | 'relay' | 'unknown';
+
+// 屏幕录制失败不止「用户取消」一种：浏览器可能对「用户取消」「权限策略拒绝」
+// 「嵌入式预览框」都抛 NotAllowedError，所以这里把原始 name/message 一起带出来，
+// 不要把所有 NotAllowedError 都说成用户取消。
+type ScreenCaptureFailure = {
+  name: string;
+  message: string;
+  isCancel: boolean;
+  description: string;
+};
+
+const isEmbeddedFrame = () =>
+  typeof window !== 'undefined' && window.self !== window.top;
+
+const hasUserActivation = (): boolean => {
+  const activation = (navigator as Navigator & { userActivation?: { isActive: boolean } })
+    .userActivation;
+  return activation ? activation.isActive : true;
+};
+
+export const describeScreenCaptureFailure = (error: unknown): ScreenCaptureFailure => {
+  const name = error instanceof DOMException || error instanceof Error ? error.name : '';
+  const message = error instanceof Error ? error.message : String(error ?? '');
+  const embedded = isEmbeddedFrame();
+
+  if (name === 'AbortError') {
+    return { name, message, isCancel: true, description: '用户取消了屏幕共享' };
+  }
+
+  if (name === 'NotSupportedError') {
+    return {
+      name,
+      message,
+      isCancel: false,
+      description: '当前环境不支持屏幕录制（无桌面会话、无头浏览器或嵌入式预览框）。',
+    };
+  }
+
+  if (name === 'NotReadableError') {
+    return {
+      name,
+      message,
+      isCancel: false,
+      description: '系统拒绝了屏幕录制（可能被安全软件或其他应用占用），请重试。',
+    };
+  }
+
+  if (name === 'NotAllowedError') {
+    // Chrome 对「用户取消」「策略拒绝」「缺少用户手势」都给 NotAllowedError，
+    // 只有 message 恰好是 "Permission denied" 且页面不在 iframe 里时才可能是取消。
+    const looksLikeCancel = /^permission denied\.?$/i.test(message.trim());
+    if (looksLikeCancel && !embedded && hasUserActivation()) {
+      return { name, message, isCancel: true, description: '用户取消了屏幕共享' };
+    }
+    if (embedded) {
+      return {
+        name,
+        message,
+        isCancel: false,
+        description:
+          '浏览器拒绝了屏幕录制：当前页面嵌在预览框/iframe 中，浏览器默认禁止在这里录制屏幕，请在新标签页直接打开后重试。',
+      };
+    }
+    if (!hasUserActivation()) {
+      return {
+        name,
+        message,
+        isCancel: false,
+        description:
+          '浏览器没有把这次点击识别为用户手势（可能是脚本或自动化触发），请在页面上手动点击「开始共享屏幕」后重试。',
+      };
+    }
+    return {
+      name,
+      message,
+      isCancel: false,
+      description: `浏览器拒绝了屏幕录制：${message || name}。请检查浏览器的屏幕录制权限、企业策略，或在独立标签页中重试。`,
+    };
+  }
+
+  return {
+    name,
+    message,
+    isCancel: false,
+    description: `屏幕共享启动失败：${message || '未知错误'}${name ? `（${name}）` : ''}`,
+  };
+};
 
 export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initialViewId }) => {
   const [isSharing, setIsSharing] = useState(false);
@@ -71,8 +159,17 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const remoteShareEndHandledRef = useRef(false);
   const sharerReconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const sharerReconnectAttemptsRef = useRef(0);
-  const MAX_RECONNECT_ATTEMPTS = 5;
-  const MAX_SHARER_SIGNAL_RECONNECT_ATTEMPTS = 5;
+  const {
+    SCREEN_SHARE_CONNECT_TIMEOUT_MS,
+    SCREEN_SHARE_MAX_RECONNECT_ATTEMPTS,
+    SCREEN_SHARE_RECONNECT_BASE_DELAY_MS,
+    SCREEN_SHARE_RECONNECT_MAX_DELAY_MS,
+    SCREEN_SHARE_HEARTBEAT_INTERVAL_MS,
+    SCREEN_SHARE_BANDWIDTH_MONITOR_INTERVAL_MS,
+    SCREEN_SHARE_BANDWARMUP_MS,
+  } = CONNECTION_TIMINGS;
+  const MAX_RECONNECT_ATTEMPTS = SCREEN_SHARE_MAX_RECONNECT_ATTEMPTS;
+  const MAX_SHARER_SIGNAL_RECONNECT_ATTEMPTS = SCREEN_SHARE_MAX_RECONNECT_ATTEMPTS;
   // 观看者端：连接过程的全局超时定时器
   const connectingTimeoutRef = useRef<NodeJS.Timeout | null>(null);
 
@@ -431,7 +528,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     let consecutiveLowBandwidth = 0;
     let consecutiveHighBandwidth = 0;
     const monitorStartedAt = Date.now();
-    const BANDWIDTH_WARMUP_MS = 8000;
+    const BANDWIDTH_WARMUP_MS = SCREEN_SHARE_BANDWARMUP_MS;
 
     const monitor = async () => {
       try {
@@ -639,7 +736,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
 
     void monitor();
-    const timer = setInterval(monitor, 2000);
+    const timer = setInterval(monitor, SCREEN_SHARE_BANDWIDTH_MONITOR_INTERVAL_MS);
     bandwidthMonitorsRef.current.set(call.peer, timer);
   }, [bitrateLimits, routeBitrateCaps, applyBitrateConstraints, isPrivateOrMdnsAddress, onNotification, setPeerQualityLevel]);
 
@@ -912,7 +1009,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     const attempt = sharerReconnectAttemptsRef.current + 1;
     sharerReconnectAttemptsRef.current = attempt;
 
-    const delay = Math.min(1000 * Math.pow(2, attempt - 1), 10000);
+    const delay = Math.min(1000 * Math.pow(2, attempt - 1), SCREEN_SHARE_RECONNECT_MAX_DELAY_MS);
     sharerReconnectTimerRef.current = setTimeout(async () => {
       sharerReconnectTimerRef.current = null;
       const currentPeer = peerRef.current;
@@ -1021,6 +1118,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
 
   const connectToSharer = useCallback(async (sharerId: string, isRetry = false) => {
+    // 任何一次新建连都必须先撤销排队中的自动重连，否则旧定时器会把新连接拆掉。
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
 
     // 如果是新的连接请求（非重连），重置重连计数
     if (!isRetry) {
@@ -1056,7 +1158,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       setIsConnecting(false);
       // 触发一次清理，但不标记为手动停止，以便允许用户重试
       stopViewing(false);
-    }, 20000);
+    }, SCREEN_SHARE_CONNECT_TIMEOUT_MS);
 
     // 如果是重连尝试，显示正在重连的状态
     if (isRetry) {
@@ -1098,7 +1200,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           if (dataConn.open) {
             dataConn.send({ type: 'heartbeat' });
           }
-        }, 3000);
+        }, SCREEN_SHARE_HEARTBEAT_INTERVAL_MS);
       });
 
       dataConn.on('data', (data: any) => {
@@ -1196,8 +1298,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
           if (reconnectAttemptsRef.current < MAX_RECONNECT_ATTEMPTS) {
             reconnectAttemptsRef.current += 1;
-            const delay = Math.min(2000 * reconnectAttemptsRef.current, 10000); // 指数退避
+            const delay = Math.min(
+              SCREEN_SHARE_RECONNECT_BASE_DELAY_MS * reconnectAttemptsRef.current,
+              SCREEN_SHARE_RECONNECT_MAX_DELAY_MS,
+            ); // 指数退避
 
+            if (reconnectTimerRef.current) {
+              clearTimeout(reconnectTimerRef.current);
+            }
             reconnectTimerRef.current = setTimeout(() => {
               connectToSharer(sharerId, true);
             }, delay);
@@ -1248,6 +1356,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           // 可能是分享者暂时掉线，稍后重试
           stopViewing(false);
           reconnectAttemptsRef.current += 1;
+          if (reconnectTimerRef.current) {
+            clearTimeout(reconnectTimerRef.current);
+          }
           reconnectTimerRef.current = setTimeout(() => {
             connectToSharer(sharerId, true);
           }, 3000);
@@ -1369,6 +1480,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   useEffect(() => {
     return () => {
 
+      // 卸载（切换 tab / 路由）不等于用户点了「停止共享」：先通知观看者，
+      // 否则他们只能等重连退避超时才回到可重试态。
+      broadcastShareEnded('window_closed');
+
       bandwidthMonitorsRef.current.forEach((timer) => clearInterval(timer));
       bandwidthMonitorsRef.current.clear();
 
@@ -1404,6 +1519,22 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       if (sharerReconnectTimerRef.current) {
         clearTimeout(sharerReconnectTimerRef.current);
         sharerReconnectTimerRef.current = null;
+      }
+
+      // 卸载后必须彻底停掉观看端定时器：否则挂起的重连会在组件已卸载时重新建连，
+      // 分享端会看到一个永不消失的观看者并持续推流。
+      isManualStopRef.current = true;
+      if (heartbeatIntervalRef.current) {
+        clearInterval(heartbeatIntervalRef.current);
+        heartbeatIntervalRef.current = null;
+      }
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      if (connectingTimeoutRef.current) {
+        clearTimeout(connectingTimeoutRef.current);
+        connectingTimeoutRef.current = null;
       }
     };
   }, []);
@@ -1491,12 +1622,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       initializePeer();
       onNotification(`屏幕共享已开始${getScreenShareAudioSuffix(stream)}`, 'success');
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : '无法启动屏幕共享';
-
-      if (errorMessage.includes('Permission denied') || errorMessage.includes('NotAllowedError')) {
-        setError('用户取消了屏幕共享');
-      } else {
-        setError('当前浏览器不支持启动屏幕共享，请使用Chrome、Edge等浏览器');
+      const failure = describeScreenCaptureFailure(err);
+      logDebug('warn', 'screen-share start failed', {
+        name: failure.name,
+        message: failure.message,
+        embeddedFrame: isEmbeddedFrame(),
+      });
+      setError(failure.description);
+      if (!failure.isCancel) {
         onNotification('屏幕共享启动失败', 'error');
       }
     }
@@ -1516,8 +1649,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       replaceActiveCallTracks(newStream);
       onNotification(`已切换共享窗口${getScreenShareAudioSuffix(newStream)}`, 'success');
     } catch (err) {
-      const errorMessage = err instanceof Error ? err.message : '无法切换共享窗口';
-      if (!errorMessage.includes('Permission denied') && !errorMessage.includes('NotAllowedError')) {
+      const failure = describeScreenCaptureFailure(err);
+      logDebug('warn', 'screen-share change source failed', {
+        name: failure.name,
+        message: failure.message,
+      });
+      if (!failure.isCancel) {
         onNotification('切换共享窗口失败', 'error');
       }
     }

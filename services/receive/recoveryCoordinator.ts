@@ -2,6 +2,8 @@ import { TransferState, type NormalizedFileRequest } from '../../types/index.ts'
 import { TRANSFER_CONFIG } from '../../constants/transfer.ts';
 import { createResumeRequestMessage, normalizeFileRequest } from '../protocol.ts';
 import { logDebug } from '../diagnostics.ts';
+import { resolveCheckpointOffset, type ResumeCheckpoint } from './resumeCheckpoint.ts';
+import { recoverWriterForResume, type ReselectReceiveTargetRequest } from './resumeWriterRecovery.ts';
 
 interface SendableConnection {
   open: boolean;
@@ -14,7 +16,12 @@ export interface ReceiveRecoveryCoordinatorOptions {
   setTransferActive: (active: boolean) => void;
   getCurrentFileIndex: () => number;
   getReceivedSize: () => number;
+  getCurrentFileSize?: () => number;
   getCommittedStreamBytes?: () => number;
+  // 刷新后从 IndexedDB/localStorage 读回的检查点（调用方负责按 metadataFingerprint 校验）。
+  getResumeCheckpoint?: () => ResumeCheckpoint | null;
+  // 用户交互：重新选择保存目录/文件并把写入器重开到检查点偏移。返回 true 表示已重开。
+  requestReselectReceiveTarget?: (request: ReselectReceiveTargetRequest) => Promise<boolean>;
   isFileCompleted: (fileIndex: number) => boolean;
   hasRetainedCurrentFileData: (fileIndex: number) => boolean;
   flushPendingStreamWrites: () => Promise<boolean>;
@@ -153,24 +160,40 @@ export const createReceiveRecoveryCoordinator = (
     let byteOffset = 0;
     let canResumeCurrentFile = false;
     const receivedSize = Math.max(0, options.getReceivedSize());
+    const fileSize = options.getCurrentFileSize?.();
+    const checkpoint = options.getResumeCheckpoint?.() ?? null;
 
-    if (options.hasRetainedCurrentFileData(currentIdx)) {
-      const flushed = await options.flushPendingStreamWrites();
-      if (!flushed) {
-        return;
+    const recovery = await recoverWriterForResume(
+      { fileIndex: currentIdx, fileSize, checkpoint },
+      {
+        getReceivedSize: options.getReceivedSize,
+        getCommittedStreamBytes: options.getCommittedStreamBytes,
+        hasRetainedCurrentFileData: options.hasRetainedCurrentFileData,
+        flushPendingStreamWrites: options.flushPendingStreamWrites,
+        reopenNativeWriterForResume: options.reopenNativeWriterForResume,
+        requestReselectReceiveTarget: options.requestReselectReceiveTarget,
       }
-      byteOffset = receivedSize;
-      canResumeCurrentFile = byteOffset > 0;
-    } else if (receivedSize > 0) {
-      const durableOffset = typeof options.getCommittedStreamBytes === 'function'
-        ? Math.max(0, Math.min(receivedSize, options.getCommittedStreamBytes()))
-        : receivedSize;
-      const reopened = await options.reopenNativeWriterForResume(currentIdx, durableOffset);
-      if (reopened) {
-        byteOffset = durableOffset;
-        canResumeCurrentFile = byteOffset > 0;
-      }
+    );
+
+    if (recovery.status === 'unavailable' && recovery.reason === 'flush-failed') {
+      // 落盘失败时不能静默 return：此时 transferActive 已置 true，界面会一直停在“传输中”。
+      options.setTransferState(TransferState.ERROR);
+      options.failTransferPersistence('文件落盘失败，无法续传，请重试传输。');
+      return;
     }
+
+    const checkpointOffset = resolveCheckpointOffset(checkpoint, currentIdx, fileSize);
+    if (recovery.status === 'needs-permission' && checkpointOffset > 0) {
+      // 刷新后拿到检查点进度，但原 FileSystemHandle 打不开：等 UI 让用户重新选择保存位置后
+      // 再次调用 resumeTransfer。此处不能发 byteOffset 0，否则会用 0 覆盖已落盘的数据。
+      if (options.notify) {
+        options.notify('需要重新选择保存位置才能继续接收该文件。', 'info');
+      }
+      return;
+    }
+
+    byteOffset = recovery.status === 'resumed' ? recovery.byteOffset : 0;
+    canResumeCurrentFile = recovery.status === 'resumed' && byteOffset > 0;
 
     if (!canResumeCurrentFile && receivedSize > 0 && options.notify) {
       options.notify('当前文件的流式落盘状态无法直接续写，本次将从该文件开头重新下载。', 'info');

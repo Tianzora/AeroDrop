@@ -212,11 +212,6 @@ const fetchIceConfig = async (profile: BrowserNetworkProfile): Promise<IceConfig
   }
 };
 
-/** Prefetch ICE config so subsequent getIceConfig() calls return instantly. */
-export const prefetchIceConfig = (): void => {
-  getIceConfig().catch(() => {});
-};
-
 /*
  * NOTE:
  * TURN credentials should come from server-side environment bindings.

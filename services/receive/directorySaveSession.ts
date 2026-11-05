@@ -1,10 +1,13 @@
 import { type ReceiveStreamingTarget } from './streamingWriter.ts';
+import { normalizeRelativePath } from './relativePath.ts';
 
 export interface DirectorySaveSessionWritableFileStream {
   write: (data: BufferSource | Blob | string | Uint8Array) => Promise<void>;
   seek?: (position: number) => Promise<void>;
   truncate: (size: number) => Promise<void>;
   close: () => Promise<void>;
+  // FileSystemWritableFileStream 继承自 WritableStream，正常实现都有 abort。
+  abort?: (reason?: unknown) => Promise<void>;
 }
 
 export interface DirectorySaveSessionFileHandle {
@@ -56,72 +59,18 @@ export interface DirectorySaveSession {
   ) => Promise<ReceiveStreamingTarget>;
 }
 
-const CONTROL_CHARACTERS = /[\x00-\x1f]/;
-const WINDOWS_ABSOLUTE_PATH = /^[a-zA-Z]:[\\/]/;
-
-const assertRelativePathNotAbsolute = (relativePath: string) => {
-  const trimmedPath = relativePath.trim();
-
-  if (!trimmedPath) {
-    throw new Error('RELATIVE_PATH_EMPTY');
-  }
-  if (trimmedPath.startsWith('/')) {
-    throw new Error('RELATIVE_PATH_ABSOLUTE');
-  }
-  if (WINDOWS_ABSOLUTE_PATH.test(trimmedPath)) {
-    throw new Error('RELATIVE_PATH_ABSOLUTE');
-  }
-};
-
-const normalizeStrictRelativePath = (relativePath: string): string[] => {
-  assertRelativePathNotAbsolute(relativePath);
-
-  const segments = relativePath
-    .trim()
-    .replace(/\\/g, '/')
-    .split('/')
-    .filter((segment) => segment.length > 0);
-
-  if (segments.length === 0) {
-    throw new Error('RELATIVE_PATH_EMPTY');
-  }
-
-  for (const segment of segments) {
-    if (segment === '..') {
-      throw new Error('RELATIVE_PATH_TRAVERSAL');
-    }
-    if (segment === '.') {
-      throw new Error('RELATIVE_PATH_DOT_SEGMENT');
-    }
-    if (CONTROL_CHARACTERS.test(segment)) {
-      throw new Error('RELATIVE_PATH_INVALID_SEGMENT');
-    }
-  }
-
-  return segments;
-};
-
-const sanitizeLegacyRelativePath = (relativePath: string): string[] => {
-  assertRelativePathNotAbsolute(relativePath);
-
-  const segments = relativePath
+const sanitizeLegacyRelativePath = (relativePath: string): string => {
+  // 兼容旧入口：先按段 trim 并去掉空段，再统一走严格消毒（.. / . / 绝对路径一律拒绝）。
+  // 以前这里会静默丢弃 `..` 段，导致同一路径在“首写”和“续传重开”两个入口解析到不同文件。
+  const preCleanedPath = relativePath
     .trim()
     .replace(/\\/g, '/')
     .split('/')
     .map((segment) => segment.trim())
-    .filter(
-      (segment) =>
-        segment.length > 0 &&
-        segment !== '.' &&
-        segment !== '..' &&
-        !CONTROL_CHARACTERS.test(segment)
-    );
+    .filter((segment) => segment.length > 0)
+    .join('/');
 
-  if (segments.length === 0) {
-    throw new Error('RELATIVE_PATH_EMPTY');
-  }
-
-  return segments;
+  return normalizeRelativePath(preCleanedPath);
 };
 
 const createDirectoryResolver = (getRootDirectoryHandle: () => DirectorySaveSessionDirectoryHandle) => {
@@ -216,12 +165,12 @@ export const createDirectorySaveSession = (options?: {
     getRootDirectoryName: () => ensureRootDirectoryHandle().name,
 
     resolveFile: async (relativePath) => {
-      const normalizedPath = normalizeStrictRelativePath(relativePath).join('/');
+      const normalizedPath = normalizeRelativePath(relativePath);
       return resolver.resolveNormalizedPath(normalizedPath);
     },
 
     resolveFileHandle: async (relativePath) => {
-      const normalizedRelativePath = sanitizeLegacyRelativePath(relativePath).join('/');
+      const normalizedRelativePath = sanitizeLegacyRelativePath(relativePath);
       const resolved = await resolver.resolveNormalizedPath(normalizedRelativePath);
 
       return {
@@ -234,7 +183,7 @@ export const createDirectorySaveSession = (options?: {
 
     createStreamingTarget: async (relativePath, options) => {
       const resolved = await resolver.resolveNormalizedPath(
-        normalizeStrictRelativePath(relativePath).join('/')
+        normalizeRelativePath(relativePath)
       );
 
       if (!resolved.fileHandle.createWritable) {
@@ -260,6 +209,12 @@ export const createDirectorySaveSession = (options?: {
         },
         close: async () => {
           await writable.close();
+        },
+        abort: async () => {
+          if (typeof writable.abort !== 'function') {
+            return;
+          }
+          await writable.abort();
         },
         truncate: async (size) => {
           await writable.truncate(size);

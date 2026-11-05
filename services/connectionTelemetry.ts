@@ -216,15 +216,6 @@ export const markConnectionFailure = (
   log('warn', session, 'failed', { reason, ...data });
 };
 
-export const markConnectionClosed = (
-  session: ConnectionSession | null | undefined,
-  data?: Record<string, unknown>
-) => {
-  if (!session || session.status === 'failed') return;
-  session.status = 'closed';
-  log('info', session, 'closed', data);
-};
-
 const pickSelectedPair = (stats: StatsLike) => {
   let selectedPair: any = null;
   stats.forEach((report) => {

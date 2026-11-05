@@ -1,7 +1,7 @@
 import { expect, test } from '@playwright/test';
 
 const FILE_BYTES = 2 * 1024 * 1024;
-const SHARE_CODE = '7642';
+const SHARE_CODE = '764200';
 
 type ProductIceConfig = {
   iceServers: RTCIceServer[];
@@ -56,6 +56,10 @@ test('production Sender and Receiver transfer and persist a 2 MiB file', async (
   const senderContext = await browser.newContext();
   const receiverContext = await browser.newContext();
 
+  // Only `--mode e2e` builds honor `__AERODROP_E2E__` (see services/e2eHooks.ts).
+  // This spec targets the production bundle served by wrangler, so the override is
+  // inert here and the app uses the worker-issued ICE config; the byte-level
+  // assertions below rely on `__AERODROP_PRODUCT_SINK__` instead.
   await Promise.all([senderContext, receiverContext].map((context) => context.addInitScript((config) => {
     (window as Window & { __AERODROP_E2E__?: unknown }).__AERODROP_E2E__ = {
       getIceConfigOverride: () => config,

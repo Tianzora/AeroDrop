@@ -1,4 +1,5 @@
 import { TRANSFER_CONFIG } from '../../constants/transfer.ts';
+import { logDebug } from '../diagnostics.ts';
 
 export const shouldReleasePeerState = (
   closingConnectionId: string | undefined,
@@ -56,10 +57,20 @@ export class ReceiveCreditGate {
       throw new Error(`overallTotalBytes changed from ${this.totalBytes} to ${totalBytes}`);
     }
     assertOffset('persistedOverallBytes', persistedOverallBytes, this.sentOverallBytes);
-    if (persistedOverallBytes < this.persistedOverallBytes) {
-      throw new Error('persistedOverallBytes must not decrease');
-    }
     assertWindow(receiveWindowBytes);
+
+    if (persistedOverallBytes < this.persistedOverallBytes) {
+      // 接收端上报的是“已落盘字节”，口径会在文件 finalize 时从 committedBytes 切到 receivedSize，
+      // 续传文件因此会短暂回退。这是统计口径问题，不是协议违规：抛错会让发送端直接关连接。
+      // 这里 clamp 到已有值（信用只增不减），窗口仍按最新上报更新。
+      logDebug('warn', '[receive-credit] persisted bytes regressed; keeping the higher value', {
+        previous: this.persistedOverallBytes,
+        reported: persistedOverallBytes,
+      });
+      this.receiveWindowBytes = receiveWindowBytes;
+      this.releaseNextWaiter();
+      return;
+    }
 
     this.persistedOverallBytes = persistedOverallBytes;
     this.receiveWindowBytes = receiveWindowBytes;
