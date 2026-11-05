@@ -72,6 +72,7 @@ import {
   type ResumeCheckpoint,
 } from '../services/receive/resumeCheckpoint';
 import { restoreCompletedFilesForResume } from '../services/receive/completedFileRestore';
+import { createMetadataChunkAssembler } from '../services/receive/metadataChunkAssembler';
 import { createReceivedFileManifest } from '../services/receive/receivedFileManifest';
 import { createArchiveExportSession } from '../services/receive/archiveExportSession';
 import {
@@ -253,7 +254,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
 
   const metadataRef = useRef<FileMetadata | null>(null);
-  const metadataChunkBufferRef = useRef<MetadataChunkBuffer | null>(null);
+  const metadataChunkAssemblerRef = useRef(createMetadataChunkAssembler());
   const acceptingRef = useRef<boolean>(false);
   const currentFileIndexRef = useRef<number>(0); 
   const currentFileNameRef = useRef<string>('');
@@ -1175,7 +1176,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       : indexedDbBufferedBytesRef.current;
     if (committedBytes <= 0) return;
     const previous = lastCheckpointWriteRef.current;
-    if (committedBytes - previous.bytes < 1024 * 1024 && Date.now() - previous.at < 2000) return;
+    if (
+      committedBytes - previous.bytes < CONNECTION_TIMINGS.RESUME_CHECKPOINT_MIN_BYTES &&
+      Date.now() - previous.at < CONNECTION_TIMINGS.RESUME_CHECKPOINT_MIN_INTERVAL_MS
+    ) {
+      return;
+    }
     lastCheckpointWriteRef.current = { bytes: committedBytes, at: Date.now() };
     saveResumeCheckpoint({
       sessionId: receiverSessionIdRef.current,
@@ -1418,55 +1424,25 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }
   };
 
-  // 分片 METADATA：按 transferId 重置缓冲、按 index 回填，收齐后 join + JSON.parse。
+  // 分片 METADATA：重组状态机在 services/receive/metadataChunkAssembler.ts，这里只负责
+  // 把结果转成 UI 状态。
   const handleMetadataChunkMessage = (conn: DataConnection, payload: MetadataChunkPayload) => {
-    const transferId = typeof payload?.transferId === 'string' ? payload.transferId : '';
-    const index = Number.isInteger(payload?.index) ? payload.index : -1;
-    const total = Number.isInteger(payload?.total) ? payload.total : -1;
-    const data = typeof payload?.data === 'string' ? payload.data : null;
+    const result = metadataChunkAssemblerRef.current.push(payload);
 
-    if (!transferId || total <= 0 || index < 0 || index >= total || data === null) {
-      setErrorMsg('文件元数据分片格式不正确，请重试。');
+    if (result.status === 'invalid') {
+      setErrorMsg(
+        result.reason === 'malformed'
+          ? '文件元数据分片格式不正确，请重试。'
+          : '文件元数据分片不完整，请重试。'
+      );
       setState(TransferState.ERROR);
       return;
     }
-
-    const existing = metadataChunkBufferRef.current;
-    if (!existing || existing.transferId !== transferId || existing.total !== total) {
-      metadataChunkBufferRef.current = {
-        transferId,
-        total,
-        received: 0,
-        chunks: new Map<number, string>(),
-      };
-    }
-
-    const buffer = metadataChunkBufferRef.current!;
-    if (!buffer.chunks.has(index)) {
-      buffer.chunks.set(index, data);
-      buffer.received += 1;
-    }
-
-    if (buffer.received < buffer.total) {
-      return;
-    }
-
-    metadataChunkBufferRef.current = null;
-
-    const parts: string[] = [];
-    for (let chunkIndex = 0; chunkIndex < buffer.total; chunkIndex += 1) {
-      const part = buffer.chunks.get(chunkIndex);
-      if (typeof part !== 'string') {
-        setErrorMsg('文件元数据分片不完整，请重试。');
-        setState(TransferState.ERROR);
-        return;
-      }
-      parts.push(part);
-    }
+    if (result.status === 'pending') return;
 
     let parsed: FileMetadata;
     try {
-      parsed = JSON.parse(parts.join('')) as FileMetadata;
+      parsed = JSON.parse(result.json) as FileMetadata;
     } catch {
       setErrorMsg('文件元数据解析失败，请重试。');
       setState(TransferState.ERROR);
@@ -2006,7 +1982,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       directorySaveSessionRef.current = createDirectorySaveSession();
       receivedFileManifestRef.current.reset();
       multiFileSaveModeRef.current = 'per-file-save-queue';
-      metadataChunkBufferRef.current = null;
+      metadataChunkAssemblerRef.current.reset();
       incomingDataProcessorRef.current.reset();
       receivePersistenceAdapter.reset();
       receivePersistenceOrchestrator.reset();
@@ -3007,7 +2983,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         committedReconnectAttemptsRef.current = 0;
         rotateSessionId();
         resetStateForNewTransfer();
-        metadataChunkBufferRef.current = null;
+        metadataChunkAssemblerRef.current.reset();
     });
   };
 

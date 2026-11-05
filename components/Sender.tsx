@@ -979,7 +979,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               ttlSeconds: 86_400,
               secret: current.secret,
             }).catch(() => {});
-          }, 30 * 60 * 1000);
+          }, CONNECTION_TIMINGS.SHARE_CODE_RENEWAL_INTERVAL_MS);
         }
       }
 

@@ -1063,8 +1063,26 @@ export class SignalingHub extends DurableObject {
   }
 
   webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+    // 计数必须在类型检查之前：否则二进制帧可以绕过节流无限发送。
+    const messageWindow = recordSignalingMessage(this.messageWindows.get(ws), Date.now());
+    this.messageWindows.set(ws, messageWindow.state);
+    if (!messageWindow.allowed) {
+      this.sendError(ws, 'rate-limited', 'Too many signaling messages');
+      try {
+        ws.close(1008, 'Too many signaling messages');
+      } catch {
+        // The peer may already be closed.
+      }
+      return;
+    }
+
     if (typeof message !== 'string') {
       this.sendError(ws, 'invalid-message', 'Only text signaling messages are supported');
+      try {
+        ws.close(1003, 'Binary messages are not supported');
+      } catch {
+        // The peer may already be closed.
+      }
       return;
     }
 
@@ -1072,18 +1090,6 @@ export class SignalingHub extends DurableObject {
       this.sendError(ws, 'invalid-message', 'Signaling message too large');
       try {
         ws.close(1009, 'Message too large');
-      } catch {
-        // The peer may already be closed.
-      }
-      return;
-    }
-
-    const messageWindow = recordSignalingMessage(this.messageWindows.get(ws), Date.now());
-    this.messageWindows.set(ws, messageWindow.state);
-    if (!messageWindow.allowed) {
-      this.sendError(ws, 'rate-limited', 'Too many signaling messages');
-      try {
-        ws.close(1008, 'Too many signaling messages');
       } catch {
         // The peer may already be closed.
       }

@@ -26,7 +26,8 @@ export const createFixedWindowRateLimiter = (
   const windows = new Map<string, RateWindow>();
 
   const prune = (now: number): void => {
-    if (windows.size <= options.maxTrackedKeys) return;
+    // 到上限就开始找过期项：只在「地图已满」时多花这次扫描，平时 O(1) 返回。
+    if (windows.size < options.maxTrackedKeys) return;
 
     for (const [key, window] of windows) {
       if (now - window.windowStartedAt >= options.windowMs) {
@@ -35,9 +36,27 @@ export const createFixedWindowRateLimiter = (
     }
   };
 
+  // 分布式突发时所有条目都还没过期，光靠 prune 清不掉：这里给一个硬上限，
+  // 超了就先淘汰窗口最早的那条，保证 map 永远不会无界增长。
+  const enforceHardCap = (incomingKey: string): void => {
+    while (windows.size >= options.maxTrackedKeys && !windows.has(incomingKey)) {
+      let oldestKey: string | null = null;
+      let oldestStart = Number.POSITIVE_INFINITY;
+      for (const [key, window] of windows) {
+        if (window.windowStartedAt < oldestStart) {
+          oldestStart = window.windowStartedAt;
+          oldestKey = key;
+        }
+      }
+      if (oldestKey === null) return;
+      windows.delete(oldestKey);
+    }
+  };
+
   return {
     consume(key: string, now: number): FixedWindowRateLimitDecision {
       prune(now);
+      enforceHardCap(key);
 
       const existing = windows.get(key);
       const window =

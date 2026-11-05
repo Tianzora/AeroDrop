@@ -61,7 +61,8 @@ test('prunes stale client keys once the tracked map is full', () => {
   limiters.get.consume('ip:a', 0);
   limiters.get.consume('ip:b', 0);
   limiters.get.consume('ip:c', 0);
-  assert.equal(limiters.get.getTrackedKeyCount(), 3);
+  // 硬上限：超出后淘汰最旧窗口，不再允许 map 无界增长。
+  assert.ok(limiters.get.getTrackedKeyCount() <= 2);
 
   limiters.get.consume('ip:d', 60_000);
   assert.equal(limiters.get.getTrackedKeyCount(), 1);

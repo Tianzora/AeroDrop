@@ -36,7 +36,8 @@ test('prunes stale client windows once the tracked map is full', () => {
   limiter.check('ip:a', 0);
   limiter.check('ip:b', 0);
   limiter.check('ip:c', 0);
-  assert.equal(limiter.getTrackedClientCount(), 3);
+  // 硬上限：超出后淘汰最旧窗口。
+  assert.ok(limiter.getTrackedClientCount() <= 2);
 
   limiter.check('ip:d', 60_000);
   assert.equal(limiter.getTrackedClientCount(), 1);

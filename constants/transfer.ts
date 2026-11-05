@@ -26,6 +26,11 @@ export const FLOW_CONTROL = {
 
 // 连接、重试、心跳与屏幕共享时序。组件只允许引用这里，不要在组件体内再写字面量。
 export const CONNECTION_TIMINGS = {
+  /** 「永久」分享的口令续期间隔（服务端 TTL 上限 24h）。 */
+  SHARE_CODE_RENEWAL_INTERVAL_MS: 30 * 60 * 1000,
+  /** 续传检查点的最小写入间隔/增量，避免每收到一块就写 localStorage。 */
+  RESUME_CHECKPOINT_MIN_INTERVAL_MS: 2_000,
+  RESUME_CHECKPOINT_MIN_BYTES: 1024 * 1024,
   RECEIVER_INITIAL_CONNECT_MS: 15_000,
   RECEIVER_RELAY_CONNECT_MS: 25_000,
   RECEIVER_FAST_RETRY_BASE_MS: 700,
