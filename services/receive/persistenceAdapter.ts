@@ -4,6 +4,7 @@ import {
   type ArchiveExportSession,
   type ArchiveExportSource,
 } from './archiveExportSession.ts';
+import { RECEIVE_STORAGE } from '../../constants/transfer.ts';
 import { logDebug } from '../diagnostics.ts';
 
 type StagedArchiveEntry = {
@@ -439,6 +440,16 @@ export const createReceivePersistenceAdapter = (
       return false;
     }
 
+    const stagedBytes = entries.reduce((total, entry) => total + (entry.blob.size || 0), 0);
+    if (stagedBytes > RECEIVE_STORAGE.ARCHIVE_MAX_IN_MEMORY_BYTES) {
+      // 内存 zip 会把整份归档再复制一遍；暂存总量超限时直接降级为逐个保存，避免收完之后 OOM。
+      logDebug('warn', 'Archive export skipped: staged bytes exceed the in-memory limit', {
+        stagedBytes,
+        limitBytes: RECEIVE_STORAGE.ARCHIVE_MAX_IN_MEMORY_BYTES,
+      });
+      return saveArchiveEntriesIndividually();
+    }
+
     try {
       const archive = await exportArchive({
         archiveName: archiveName ?? ensureArchiveDownloadName(undefined),
@@ -475,8 +486,17 @@ export const createReceivePersistenceAdapter = (
       return false;
     }
 
+    const [onlyEntry] = entries;
+    if (onlyEntry && entries.length === 1) {
+      triggerBrowserDownload(doc, win, urlApi, onlyEntry.blob, onlyEntry.fileName, options.isIOS, options.isSafari);
+      options.clearArchiveEntries?.();
+      return true;
+    }
+
+    // 多文件时在同一次用户手势里连点多个 <a download> 只会放行第一个，
+    // 其余被浏览器静默拦截、而暂存 blob 又被清空 = 文件丢失。统一进手动保存列表让用户逐个点。
     for (const entry of entries) {
-      triggerBrowserDownload(doc, win, urlApi, entry.blob, entry.fileName, options.isIOS, options.isSafari);
+      queuePreparedFileForManualSave(doc, win, urlApi, entry.blob, entry.fileName);
     }
 
     options.clearArchiveEntries?.();
@@ -491,6 +511,20 @@ export const createReceivePersistenceAdapter = (
         mode: 'per-file-save-queue',
         fileCount: 0,
       };
+    }
+
+    // 内存 zip 会同时驻留「全部暂存 Blob + 完整压缩包」，大目录到最后一刻会 OOM。
+    // 超过上限时直接降级为逐个保存（手动保存列表），不再尝试打包。
+    const stagedEntries = options.getArchiveEntries?.() ?? [];
+    const stagedBytes = stagedEntries.reduce((total, entry) => total + (entry.blob?.size || 0), 0);
+    if (stagedEntries.length > 1 && stagedBytes > RECEIVE_STORAGE.ARCHIVE_MAX_IN_MEMORY_BYTES) {
+      const queued = await saveArchiveEntriesIndividually();
+      if (queued) {
+        return {
+          mode: 'per-file-save-queue',
+          fileCount: stagedEntries.length,
+        };
+      }
     }
 
     try {

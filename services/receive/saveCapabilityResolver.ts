@@ -78,18 +78,24 @@ export const resolveReceiveSaveCapability = (
   };
 };
 
+/**
+ * 组件侧的薄封装：把“浏览器/设备判定”交给调用方，避免这里硬编码 isMobileDevice: false
+ * 把 canUseDirectoryDirect 的移动端拦截静默关掉。
+ */
 export const resolveMultiFileSaveMode = (input: {
   fileCount: number;
   isIOS: boolean;
   isSafari: boolean;
   supportsDirectoryPicker: boolean;
   supportsArchiveExport: boolean;
+  isMobileDevice?: boolean;
+  isChromium?: boolean;
 }) => {
   const resolution = resolveReceiveSaveCapability({
     fileCount: input.fileCount,
-    isChromium: !input.isIOS && !input.isSafari,
+    isChromium: input.isChromium ?? (!input.isIOS && !input.isSafari),
     isIOS: input.isIOS,
-    isMobileDevice: false,
+    isMobileDevice: input.isMobileDevice ?? false,
     isSafari: input.isSafari,
     supportsArchiveExport: input.supportsArchiveExport,
     supportsDirectoryPicker: input.supportsDirectoryPicker,

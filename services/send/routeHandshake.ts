@@ -1,6 +1,38 @@
 import type { FileMetadata, P2PMessage } from '../../types';
+import { METADATA_CHUNKING } from '../../constants/transfer.ts';
 import type { createReceiverSessionRegistry } from './receiverSessionRegistry';
 import type { createRouteCommitGate } from './routeCommitGate';
+
+// The SCTP data channel rejects messages above ~256 KiB (Chrome). Send metadata
+// either as one METADATA message or as a sequence of METADATA_CHUNK messages
+// that the receiver rejoins before parsing.
+export const sendMetadataMessages = (
+  send: (message: P2PMessage) => void,
+  metadata: FileMetadata,
+): void => {
+  const json = JSON.stringify(metadata);
+
+  if (json.length <= METADATA_CHUNKING.MAX_MESSAGE_BYTES) {
+    send({ type: 'METADATA', payload: metadata });
+    return;
+  }
+
+  const chunkSize = METADATA_CHUNKING.MAX_MESSAGE_BYTES;
+  const total = Math.ceil(json.length / chunkSize);
+  const transferId = `metadata-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+
+  for (let index = 0; index < total; index += 1) {
+    send({
+      type: 'METADATA_CHUNK',
+      payload: {
+        transferId,
+        index,
+        total,
+        data: json.slice(index * chunkSize, (index + 1) * chunkSize),
+      },
+    });
+  }
+};
 
 export type SenderRouteHandshakeConnection = {
   peer: string;
@@ -95,7 +127,7 @@ export const createSenderRouteHandshakeHandler = <TConn extends SenderRouteHands
           type: 'DEVICE_INFO',
           payload: { deviceName: options.deviceName },
         });
-        conn.send({ type: 'METADATA', payload: options.metadata });
+        sendMetadataMessages((message) => conn.send(message), options.metadata);
         const committedArgs = {
           conn,
           receiverSessionId: msg.payload.receiverSessionId,

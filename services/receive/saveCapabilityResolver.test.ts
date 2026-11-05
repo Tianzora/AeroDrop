@@ -73,3 +73,26 @@ test('keeps directory-direct disabled on mobile and single-file transfers', () =
   assert.deepEqual(singleFile.orderedModes, ['per-file-save-queue']);
   assert.equal(singleFile.shouldPromptForDirectory, false);
 });
+
+test('resolveMultiFileSaveMode honours the caller-provided device kind', () => {
+  const mobile = resolveMultiFileSaveMode({
+    fileCount: 3,
+    isIOS: false,
+    isSafari: false,
+    isMobileDevice: true,
+    supportsArchiveExport: true,
+    supportsDirectoryPicker: true,
+  });
+  const desktop = resolveMultiFileSaveMode({
+    fileCount: 3,
+    isIOS: false,
+    isSafari: false,
+    supportsArchiveExport: true,
+    supportsDirectoryPicker: true,
+  });
+
+  assert.equal(mobile.supportsDirectoryDirect, false);
+  assert.equal(mobile.mode, 'archive-export');
+  assert.equal(desktop.supportsDirectoryDirect, true);
+  assert.equal(desktop.mode, 'directory-direct');
+});

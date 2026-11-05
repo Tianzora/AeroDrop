@@ -1,3 +1,5 @@
+import { getRelativePathFileName, normalizeRelativePath, normalizeRelativePathSegments } from './relativePath.ts';
+
 export type ReceivedFileCompletionState =
   | 'pending'
   | 'receiving'
@@ -161,50 +163,54 @@ export interface ReceivedFileManifest {
   getSnapshot: () => ReceivedFileManifestSnapshot;
 }
 
-const CONTROL_CHARACTERS = /[\x00-\x1f]/;
-const WINDOWS_ABSOLUTE_PATH = /^[a-zA-Z]:[\\/]/;
+export const normalizeReceivedFileRelativePath = normalizeRelativePath;
 
-const normalizePathSegments = (relativePath: string): string[] => {
-  const trimmedPath = relativePath.trim();
+const MAX_PATH_DEDUPE_SUFFIX = 1000;
 
-  if (!trimmedPath) {
-    throw new Error('RELATIVE_PATH_EMPTY');
+const splitExtension = (fileName: string): { stem: string; extension: string } => {
+  const dotIndex = fileName.lastIndexOf('.');
+  if (dotIndex <= 0) {
+    return { stem: fileName, extension: '' };
   }
 
-  if (trimmedPath.startsWith('/')) {
-    throw new Error('RELATIVE_PATH_ABSOLUTE');
-  }
-
-  if (WINDOWS_ABSOLUTE_PATH.test(trimmedPath)) {
-    throw new Error('RELATIVE_PATH_ABSOLUTE');
-  }
-
-  const segments = trimmedPath
-    .replace(/\\/g, '/')
-    .split('/')
-    .filter((segment) => segment.length > 0);
-
-  if (segments.length === 0) {
-    throw new Error('RELATIVE_PATH_EMPTY');
-  }
-
-  for (const segment of segments) {
-    if (segment === '..') {
-      throw new Error('RELATIVE_PATH_TRAVERSAL');
-    }
-    if (segment === '.') {
-      throw new Error('RELATIVE_PATH_DOT_SEGMENT');
-    }
-    if (CONTROL_CHARACTERS.test(segment)) {
-      throw new Error('RELATIVE_PATH_INVALID_SEGMENT');
-    }
-  }
-
-  return segments;
+  return { stem: fileName.slice(0, dotIndex), extension: fileName.slice(dotIndex) };
 };
 
-export const normalizeReceivedFileRelativePath = (relativePath: string): string =>
-  normalizePathSegments(relativePath).join('/');
+/**
+ * peer 可以给两个不同的 fileIndex 送同一个相对路径（例如把两个不同目录下的同名文件一起拖进来，
+ * 发送端只能用 basename 当相对路径）。落盘时两者会命中同一个文件句柄、后一个覆盖前一个，
+ * 而按 fileIndex 记账的 savedCount 仍然显示“全部成功”，属于静默数据丢失。
+ * 这里在扩展名前追加 ` (2)` / ` (3)`，让每个 fileIndex 独占一个路径。
+ * 冲突判定不区分大小写，因为 Windows/macOS 的目标文件系统也不区分。
+ */
+const resolveUniqueRelativePath = (
+  snapshot: ReceivedFileManifestSnapshot,
+  fileIndex: number,
+  normalizedPath: string
+): string => {
+  const takenPaths = new Set(
+    snapshot.entries
+      .filter((entry) => entry.fileIndex !== fileIndex)
+      .map((entry) => entry.relativePath.toLowerCase())
+  );
+
+  if (!takenPaths.has(normalizedPath.toLowerCase())) {
+    return normalizedPath;
+  }
+
+  const segments = normalizedPath.split('/');
+  const parentSegments = segments.slice(0, -1);
+  const { stem, extension } = splitExtension(getRelativePathFileName(normalizedPath));
+
+  for (let suffix = 2; suffix <= MAX_PATH_DEDUPE_SUFFIX; suffix += 1) {
+    const candidate = [...parentSegments, `${stem} (${suffix})${extension}`].join('/');
+    if (!takenPaths.has(candidate.toLowerCase())) {
+      return candidate;
+    }
+  }
+
+  throw new Error(`RECEIVED_FILE_NAME_CONFLICT:${normalizedPath}`);
+};
 
 const getStatusForEntry = (
   completionState: ReceivedFileCompletionState,
@@ -287,15 +293,19 @@ const registerEntry = (
   snapshot: ReceivedFileManifestSnapshot,
   input: RegisterReceivedFileInput
 ): ReceivedFileManifestSnapshot => {
-  const relativePath = normalizeReceivedFileRelativePath(input.relativePath ?? input.fileName);
-  const pathSegments = normalizePathSegments(relativePath);
+  const relativePath = resolveUniqueRelativePath(
+    snapshot,
+    input.fileIndex,
+    normalizeReceivedFileRelativePath(input.relativePath ?? input.fileName)
+  );
+  const pathSegments = normalizeRelativePathSegments(relativePath);
   const existing = getEntryFromSnapshot(snapshot, input.fileIndex);
   const completionState = existing?.completionState ?? 'pending';
   const saveState = existing?.saveState ?? 'pending';
 
   return replaceEntryInSnapshot(snapshot, {
     fileIndex: input.fileIndex,
-    fileName: input.fileName,
+    fileName: getRelativePathFileName(relativePath),
     relativePath,
     pathSegments,
     fileSize: Math.max(0, input.fileSize),
@@ -389,7 +399,8 @@ export const createReceivedFileManifest = (): ReceivedFileManifest => {
       files.forEach((file, fileIndex) => {
         nextSnapshot = registerEntry(nextSnapshot, {
           fileIndex,
-          fileName: normalizeReceivedFileRelativePath(file.name).split('/').pop() ?? file.name,
+          // registerEntry 会按归一化（含去重后的）相对路径重算展示名。
+          fileName: file.name,
           relativePath: file.name,
           fileSize: file.size,
           fileType: file.type || 'application/octet-stream',

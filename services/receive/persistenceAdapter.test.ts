@@ -5,6 +5,7 @@ import {
   createReceivePersistenceAdapter,
   type ReceiveBatchPersistenceRequest,
 } from './persistenceAdapter.ts';
+import { RECEIVE_STORAGE } from '../../constants/transfer.ts';
 
 class MockElement {
   id = '';
@@ -294,6 +295,76 @@ test('falls back to individual saves when archive export fails', async () => {
   }
 });
 
+test('saveReceivedFiles skips the in-memory archive once staged bytes exceed the limit', async () => {
+  const documentRef = new MockDocument() as unknown as Document;
+  const createdUrls: string[] = [];
+  let archiveCalls = 0;
+  let cleared = 0;
+  const fakeBlob = (size: number) => ({ size } as unknown as Blob);
+
+  const adapter = createReceivePersistenceAdapter({
+    isIOS: false,
+    isSafari: false,
+    isTransferActive: () => true,
+    getReceivedSize: () => 0,
+    getCurrentFileSize: () => 0,
+    getCurrentFileIndex: () => 0,
+    getCurrentFileInfo: () => null,
+    isIndexedDbBuffering: () => false,
+    getMemoryChunks: () => [],
+    readIndexedDbBlobsForFile: async () => [],
+    deleteIndexedDbChunksForFile: async () => {},
+    resetIndexedDbFileState: () => {},
+    resetMemoryFileState: () => {},
+    failTransferPersistence: (message) => {
+      throw new Error(message);
+    },
+    getArchiveEntries: () => [
+      {
+        relativePath: 'folder/a.bin',
+        fileName: 'a.bin',
+        blob: fakeBlob(600 * 1024 * 1024),
+      },
+      {
+        relativePath: 'folder/b.bin',
+        fileName: 'b.bin',
+        blob: fakeBlob(600 * 1024 * 1024),
+      },
+    ],
+    exportArchiveBlob: async () => {
+      archiveCalls += 1;
+      throw new Error('SHOULD_NOT_ARCHIVE');
+    },
+    clearArchiveEntries: () => {
+      cleared += 1;
+    },
+    documentRef,
+    windowRef: createWindowStub(),
+    urlRef: {
+      createObjectURL: () => {
+        const next = `blob:${createdUrls.length + 1}`;
+        createdUrls.push(next);
+        return next;
+      },
+      revokeObjectURL: () => {},
+    },
+  });
+
+  const result = await adapter.saveReceivedFiles({
+    archiveName: 'bundle.zip',
+    files: [
+      { relativePath: 'folder/a.bin', downloadName: 'a.bin', open: async () => fakeBlob(600 * 1024 * 1024) },
+      { relativePath: 'folder/b.bin', downloadName: 'b.bin', open: async () => fakeBlob(600 * 1024 * 1024) },
+    ],
+  });
+
+  assert.equal(result.mode, 'per-file-save-queue');
+  assert.equal(result.fileCount, 2);
+  assert.equal(archiveCalls, 0);
+  assert.equal(cleared, 1);
+  assert.deepEqual(createdUrls, ['blob:1', 'blob:2']);
+});
+
 test('saveReceivedFiles downloads one archive when archive export succeeds', async () => {
   const documentRef = new MockDocument() as unknown as Document;
   const createdUrls: string[] = [];
@@ -398,4 +469,147 @@ test('saveReceivedFiles falls back to per-file queue when archive export fails',
   assert.equal(result.archiveErrorMessage, 'zip export failed');
   assert.equal(list?.childElementCount, 2);
   assert.deepEqual(createdUrls, ['blob:1', 'blob:2']);
+});
+
+test('saveArchiveEntriesIndividually queues every file for manual save on desktop', async () => {
+  const documentRef = new MockDocument() as unknown as Document;
+  const createdUrls: string[] = [];
+  let cleared = 0;
+
+  const adapter = createReceivePersistenceAdapter({
+    isIOS: false,
+    isSafari: false,
+    isTransferActive: () => true,
+    getReceivedSize: () => 0,
+    getCurrentFileSize: () => 0,
+    getCurrentFileIndex: () => 0,
+    getCurrentFileInfo: () => null,
+    isIndexedDbBuffering: () => false,
+    getMemoryChunks: () => [],
+    readIndexedDbBlobsForFile: async () => [],
+    deleteIndexedDbChunksForFile: async () => {},
+    resetIndexedDbFileState: () => {},
+    resetMemoryFileState: () => {},
+    failTransferPersistence: (message) => {
+      throw new Error(message);
+    },
+    getArchiveEntries: () => [
+      { relativePath: 'folder/a.txt', fileName: 'a.txt', blob: new Blob(['a']) },
+      { relativePath: 'folder/b.txt', fileName: 'b.txt', blob: new Blob(['b']) },
+    ],
+    clearArchiveEntries: () => {
+      cleared += 1;
+    },
+    documentRef,
+    windowRef: createWindowStub(),
+    urlRef: {
+      createObjectURL: () => {
+        const next = `blob:${createdUrls.length + 1}`;
+        createdUrls.push(next);
+        return next;
+      },
+      revokeObjectURL: () => {},
+    },
+  });
+
+  assert.equal(await adapter.saveArchiveEntriesIndividually(), true);
+  assert.equal(cleared, 1);
+  assert.deepEqual(createdUrls, ['blob:1', 'blob:2']);
+
+  const list = (documentRef as unknown as MockDocument).getElementById('ios-download-list');
+  assert.ok(list);
+  assert.equal(list?.childElementCount, 2);
+});
+
+test('saveArchiveEntriesIndividually still auto-downloads a single entry', async () => {
+  const documentRef = new MockDocument() as unknown as Document;
+  const createdUrls: string[] = [];
+
+  const adapter = createReceivePersistenceAdapter({
+    isIOS: false,
+    isSafari: false,
+    isTransferActive: () => true,
+    getReceivedSize: () => 0,
+    getCurrentFileSize: () => 0,
+    getCurrentFileIndex: () => 0,
+    getCurrentFileInfo: () => null,
+    isIndexedDbBuffering: () => false,
+    getMemoryChunks: () => [],
+    readIndexedDbBlobsForFile: async () => [],
+    deleteIndexedDbChunksForFile: async () => {},
+    resetIndexedDbFileState: () => {},
+    resetMemoryFileState: () => {},
+    failTransferPersistence: (message) => {
+      throw new Error(message);
+    },
+    getArchiveEntries: () => [
+      { relativePath: 'folder/a.txt', fileName: 'a.txt', blob: new Blob(['a']) },
+    ],
+    clearArchiveEntries: () => {},
+    documentRef,
+    windowRef: createWindowStub(),
+    urlRef: {
+      createObjectURL: () => {
+        const next = `blob:${createdUrls.length + 1}`;
+        createdUrls.push(next);
+        return next;
+      },
+      revokeObjectURL: () => {},
+    },
+  });
+
+  assert.equal(await adapter.saveArchiveEntriesIndividually(), true);
+  assert.deepEqual(createdUrls, ['blob:1']);
+  assert.equal((documentRef as unknown as MockDocument).body.childElementCount, 0);
+});
+
+test('exportArchiveEntries skips the in-memory zip once staged bytes exceed the limit', async () => {
+  const documentRef = new MockDocument() as unknown as Document;
+  const oversizedBlob = { size: RECEIVE_STORAGE.ARCHIVE_MAX_IN_MEMORY_BYTES } as unknown as Blob;
+  let archiveExportCalls = 0;
+  let cleared = 0;
+
+  const adapter = createReceivePersistenceAdapter({
+    isIOS: false,
+    isSafari: false,
+    isTransferActive: () => true,
+    getReceivedSize: () => 0,
+    getCurrentFileSize: () => 0,
+    getCurrentFileIndex: () => 0,
+    getCurrentFileInfo: () => null,
+    isIndexedDbBuffering: () => false,
+    getMemoryChunks: () => [],
+    readIndexedDbBlobsForFile: async () => [],
+    deleteIndexedDbChunksForFile: async () => {},
+    resetIndexedDbFileState: () => {},
+    resetMemoryFileState: () => {},
+    failTransferPersistence: (message) => {
+      throw new Error(message);
+    },
+    getArchiveEntries: () => [
+      { relativePath: 'big/a.bin', fileName: 'a.bin', blob: oversizedBlob },
+      { relativePath: 'big/b.bin', fileName: 'b.bin', blob: oversizedBlob },
+    ],
+    exportArchiveBlob: async () => {
+      archiveExportCalls += 1;
+      throw new Error('SHOULD_NOT_EXPORT');
+    },
+    clearArchiveEntries: () => {
+      cleared += 1;
+    },
+    documentRef,
+    windowRef: createWindowStub(),
+    urlRef: {
+      createObjectURL: () => 'blob:1',
+      revokeObjectURL: () => {},
+    },
+  });
+
+  assert.equal(await adapter.exportArchiveEntries('bundle.zip'), true);
+  assert.equal(archiveExportCalls, 0);
+  assert.equal(cleared, 1);
+
+  const list = (documentRef as unknown as MockDocument).getElementById('ios-download-list');
+  assert.ok(list);
+  assert.equal(list?.childElementCount, 2);
 });

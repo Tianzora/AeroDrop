@@ -1,3 +1,5 @@
+import { logDebug } from '../diagnostics.ts';
+
 export type ReceiveStreamingTargetKind = 'native-fs' | 'stream-saver';
 
 export interface ReceiveStreamingTarget {
@@ -134,6 +136,56 @@ export const createReceiveStreamingWriter = (
     }
   };
 
+  /**
+   * close() 抛错时不能直接判定落盘失败：verifyCommittedBytes 已经核对过磁盘长度，
+   * 数据确实在盘上，只是写入流没正常收尾。语义改定为：
+   * verify 通过 → 再 close 一次 → 仍失败就用 abort() 尽力释放文件锁 → 最终仍返回 true，
+   * 失败细节只记 warn，不再把已成型文件判为“落盘失败”让用户重传。
+   */
+  const recoverCommittedTarget = async (): Promise<boolean> => {
+    const target = activeTarget;
+    if (!target) {
+      return false;
+    }
+
+    const expectedBytes = committedBytes;
+    let verified = false;
+    if (target.verifyCommittedBytes) {
+      try {
+        verified = await target.verifyCommittedBytes(expectedBytes);
+      } catch (verifyError) {
+        logDebug('warn', '[streaming-writer] committed byte verification threw', verifyError);
+        verified = false;
+      }
+    }
+
+    if (!verified) {
+      return false;
+    }
+
+    try {
+      await target.close();
+      clearTarget(false);
+      return true;
+    } catch (closeError) {
+      logDebug('warn', '[streaming-writer] close failed after verified bytes; releasing the stream', {
+        expectedBytes,
+        error: closeError instanceof Error ? closeError.message : String(closeError),
+      });
+    }
+
+    if (target.abort) {
+      try {
+        await target.abort();
+      } catch (abortError) {
+        logDebug('warn', '[streaming-writer] abort after failed close was not clean', abortError);
+      }
+    }
+
+    clearTarget(false);
+    return true;
+  };
+
   return {
     attachTarget: (target, attachOptions) => {
       activeTarget = target;
@@ -187,18 +239,7 @@ export const createReceiveStreamingWriter = (
         clearTarget(false);
         return true;
       } catch {
-        if (activeTarget?.verifyCommittedBytes) {
-          try {
-            const verified = await activeTarget.verifyCommittedBytes(committedBytes);
-            if (verified) {
-              clearTarget(false);
-              return true;
-            }
-          } catch {
-            // Fall through to failure result.
-          }
-        }
-        return false;
+        return recoverCommittedTarget();
       }
     },
 
