@@ -25,7 +25,7 @@ export const CodeInput: React.FC<CodeInputProps> = ({ value, onChange, inputRef,
           <div
             key={i}
             className={cn(
-              'flex h-16 w-12 items-end justify-center border-b-[1.5px] pb-1.5 font-serif text-[36px] font-normal tabular-nums transition-colors duration-150 ease-out',
+              'flex h-16 w-12 items-end justify-center border-b-[1.5px] pb-1.5 font-serif text-[36px] font-normal tabular-nums transition-colors duration-200 ease-out',
               d ? 'border-ink text-ink' : 'border-border-strong text-subtle',
               invalid && 'border-danger',
             )}
@@ -37,8 +37,16 @@ export const CodeInput: React.FC<CodeInputProps> = ({ value, onChange, inputRef,
       <input
         ref={inputRef}
         type="text"
+        name="aerodrop-share-code"
         inputMode="numeric"
-        autoComplete="one-time-code"
+        autoComplete="off"
+        autoCorrect="off"
+        autoCapitalize="off"
+        spellCheck={false}
+        data-lpignore="true"
+        data-1p-ignore="true"
+        data-bwignore="true"
+        data-form-type="other"
         maxLength={length}
         value={value}
         disabled={disabled}

@@ -40,7 +40,7 @@ export const SenderIdlePanel: React.FC<SenderIdlePanelProps> = ({ isDragOver, ha
     <h1 data-morph="title" className="relative font-serif font-normal text-[clamp(36px,5.2vw,64px)] leading-[1.05] tracking-[-.022em] text-ink">
       发送文件
     </h1>
-    <p data-morph="sub" className="relative mt-6 max-w-[58ch] text-[15px] leading-[1.7] text-muted">
+    <p data-morph="sub" className="relative mt-5 max-w-[58ch] text-[15px] leading-[1.7] text-muted">
       {isDragOver ? '松开即可添加' : '拖拽文件到这里，或点击下方选择文件'}
     </p>
     <div className="relative mt-10 flex items-center gap-6 sm:gap-8">
