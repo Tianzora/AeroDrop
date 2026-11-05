@@ -5,7 +5,7 @@
   --surface:#F5F0E7; --raised:#FBF8F1; --sunken:#EDE6D8;
   --border:#DED5C5; --border-strong:#CFC4B1;
   --text:#1B1A16; --text-muted:#5F594E; --text-subtle:#6B6457;
-  --ink:#1B1A16; --accent:#2E5D4B; --accent-contrast:#F5F0E7;
+  --ink:#1B1A16; --accent:#1B1A16; --accent-contrast:#F5F0E7;
   --success:#3E6B52; --danger:#8F3A2F; --warning:#7A5C22; --info:#3A5570;
 
   --dur-1:120ms; --dur-2:180ms; --dur-3:240ms; --dur-4:320ms;

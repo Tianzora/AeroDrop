@@ -2,7 +2,7 @@
   "name": "AeroDrop",
   "short_name": "AeroDrop",
   "description": "Secure P2P File Transfer",
-  "theme_color": "#2E5D4B",
+  "theme_color": "#1B1A16",
   "background_color": "#F5F0E7",
   "display": "standalone",
   "start_url": "/",
