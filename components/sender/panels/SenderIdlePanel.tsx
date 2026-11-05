@@ -15,7 +15,6 @@ const Rings = () => {
     <div aria-hidden className="pointer-events-none absolute inset-0 flex items-center justify-center">
       <div className="relative h-[min(560px,74vw)] w-[min(560px,74vw)]">
         <span className="ripple-core absolute inset-0 rounded-full" />
-        <span className="absolute inset-[30%] rounded-full border border-border-strong/25" />
         {[0, 1.2, 2.4].map((d) => (
           <span
             key={d}

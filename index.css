@@ -92,7 +92,9 @@ body {
 }
 .ripple-ring {
   border: 1.25px solid color-mix(in srgb, var(--accent) 50%, transparent);
-  animation: ripple-ring-kf 3.6s cubic-bezier(.2,.65,.35,1) infinite;
+  opacity: 0;
+  transform: scale(.06);
+  animation: ripple-ring-kf 3.6s cubic-bezier(.2,.65,.35,1) infinite both;
   will-change: transform, opacity;
 }
 .ripple-core {
