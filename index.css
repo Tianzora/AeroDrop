@@ -84,8 +84,6 @@ body {
 .motion-scale { animation: motion-scale-kf var(--dur-2) var(--ease-out) both; }
 .motion-shake { animation: motion-shake-kf var(--dur-2) linear both; }
 .motion-sheet { animation: motion-sheet-up-kf var(--dur-4) var(--ease-drawer) both; }
-@keyframes stage-switch-kf { from { opacity: 0; transform: translate3d(var(--switch-x, 14px), 0, 0); } to { opacity: 1; transform: none; } }
-.stage-switch { animation: stage-switch-kf var(--dur-3) var(--ease-out) both; }
 @keyframes ripple-ring-kf {
   0%   { transform: scale(.06); opacity: 0; }
   8%   { opacity: .52; }
@@ -107,6 +105,6 @@ body {
 .stagger > *:nth-child(2){animation-delay:30ms}.stagger > *:nth-child(3){animation-delay:60ms}.stagger > *:nth-child(4){animation-delay:90ms}.stagger > *:nth-child(5){animation-delay:120ms}.stagger > *:nth-child(n+6){animation-delay:150ms}
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after { animation-duration: 1ms !important; animation-delay: 0ms !important; transition-duration: 1ms !important; }
-  .motion-rise, .motion-scale, .motion-sheet, .stage-switch, .stagger > * { transform: none !important; }
+  .motion-rise, .motion-scale, .motion-sheet, .stagger > * { transform: none !important; }
   .motion-shake { animation: none !important; }
 }
