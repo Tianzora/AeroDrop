@@ -33,7 +33,7 @@ export const ReceiverOfferPanel: React.FC<ReceiverOfferPanelProps> = ({
         <p className="mb-4 text-[13px] text-muted">来自 <span className="font-semibold text-ink">{senderDeviceName}</span></p>
       )}
       <div className="flex items-start gap-4">
-        <div className="grid h-12 w-12 shrink-0 place-items-center rounded-[10px] border border-border bg-sunken text-muted">
+        <div className="grid h-12 w-12 shrink-0 place-items-center rounded-[4px] border border-border bg-sunken text-muted">
           {isMultiFile ? <Layers size={24} className="text-accent" /> : <FileTypeIcon type={primaryFileType ?? 'unknown'} size={24} />}
         </div>
         <div className="min-w-0 flex-1">
@@ -43,7 +43,7 @@ export const ReceiverOfferPanel: React.FC<ReceiverOfferPanelProps> = ({
       </div>
 
       {isMultiFile && selectedFiles.length > 0 && (
-        <div className="mt-4 overflow-hidden rounded-[10px] border border-border">
+        <div className="mt-4 overflow-hidden rounded-[4px] border border-border">
           <button onClick={onToggleFileList} className="flex w-full items-center justify-between bg-sunken px-4 py-2.5 text-[13px] font-semibold text-muted hover:bg-border/40">
             <span>文件列表 ({selectedFiles.length})</span>
             {showFileList ? <ChevronUp size={16} /> : <ChevronDown size={16} />}

@@ -5,17 +5,17 @@ import { Loader2 } from 'lucide-react';
 import { cn } from './cn';
 
 const buttonVariants = cva(
-  'inline-flex items-center justify-center gap-2 whitespace-nowrap font-medium rounded-[9px] border transition-[transform,background-color,color,border-color,box-shadow] duration-150 ease-out select-none disabled:pointer-events-none disabled:opacity-50 active:scale-[.98] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface [&_svg]:shrink-0',
+  'inline-flex items-center justify-center gap-2 whitespace-nowrap font-sans text-[13px] font-medium tracking-[.01em] rounded-[3px] border transition-[transform,background-color,color,border-color,box-shadow] duration-150 ease-out select-none disabled:pointer-events-none disabled:opacity-50 active:scale-[.99] focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-accent focus-visible:ring-offset-2 focus-visible:ring-offset-surface [&_svg]:shrink-0',
   {
     variants: {
       variant: {
-        primary: 'bg-ink text-surface border-transparent hover:bg-ink/90 shadow-[var(--shadow-1)]',
-        secondary: 'bg-raised text-text border-border-strong hover:bg-sunken',
+        primary: 'bg-ink text-surface border-transparent hover:bg-ink/90',
+        secondary: 'bg-transparent text-text border-border-strong hover:bg-sunken',
         ghost: 'bg-transparent text-text border-transparent hover:bg-sunken',
         danger: 'bg-danger/10 text-danger border-danger/30 hover:bg-danger/15',
         outline: 'bg-transparent text-text border-border hover:bg-sunken',
       },
-      size: { sm: 'h-9 px-3 text-[13px]', md: 'h-11 px-4 text-sm', lg: 'h-12 px-5 text-[15px]' },
+      size: { sm: 'h-9 px-3.5', md: 'h-11 px-5', lg: 'h-12 px-6' },
     },
     defaultVariants: { variant: 'primary', size: 'md' },
   },

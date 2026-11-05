@@ -1,8 +1,5 @@
 import React from 'react';
-import { X, ShieldCheck } from 'lucide-react';
 import { TransferState } from '../../../types';
-import { Button } from '../../ui/Button';
-import { Card } from '../../ui/Card';
 import { CodeDisplay, ShareLink } from '../../ui/CodeDisplay';
 import { StatusDot } from '../../ui/StatusDot';
 import { SenderDeviceList } from './SenderDeviceList';
@@ -28,29 +25,33 @@ export const SenderPairingPanel: React.FC<SenderPairingPanelProps> = ({
 }) => {
   const waiting = individualStats.length === 0;
   return (
-    <div className="space-y-4 motion-rise">
-      <Card className="p-6 sm:p-8">
-        <div className="flex items-center justify-between gap-3">
-          <div className="flex items-center gap-2.5">
-            <StatusDot status={waiting ? 'waiting' : 'transferring'} pulse={waiting} />
-            <span className="text-[15px] font-semibold text-ink">{waiting ? '等待接收方接入…' : '接收方已接入'}</span>
-          </div>
-          <span className="text-[12px] text-muted">{connectionStatus}</span>
+    <div className="mx-auto w-full max-w-[560px] space-y-6 motion-rise">
+      <div className="relative mx-auto w-full max-w-[460px] border border-border bg-raised px-8 pb-7 pt-8 shadow-[var(--shadow-2)]">
+        <div className="flex items-center justify-between text-[11px] tracking-[.04em] text-subtle">
+          <span>取件口令</span>
+          <span>{remainingTime ? `有效期 ${remainingTime}` : ''}</span>
         </div>
 
-        <div className="mt-6 flex flex-col items-center gap-4">
+        <div className="mt-6 flex flex-col items-center gap-3">
           <CodeDisplay code={transferCode} copied={copied} onCopy={handleCopyCode} />
           <p className="text-[13px] text-muted">在另一台设备输入此口令即可取件</p>
-          <ShareLink link={shareLink} copied={linkCopied} onCopy={handleCopyLink} />
         </div>
 
-        <div className="mt-6 flex items-center gap-2 rounded-[10px] bg-sunken px-4 py-3 text-[12px] text-muted">
-          <ShieldCheck size={15} className="shrink-0 text-success" />
-          <span>保持此页面打开；关闭会中断连接。{remainingTime ? `口令有效期 ${remainingTime}。` : ''}</span>
-        </div>
+        <div className="my-6 h-px bg-[repeating-linear-gradient(90deg,var(--border-strong)_0_6px,transparent_6px_12px)]" />
 
-        <Button variant="danger" fullWidth className="mt-4" icon={<X size={17} />} onClick={stopSharing}>停止分享</Button>
-      </Card>
+        <ShareLink link={shareLink} copied={linkCopied} onCopy={handleCopyLink} />
+
+        <div className="mt-5 flex items-center justify-center gap-2 text-[12.5px] text-muted">
+          <StatusDot status={waiting ? 'waiting' : 'transferring'} pulse={waiting} />
+          <span>{waiting ? '等待接收方接入' : '接收方已接入'}{connectionStatus ? ` · ${connectionStatus}` : ''}</span>
+        </div>
+      </div>
+
+      <div className="flex justify-center">
+        <button type="button" onClick={stopSharing} className="text-[13px] text-muted underline underline-offset-4 transition-colors hover:text-danger">
+          停止分享
+        </button>
+      </div>
 
       <SenderDeviceList stats={individualStats} />
     </div>

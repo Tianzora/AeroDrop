@@ -69,13 +69,9 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = (props) => {
   }
 
   return (
-    <div className="mx-auto w-full max-w-[880px]">
-      <header className="mb-6 text-center">
-        <div className="mb-3.5 inline-grid h-14 w-14 place-items-center rounded-[16px] border border-border bg-raised text-accent shadow-[var(--shadow-1)]">
-          {isViewing || isConnecting ? <Eye size={26} /> : <Monitor size={26} />}
-        </div>
-        <h1 className="text-[30px] font-semibold leading-[1.08] tracking-[-.03em] text-ink sm:text-[34px]">{title}</h1>
-        <p className="mt-1 text-[14px] text-muted">{subtitle}</p>
+    <div className="mx-auto flex min-h-[480px] w-full max-w-[880px] flex-col justify-center">
+      <header className="mb-9 text-center">
+        <h1 className="font-serif font-normal text-[clamp(30px,4vw,44px)] leading-[1.08] tracking-[-.02em] text-ink">{title}</h1>
       </header>
       {showTopError && <ShareErrorBanner error={error as string} />}
       {body}

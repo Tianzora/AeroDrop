@@ -33,7 +33,7 @@ export const SenderConfigurePanel: React.FC<SenderConfigurePanelProps> = ({
       <div className="flex items-center gap-4">
         {metadata.files.length === 1 && selectedFiles[0] ? (
           <>
-            <div className="grid h-12 w-12 shrink-0 place-items-center rounded-[10px] border border-border bg-sunken text-muted">
+            <div className="grid h-12 w-12 shrink-0 place-items-center rounded-[4px] border border-border bg-sunken text-muted">
               <FileTypeIcon type={selectedFiles[0].fileType} size={24} />
             </div>
             <div className="min-w-0 flex-1">
@@ -52,7 +52,7 @@ export const SenderConfigurePanel: React.FC<SenderConfigurePanelProps> = ({
         </button>
       </div>
       {metadata.files.length > 1 && (
-        <div className="mt-4 overflow-hidden rounded-[10px] border border-border">
+        <div className="mt-4 overflow-hidden rounded-[4px] border border-border">
           <button onClick={onToggleFileList} className="flex w-full items-center justify-between bg-sunken px-4 py-2.5 text-[13px] font-semibold text-muted hover:bg-border/40">
             <span>文件列表 ({metadata.files.length})</span>
             {showFileList ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
@@ -81,7 +81,7 @@ export const SenderConfigurePanel: React.FC<SenderConfigurePanelProps> = ({
             id="expiry-select"
             value={expiryOption}
             onChange={(e) => setExpiryOption(e.target.value)}
-            className="h-11 w-full rounded-[10px] border border-border bg-raised px-3 text-[16px] text-text focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 sm:text-sm"
+            className="h-11 w-full rounded-[4px] border border-border bg-raised px-3 text-[16px] text-text focus:border-accent focus:outline-none focus:ring-2 focus:ring-accent/30 sm:text-sm"
           >
             <option value="10m">10 分钟</option>
             <option value="1h">1 小时</option>
@@ -103,7 +103,7 @@ export const SenderConfigurePanel: React.FC<SenderConfigurePanelProps> = ({
         </Field>
       </div>
       {errorMsg && (
-        <div className="flex items-center gap-2 rounded-[10px] bg-danger/10 px-3 py-2 text-[13px] text-danger">
+        <div className="flex items-center gap-2 rounded-[4px] bg-danger/10 px-3 py-2 text-[13px] text-danger">
           <AlertCircle size={15} /> {errorMsg}
         </div>
       )}

@@ -11,8 +11,7 @@ export interface CodeDisplayProps {
 }
 
 /**
- * 6 位口令展示。必须把整串口令渲染在**同一个文本节点**里，便于 e2e getByText(code,{exact}) 命中。
- * 视觉上用等宽 + 字距 + tabular-nums，不做逐位分格（逐位拆分会破坏整串文案匹配）。
+ * 6 位口令展示。整串口令渲染在**同一个文本节点**里，便于 e2e getByText(code,{exact}) 命中。
  */
 export const CodeDisplay: React.FC<CodeDisplayProps> = ({ code, copied, onCopy, size = 'lg', className }) => (
   <button
@@ -21,15 +20,14 @@ export const CodeDisplay: React.FC<CodeDisplayProps> = ({ code, copied, onCopy, 
     aria-label={copied ? '口令已复制' : '复制口令'}
     title={onCopy ? '点击复制口令' : undefined}
     className={cn(
-      'group inline-flex items-center justify-center gap-3 rounded-[14px] border-2 px-6 font-mono font-bold tabular-nums leading-none',
-      'transition-colors duration-150 ease-out',
-      size === 'lg' ? 'h-[86px] text-[38px] tracking-[.14em]' : 'h-[60px] text-[26px] tracking-[.12em]',
-      copied ? 'border-success/40 bg-success/10 text-success' : 'border-border-strong bg-raised text-accent hover:border-accent/60',
+      'group inline-flex items-baseline justify-center gap-3 font-serif font-normal tabular-nums leading-none text-accent transition-colors duration-150',
+      size === 'lg' ? 'text-[46px] tracking-[.06em]' : 'text-[30px] tracking-[.05em]',
+      onCopy ? 'cursor-pointer hover:text-accent/80' : 'cursor-default',
       className,
     )}
   >
     <span>{code}</span>
-    {onCopy && (copied ? <Check size={20} className="text-success" /> : <Copy size={20} className="opacity-50 group-hover:opacity-100" />)}
+    {onCopy && (copied ? <Check size={16} className="text-success" /> : <Copy size={16} className="text-subtle opacity-60 group-hover:opacity-100" />)}
   </button>
 );
 
@@ -40,16 +38,15 @@ export interface ShareLinkProps {
 }
 
 export const ShareLink: React.FC<ShareLinkProps> = ({ link, copied, onCopy }) => (
-  <div className="flex items-center gap-2 rounded-[10px] border border-border bg-sunken px-3 py-2">
-    <span className="flex-1 min-w-0 truncate font-mono text-[12px] text-muted select-all" title={link}>{link}</span>
+  <div className="flex items-center gap-2 border-b border-border pb-2">
+    <span className="min-w-0 flex-1 truncate font-mono text-[12px] text-muted select-all" title={link}>{link}</span>
     <button
       type="button"
       onClick={onCopy}
-      aria-label={copied ? '链接已复制' : '复制分享链接'}
-      className="shrink-0 inline-flex h-8 items-center gap-1 rounded-md px-2 text-[12px] font-semibold text-accent hover:bg-accent/10"
+      aria-label={copied ? '链接已复制' : '复制链接'}
+      className="inline-flex items-center gap-1.5 font-mono text-[11px] uppercase tracking-[.14em] text-muted transition-colors hover:text-accent"
     >
-      {copied ? <Check size={15} /> : <Copy size={15} />}
-      {copied ? '已复制' : '复制'}
+      {copied ? <Check size={14} /> : <Copy size={14} />} {copied ? '已复制' : '复制'}
     </button>
   </div>
 );

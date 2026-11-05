@@ -12,7 +12,7 @@ export interface ViewerPanelProps {
 
 export const ViewerPanel: React.FC<ViewerPanelProps> = ({ viewerVideoRef, needsPlayClick, onViewerPlayClick, stopViewing, qualityLabel }) => (
   <div className="motion-rise">
-    <div className="relative mb-4 overflow-hidden rounded-[14px] border border-border bg-black">
+    <div className="relative mb-4 overflow-hidden rounded-[4px] border border-border bg-black">
       <video ref={viewerVideoRef} autoPlay playsInline controls className="aspect-video w-full object-contain" />
       {needsPlayClick && (
         <div className="absolute inset-0 flex cursor-pointer flex-col items-center justify-center bg-black/60" onClick={onViewerPlayClick}>

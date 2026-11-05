@@ -39,7 +39,7 @@ export const ShareActivePanel: React.FC<ShareActivePanelProps> = ({
       </Card>
     )}
 
-    <div className="group relative overflow-hidden rounded-[14px] border border-border bg-black">
+    <div className="group relative overflow-hidden rounded-[4px] border border-border bg-black">
       <video ref={sharerVideoRef} autoPlay playsInline muted className="aspect-video w-full object-contain" />
       <button onClick={changeScreenSource} title="切换共享窗口" aria-label="切换共享窗口" className="absolute right-3 top-3 rounded-md bg-black/50 p-2 text-white opacity-0 transition-opacity duration-150 group-hover:opacity-100">
         <MonitorUp size={18} />

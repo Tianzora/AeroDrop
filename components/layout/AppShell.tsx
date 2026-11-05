@@ -10,8 +10,8 @@ export interface AppShellProps {
 export const AppShell: React.FC<AppShellProps> = ({ topBar, children, footer, overlays }) => (
   <div className="flex min-h-[100dvh] flex-col bg-surface text-text">
     {topBar}
-    <main className="flex-1">
-      <div className="mx-auto flex w-full max-w-[1120px] flex-col px-4 pb-10 pt-6 sm:px-5 lg:px-6 lg:pt-8">
+    <main className="flex flex-1 flex-col">
+      <div className="mx-auto flex w-full max-w-[1000px] flex-1 flex-col px-5 pb-20 pt-12 sm:px-6 sm:pt-16">
         {children}
         {footer}
       </div>

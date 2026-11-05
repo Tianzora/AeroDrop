@@ -110,19 +110,19 @@ export const PWAInstallPrompt: React.FC = () => {
 
   return (
     <div className="fixed bottom-4 left-4 right-4 z-50 sm:left-auto sm:right-4 sm:w-96">
-      <div className="relative overflow-hidden rounded-[14px] border border-border bg-raised p-4 shadow-[var(--shadow-2)] motion-rise">
+      <div className="relative overflow-hidden rounded-[4px] border border-border bg-raised p-4 shadow-[var(--shadow-2)] motion-rise">
         <button onClick={dismissPrompt} aria-label="关闭" className="absolute right-2 top-2 rounded-full p-1 text-subtle hover:bg-sunken hover:text-text">
           <X size={16} />
         </button>
         <div className="flex gap-4">
-          <div className="h-fit shrink-0 rounded-[10px] bg-accent/10 p-3">
+          <div className="h-fit shrink-0 rounded-[4px] bg-accent/10 p-3">
             <Download size={24} className="text-accent" />
           </div>
           <div className="flex-1">
             <h3 className="mb-1 text-[15px] font-bold text-ink">安装 AeroDrop</h3>
             <p className="mb-3 text-[12px] leading-relaxed text-muted">像原生应用一样使用，支持离线访问和全屏体验。</p>
             {isIOS ? (
-              <div className="rounded-[10px] border border-border bg-sunken p-3 text-[12px] text-muted">
+              <div className="rounded-[4px] border border-border bg-sunken p-3 text-[12px] text-muted">
                 <div className="mb-2 flex items-center gap-2">1. 点击浏览器底部的 <Share size={14} className="inline text-accent" /> 分享按钮</div>
                 <div className="flex items-center gap-2">2. 选择 <PlusSquare size={14} className="inline text-muted" /> “添加到主屏幕”</div>
               </div>

@@ -9,7 +9,7 @@ export function Toaster() {
       toastOptions={{
         classNames: {
           toast:
-            'rounded-[12px] border border-border bg-raised text-text shadow-[var(--shadow-2)] text-[13px]',
+            'rounded-[4px] border border-border bg-raised text-text shadow-[var(--shadow-2)] text-[13px]',
           description: 'text-muted',
           actionButton: 'bg-ink text-surface',
           cancelButton: 'bg-sunken text-muted',

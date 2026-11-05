@@ -62,7 +62,7 @@ export const SenderTransferPanel: React.FC<SenderTransferPanelProps> = ({
         </div>
 
         {state !== TransferState.TRANSFERRING && !complete ? (
-          <div className="mt-4 space-y-2 rounded-[10px] bg-sunken p-4">
+          <div className="mt-4 space-y-2 rounded-[4px] bg-sunken p-4">
             <p className="text-[13px] text-muted">把右侧 6 位口令告诉接收方，对方输入后即开始传输。</p>
             <p className="text-[12px] text-subtle">保持此页面打开；关闭会中断连接。</p>
           </div>
@@ -96,7 +96,7 @@ export const SenderTransferPanel: React.FC<SenderTransferPanelProps> = ({
 
       {metadata && (
         <Card className="flex items-center gap-3 p-4">
-          <div className="grid h-10 w-10 shrink-0 place-items-center rounded-[10px] border border-border bg-sunken text-muted"><Monitor size={18} /></div>
+          <div className="grid h-10 w-10 shrink-0 place-items-center rounded-[4px] border border-border bg-sunken text-muted"><Monitor size={18} /></div>
           <div className="min-w-0 flex-1">
             <p className="text-[13px] font-semibold text-ink">{metadata.files.length} 个文件</p>
             <p className="text-[12px] text-muted font-mono">{formatFileSize(metadata.totalSize)}</p>

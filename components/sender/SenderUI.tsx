@@ -105,13 +105,22 @@ export const SenderUI: React.FC<SenderUIProps> = (props) => {
     panel = <SenderErrorPanel errorMsg={errorMsg} stopSharing={stopSharing} />;
   }
 
+  const title =
+    state === TransferState.CONFIGURING ? '分享设置'
+    : state === TransferState.WAITING_FOR_PEER || state === TransferState.PEER_CONNECTED ? '取件口令'
+    : state === TransferState.GENERATING_CODE ? '准备连接'
+    : state === TransferState.TRANSFERRING ? '正在传输'
+    : state === TransferState.COMPLETED ? '传输完成'
+    : state === TransferState.ERROR ? '出错了'
+    : '发送文件';
+
   return (
-    <div className="mx-auto w-full max-w-[620px]">
-      <header className="mb-7">
-        <p className="mb-2.5 font-mono text-[11px] uppercase tracking-[.18em] text-subtle">Send · 发送</p>
-        <h1 className="text-[30px] font-semibold leading-[1.08] tracking-[-.03em] text-ink sm:text-[34px]">发送文件</h1>
-        <p className="mt-2 text-[14px] text-muted">点对点加密传输（支持文件夹 / 多文件）</p>
-      </header>
+    <div className="mx-auto w-full max-w-[760px]">
+      {state !== TransferState.IDLE && (
+        <header className="mb-8 text-center">
+          <h1 className="font-serif font-normal text-[clamp(28px,3.6vw,40px)] leading-[1.1] tracking-[-.02em] text-ink">{title}</h1>
+        </header>
+      )}
       {panel}
     </div>
   );

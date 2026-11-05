@@ -82,13 +82,12 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = (props) => {
   }
 
   return (
-    <div className="mx-auto w-full max-w-[560px]">
-      <header className="mb-7 text-center">
-        <p className="mb-2.5 font-mono text-[11px] uppercase tracking-[.18em] text-subtle">Receive · 接收</p>
-        <h1 className="text-[30px] font-semibold leading-[1.08] tracking-[-.03em] text-ink sm:text-[34px]">接收文件</h1>
-        <p className="mt-1 text-[14px] text-muted">
-          {state === TransferState.IDLE ? '输入发送方提供的 6 位口令' : '保持本页打开，正在与发送方建立点对点连接'}
-        </p>
+    <div className="mx-auto flex min-h-[540px] w-full max-w-[620px] flex-col justify-center">
+      <header className="mb-9 text-center">
+        <h1 className="font-serif font-normal text-[clamp(30px,4vw,44px)] leading-[1.08] tracking-[-.02em] text-ink">接收文件</h1>
+        {state === TransferState.IDLE && (
+          <p className="mt-4 text-[15px] leading-[1.7] text-muted">输入发送方给你的 6 位口令</p>
+        )}
       </header>
       {body}
     </div>

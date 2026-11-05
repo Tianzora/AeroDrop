@@ -18,12 +18,12 @@ export const Progress: React.FC<ProgressProps> = ({ value, tone = 'accent', labe
     <ProgressPrimitive.Root
       value={v}
       aria-label={label}
-      className={cn('relative w-full overflow-hidden rounded-full border border-border bg-sunken', className)}
+      className={cn('relative w-full overflow-hidden rounded-[2px] border border-border bg-sunken', className)}
       style={{ height }}
     >
       <ProgressPrimitive.Indicator
         className={cn(
-          'h-full w-full origin-left rounded-full transition-transform duration-300 ease-out',
+          'h-full w-full origin-left rounded-[1px] transition-transform duration-300 ease-out',
           tone === 'success' ? 'bg-success' : 'bg-accent',
         )}
         style={{ transform: `scaleX(${v / 100})` }}

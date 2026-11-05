@@ -1,6 +1,4 @@
 import React from 'react';
-import { Upload, Folder } from 'lucide-react';
-import { Button } from '../../ui/Button';
 import { cn } from '../../ui/cn';
 
 export interface SenderIdlePanelProps {
@@ -9,28 +7,57 @@ export interface SenderIdlePanelProps {
   handleFolderSelect: (e: React.ChangeEvent<HTMLInputElement>) => void;
 }
 
+const RIPPLE_CYCLE = 3.6;
+const RIPPLE_T0 = Date.now();
+const Rings = () => {
+  const elapsed = ((Date.now() - RIPPLE_T0) / 1000) % RIPPLE_CYCLE;
+  return (
+    <div aria-hidden className="pointer-events-none absolute inset-0 flex items-center justify-center">
+      <div className="relative h-[min(560px,74vw)] w-[min(560px,74vw)]">
+        <span className="ripple-core absolute inset-0 rounded-full" />
+        <span className="absolute inset-[30%] rounded-full border border-border-strong/25" />
+        {[0, 1.2, 2.4].map((d) => (
+          <span
+            key={d}
+            className="ripple-ring absolute inset-0 rounded-full"
+            style={{ animationDelay: `${(d - elapsed).toFixed(2)}s` }}
+          />
+        ))}
+      </div>
+    </div>
+  );
+};
+
 export const SenderIdlePanel: React.FC<SenderIdlePanelProps> = ({ isDragOver, handleFileSelect, handleFolderSelect }) => (
   <div
     className={cn(
-      'relative rounded-[14px] border-[1.5px] border-dashed bg-raised p-8 text-center transition-colors duration-150 ease-out sm:p-10',
-      isDragOver ? 'border-accent bg-accent/5' : 'border-border-strong hover:border-accent/60',
+      'relative flex min-h-[520px] flex-col items-center justify-center px-6 py-16 text-center transition-colors duration-150',
+      isDragOver && 'bg-accent/[.04]',
     )}
   >
     <input type="file" id="file-upload" className="hidden" multiple onChange={handleFileSelect} />
     <input type="file" id="folder-upload" className="hidden" webkitdirectory="" directory="" onChange={handleFolderSelect} />
-    <div className="mx-auto mb-4 grid h-14 w-14 place-items-center rounded-[14px] bg-accent/10 text-accent">
-      <Upload size={26} />
-    </div>
-    <p className="text-[16px] font-bold text-ink">{isDragOver ? '松开即可添加' : '拖入文件，或点击选择'}</p>
-    <p className="mt-1.5 text-[13px] text-muted">支持多文件、文件夹 · 单文件最大 4GB</p>
-    <div className="mt-5 flex flex-wrap items-center justify-center gap-3">
-      <label htmlFor="file-upload" className="inline-flex h-10 cursor-pointer items-center gap-2 rounded-[9px] bg-ink px-4 text-[13px] font-semibold text-surface hover:bg-ink/90">
+    <Rings />
+    <h1 className="relative font-serif font-normal text-[clamp(36px,5.2vw,64px)] leading-[1.05] tracking-[-.022em] text-ink">
+      发送文件
+    </h1>
+    <p className="relative mt-6 max-w-[58ch] text-[15px] leading-[1.7] text-muted">
+      {isDragOver ? '松开即可添加' : '浏览器间直接传输，加密只在你们之间'}
+    </p>
+    <div className="relative mt-10 flex items-center gap-6 sm:gap-8">
+      <label
+        htmlFor="file-upload"
+        className="z-10 inline-flex cursor-pointer items-center rounded-[3px] bg-ink px-6 py-[13px] font-sans text-[14px] font-medium tracking-[.01em] text-surface transition-colors hover:bg-ink/90"
+      >
         选择文件
       </label>
-      <label htmlFor="folder-upload" className="z-10 inline-flex h-10 cursor-pointer items-center gap-2 rounded-[9px] border border-border-strong bg-raised px-4 text-[13px] font-semibold text-text hover:bg-sunken">
-        <Folder size={15} /> 选择文件夹
+      <label
+        htmlFor="folder-upload"
+        className="z-10 inline-flex h-[46px] cursor-pointer items-center border-b border-border-strong font-sans text-[14px] font-medium tracking-[.01em] text-text transition-colors hover:border-accent hover:text-accent"
+      >
+        选择文件夹
       </label>
     </div>
-    <label htmlFor="file-upload" className="absolute inset-0 -z-0 cursor-pointer rounded-[14px]" aria-hidden />
+    <label htmlFor="file-upload" aria-hidden className="absolute inset-0 cursor-pointer" />
   </div>
 );
