@@ -10,12 +10,17 @@ export default defineConfig({
     proxy: {
       '/api': {
         target: 'http://127.0.0.1:8787',
-        changeOrigin: true,
+        // Keep the page origin as Host: the Worker's same-origin gate compares
+        // Origin/Referer against the request URL, so rewriting Host to :8787
+        // would 403 every same-origin POST (and anything sending a Referer).
+        changeOrigin: false,
       },
       '/ws-signaling': {
         target: 'ws://127.0.0.1:8787',
         ws: true,
-        changeOrigin: true,
+        // Keep the page origin as Host so the Worker's same-origin gate sees a
+        // matching Origin (browsers always send Origin on WebSocket upgrades).
+        changeOrigin: false,
       },
     },
   },

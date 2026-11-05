@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildNodeTestArgs } from './run-node-tests.mjs';
+import { buildNodeTestArgs } from './node-test-args.mjs';
 
 test('buildNodeTestArgs uses an explicit tsx loader path instead of the bare package specifier', () => {
   const args = buildNodeTestArgs(['services/connectionPolicy.test.ts']);

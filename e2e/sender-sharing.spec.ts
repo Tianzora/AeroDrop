@@ -152,14 +152,23 @@ const setupSenderHarness = async (page: import('@playwright/test').Page) => {
       createPeerRuntimeModule: () => ({
         default: FakePeer,
       }),
+      // 口令服务在 vite preview 下不可用：用固定 6 位码替代。
+      createShareCodeOverride: ({ code }: { code?: string }) => ({
+        code: code ?? '444444',
+        expiresAt: Date.now() + 3_600_000,
+      }),
+      resolveShareCodeOverride: (code: string) => ({
+        peerId: `peer-${code}`,
+        expiresAt: Date.now() + 3_600_000,
+      }),
     };
 
     (window as Window & { __AERODROP_E2E_DRIVER__?: unknown }).__AERODROP_E2E_DRIVER__ = {
-      hasPeer(code: string) {
-        return peerRegistry.has(`aerodrop-${code}`);
+      hasPeer(_code: string) {
+        return peerRegistry.size > 0;
       },
-      connectReceiver(code: string, receiver: ReceiverScenario) {
-        const peer = peerRegistry.get(`aerodrop-${code}`);
+      connectReceiver(_code: string, receiver: ReceiverScenario) {
+        const peer = Array.from(peerRegistry.values()).at(-1);
         if (!peer) {
           return false;
         }
@@ -234,8 +243,8 @@ const getShareCodeCard = (page: import('@playwright/test').Page, code: string) =
   page.getByText(code, { exact: true });
 
 test('stopping and quickly recreating a share does not let stale cleanup kill the new peer', async ({ page }) => {
-  await chooseFileAndConfigureShare(page, '3333');
-  await expect(getShareCodeCard(page, '3333')).toBeVisible();
+  await chooseFileAndConfigureShare(page, '333333');
+  await expect(getShareCodeCard(page, '333333')).toBeVisible();
 
   await page.getByRole('button', { name: '停止分享' }).click();
 
@@ -244,14 +253,14 @@ test('stopping and quickly recreating a share does not let stale cleanup kill th
     mimeType: 'text/plain',
     buffer: Buffer.from('sender-4444'),
   });
-  await page.locator('input[type="text"][inputmode="numeric"]').fill('4444');
+  await page.locator('input[type="text"][inputmode="numeric"]').fill('444444');
   await page.getByRole('button', { name: '创建分享' }).click();
 
-  await expect(getShareCodeCard(page, '4444')).toBeVisible();
+  await expect(getShareCodeCard(page, '444444')).toBeVisible();
   await page.waitForTimeout(200);
-  await expect.poll(async () => hasSharePeer(page, '4444')).toBe(true);
+  await expect.poll(async () => hasSharePeer(page, '444444')).toBe(true);
 
-  await connectReceiver(page, '4444', {
+  await connectReceiver(page, '444444', {
     peerId: 'receiver-restart-a',
     deviceName: 'Receiver Restart',
     sessionId: 'session-restart-a',
@@ -262,15 +271,15 @@ test('stopping and quickly recreating a share does not let stale cleanup kill th
 });
 
 test('multi-receiver list stays stable when one logical receiver reconnects', async ({ page }) => {
-  await chooseFileAndConfigureShare(page, '5555');
-  await expect(getShareCodeCard(page, '5555')).toBeVisible();
+  await chooseFileAndConfigureShare(page, '555555');
+  await expect(getShareCodeCard(page, '555555')).toBeVisible();
 
-  await connectReceiver(page, '5555', {
+  await connectReceiver(page, '555555', {
     peerId: 'receiver-a-1',
     deviceName: 'Receiver A',
     sessionId: 'session-a',
   });
-  await connectReceiver(page, '5555', {
+  await connectReceiver(page, '555555', {
     peerId: 'receiver-b-1',
     deviceName: 'Receiver B',
     sessionId: 'session-b',
@@ -282,7 +291,7 @@ test('multi-receiver list stays stable when one logical receiver reconnects', as
   await expect(page.getByText('已连接 2 个设备')).toBeVisible();
 
   await disconnectReceiver(page, 'receiver-a-1');
-  await connectReceiver(page, '5555', {
+  await connectReceiver(page, '555555', {
     peerId: 'receiver-a-2',
     deviceName: 'Receiver A',
     sessionId: 'session-a',

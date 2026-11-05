@@ -332,7 +332,9 @@ const selectedRoute = async (page: Page): Promise<SelectedRoute> => {
     const pc = (window as Window & { __rtcHarness?: { pc: RTCPeerConnection } }).__rtcHarness?.pc;
     if (!pc) throw new Error('RTC harness is not installed');
     const stats = await pc.getStats();
-    let pair: RTCStats | undefined;
+    // lib.dom types RTCStatsReport as ReadonlyMap<string, any>; the selected
+    // candidate-pair record carries fields that the base RTCStats type omits.
+    let pair: any;
     for (const report of stats.values()) {
       if (report.type === 'transport' && report.selectedCandidatePairId) {
         pair = stats.get(report.selectedCandidatePairId);
@@ -412,7 +414,7 @@ test.describe('native RTCDataChannel throughput', () => {
 
     test(testName, async ({ browser }) => {
       const settings: IceSettings = {
-        iceServers: [{ urls: url, username, credential }],
+        iceServers: [{ urls: url!, username, credential }],
         iceTransportPolicy: 'relay',
       };
       await withConnectedPages(browser, settings, async (sender, receiver) => {
