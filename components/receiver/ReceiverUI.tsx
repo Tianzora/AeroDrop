@@ -91,9 +91,9 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = (props) => {
   return (
     <div className="mx-auto flex min-h-[560px] w-full max-w-[620px] flex-col justify-center">
       <header className="mb-8 text-center">
-        <h1 className="font-serif font-normal text-[clamp(28px,3.6vw,40px)] leading-[1.1] tracking-[-.02em] text-ink">{title}</h1>
+        <h1 data-morph="title" className="font-serif font-normal text-[clamp(28px,3.6vw,40px)] leading-[1.1] tracking-[-.02em] text-ink">{title}</h1>
         {state === TransferState.IDLE && (
-          <p className="mt-4 text-[15px] leading-[1.7] text-muted">输入发送方给你的 6 位口令</p>
+          <p data-morph="sub" className="mt-4 text-[15px] leading-[1.7] text-muted">输入发送方给你的 6 位口令</p>
         )}
       </header>
       <div key={state} className="motion-rise w-full">{body}</div>

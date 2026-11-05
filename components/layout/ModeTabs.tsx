@@ -30,7 +30,7 @@ export const ModeTabs: React.FC<ModeTabsProps> = ({ mode, onModeChange, classNam
     return () => window.removeEventListener('resize', measure);
   }, [mode]);
   return (
-    <nav ref={navRef} aria-label="模式" className={cn('relative flex items-center gap-9', className)}>
+    <nav ref={navRef} aria-label="模式" className={cn('relative flex items-center gap-11', className)}>
       {OPTIONS.map((o) => {
         const active = mode === o.value;
         return (
@@ -41,7 +41,7 @@ export const ModeTabs: React.FC<ModeTabsProps> = ({ mode, onModeChange, classNam
             aria-pressed={active}
             onClick={() => onModeChange(o.value as Mode)}
             className={cn(
-              'py-2 font-sans text-[13.5px] font-medium tracking-[.01em] transition-colors duration-200',
+              'py-2.5 font-sans text-[15px] font-medium tracking-[.01em] transition-colors duration-200',
               active ? 'text-ink' : 'text-muted hover:text-text',
             )}
           >
@@ -51,7 +51,7 @@ export const ModeTabs: React.FC<ModeTabsProps> = ({ mode, onModeChange, classNam
       })}
       <span
         aria-hidden
-        className="absolute -bottom-[3px] h-[1.5px] rounded-full bg-ink"
+        className="absolute -bottom-[3px] h-[2px] rounded-full bg-ink"
         style={{ left: ink.left, width: ink.width, transition: 'left 460ms cubic-bezier(.22,1,.36,1), width 460ms cubic-bezier(.22,1,.36,1)' }}
       />
     </nav>

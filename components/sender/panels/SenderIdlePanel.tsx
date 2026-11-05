@@ -30,17 +30,17 @@ const Rings = () => {
 export const SenderIdlePanel: React.FC<SenderIdlePanelProps> = ({ isDragOver, handleFileSelect, handleFolderSelect }) => (
   <div
     className={cn(
-      'relative flex min-h-[520px] flex-col items-center justify-center px-6 py-16 text-center transition-colors duration-150',
+      'relative flex min-h-[520px] flex-col items-center justify-center px-6 py-16 text-center transition-colors',
       isDragOver && 'bg-accent/[.04]',
     )}
   >
     <input type="file" id="file-upload" className="hidden" multiple onChange={handleFileSelect} />
     <input type="file" id="folder-upload" className="hidden" webkitdirectory="" directory="" onChange={handleFolderSelect} />
     <Rings />
-    <h1 className="relative font-serif font-normal text-[clamp(36px,5.2vw,64px)] leading-[1.05] tracking-[-.022em] text-ink">
+    <h1 data-morph="title" className="relative font-serif font-normal text-[clamp(36px,5.2vw,64px)] leading-[1.05] tracking-[-.022em] text-ink">
       发送文件
     </h1>
-    <p className="relative mt-6 max-w-[58ch] text-[15px] leading-[1.7] text-muted">
+    <p data-morph="sub" className="relative mt-6 max-w-[58ch] text-[15px] leading-[1.7] text-muted">
       {isDragOver ? '松开即可添加' : '拖拽文件到这里，或点击下方选择文件'}
     </p>
     <div className="relative mt-10 flex items-center gap-6 sm:gap-8">

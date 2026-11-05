@@ -118,7 +118,7 @@ export const SenderUI: React.FC<SenderUIProps> = (props) => {
     <div className="mx-auto flex min-h-[560px] w-full max-w-[760px] flex-col justify-center">
       {state !== TransferState.IDLE && (
         <header className="mb-8 text-center">
-          <h1 className="font-serif font-normal text-[clamp(28px,3.6vw,40px)] leading-[1.1] tracking-[-.02em] text-ink">{title}</h1>
+          <h1 data-morph="title" className="font-serif font-normal text-[clamp(28px,3.6vw,40px)] leading-[1.1] tracking-[-.02em] text-ink">{title}</h1>
         </header>
       )}
       <div key={state} className="motion-rise">{panel}</div>
