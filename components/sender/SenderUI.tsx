@@ -121,7 +121,7 @@ export const SenderUI: React.FC<SenderUIProps> = (props) => {
           <h1 className="font-serif font-normal text-[clamp(28px,3.6vw,40px)] leading-[1.1] tracking-[-.02em] text-ink">{title}</h1>
         </header>
       )}
-      {panel}
+      <div key={state} className="motion-rise">{panel}</div>
     </div>
   );
 };

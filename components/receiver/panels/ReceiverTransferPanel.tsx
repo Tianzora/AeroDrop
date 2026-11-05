@@ -17,7 +17,7 @@ export interface ReceiverTransferPanelProps {
 export const ReceiverTransferPanel: React.FC<ReceiverTransferPanelProps> = ({
   progress, downloadSpeed, eta, overallTransferredBytes, totalBytes, overallEta, onReset,
 }) => (
-  <Card className="p-5 motion-rise">
+  <Card className="p-5">
     <div className="mb-1.5 flex items-center justify-between text-[12px] font-semibold uppercase tracking-[.04em] text-muted">
       <span>当前文件进度</span>
       <span className="font-mono tabular-nums text-accent">{progress}%</span>

@@ -28,7 +28,7 @@ export const SenderConfigurePanel: React.FC<SenderConfigurePanelProps> = ({
   metadata, selectedFiles, showFileList, onToggleFileList, stopSharing,
   expiryOption, setExpiryOption, customCodeInput, setCustomCodeInput, errorMsg, startSharing,
 }) => (
-  <div className="space-y-4 motion-rise">
+  <div className="space-y-4">
     <Card className="p-4">
       <div className="flex items-center gap-4">
         {metadata.files.length === 1 && selectedFiles[0] ? (

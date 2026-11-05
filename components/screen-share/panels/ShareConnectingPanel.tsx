@@ -15,7 +15,7 @@ const STAGE_TEXT: Record<ScreenShareViewerConnectingStage, { title: string; deta
 export const ShareConnectingPanel: React.FC<{ stage: ScreenShareViewerConnectingStage; onCancel: () => void }> = ({ stage, onCancel }) => {
   const t = STAGE_TEXT[stage] ?? STAGE_TEXT[''];
   return (
-    <Card className="flex flex-col items-center gap-3 px-6 py-16 text-center motion-rise">
+    <Card className="flex flex-col items-center gap-3 px-6 py-16 text-center">
       <Loader2 size={40} className="animate-spin text-accent" />
       <p className="text-[15px] font-bold text-ink">{t.title}</p>
       <p className="text-[12px] text-muted">{t.detail}</p>

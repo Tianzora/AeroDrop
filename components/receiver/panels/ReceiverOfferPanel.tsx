@@ -27,7 +27,7 @@ export const ReceiverOfferPanel: React.FC<ReceiverOfferPanelProps> = ({
   metadata, senderDeviceName, isMultiFile, selectedFiles, showFileList, onToggleFileList,
   primaryFileName, primaryFileType, canResume, isStreaming, onResumeTransfer, onAcceptTransfer,
 }) => (
-  <div className="space-y-4 motion-rise">
+  <div className="space-y-4">
     <Card className="p-5">
       {senderDeviceName && (
         <p className="mb-4 text-[13px] text-muted">来自 <span className="font-semibold text-ink">{senderDeviceName}</span></p>

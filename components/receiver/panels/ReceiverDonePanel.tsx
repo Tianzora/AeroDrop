@@ -4,7 +4,7 @@ import { Card } from '../../ui/Card';
 import { Button } from '../../ui/Button';
 
 export const ReceiverDonePanel: React.FC<{ onReset: () => void }> = ({ onReset }) => (
-  <Card className="flex flex-col items-center gap-3 px-6 py-12 text-center motion-scale">
+  <Card className="flex flex-col items-center gap-3 px-6 py-12 text-center">
     <div className="grid h-16 w-16 place-items-center rounded-full border-2 border-success/40 bg-success/10 text-success">
       <Check size={32} />
     </div>

@@ -3,7 +3,7 @@ import { Play } from 'lucide-react';
 import { Button } from '../../ui/Button';
 
 export const ShareIdlePanel: React.FC<{ startScreenShare: () => void }> = ({ startScreenShare }) => (
-  <div className="flex flex-col items-center gap-5 py-6 text-center motion-rise">
+  <div className="flex flex-col items-center gap-5 py-6 text-center">
     <div>
       <p className="text-[15px] leading-[1.7] text-muted">选择整个屏幕、应用窗口或标签页，对方通过链接实时观看</p>
     </div>

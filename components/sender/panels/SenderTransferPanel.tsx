@@ -35,7 +35,7 @@ export const SenderTransferPanel: React.FC<SenderTransferPanelProps> = ({
 }) => {
   if (state === TransferState.GENERATING_CODE) {
     return (
-      <Card className="flex flex-col items-center justify-center gap-3 py-16 text-center motion-fade">
+      <Card className="flex flex-col items-center justify-center gap-3 py-16 text-center">
         <Loader2 size={36} className="animate-spin text-accent" />
         <p className="text-[15px] font-bold text-ink">
           {preparingStage === 'fetching_ice' ? '正在获取网络配置…' : '正在连接信令服务…'}
@@ -49,7 +49,7 @@ export const SenderTransferPanel: React.FC<SenderTransferPanelProps> = ({
   const complete = totalProgress === 100 && activeTransfersCount === 0;
 
   return (
-    <div className="space-y-4 motion-rise">
+    <div className="space-y-4">
       <Card className="p-5">
         <div className="flex items-center justify-between gap-3">
           <div className="flex items-center gap-2.5">

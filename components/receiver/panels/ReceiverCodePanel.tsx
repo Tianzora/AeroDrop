@@ -13,12 +13,12 @@ export interface ReceiverCodePanelProps {
   onClear: () => void;
 }
 
-const KEY_CLS = 'flex h-12 items-center justify-center rounded-[4px] font-serif text-[22px] text-text transition-colors duration-150 hover:bg-ink/[.05] active:scale-[.98]';
+const KEY_CLS = 'flex h-12 items-center justify-center rounded-[4px] font-serif text-[22px] text-text transition-colors duration-200 hover:bg-ink/[.05] active:scale-[.98]';
 
 export const ReceiverCodePanel: React.FC<ReceiverCodePanelProps> = ({
   code, inputRef, isMobileDevice, onCodeChange, onDigitClick, onPasteFromClipboard, onBackspace, onClear,
 }) => (
-  <div className="motion-rise">
+  <div>
     <div className="mb-10">
       <CodeInput value={code} onChange={onCodeChange} inputRef={inputRef} isMobile={isMobileDevice} />
     </div>

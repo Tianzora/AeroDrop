@@ -25,7 +25,7 @@ export const SenderPairingPanel: React.FC<SenderPairingPanelProps> = ({
 }) => {
   const waiting = individualStats.length === 0;
   return (
-    <div className="mx-auto w-full max-w-[560px] space-y-6 motion-rise">
+    <div className="mx-auto w-full max-w-[560px] space-y-6">
       <div className="relative mx-auto w-full max-w-[460px] border border-border bg-raised px-8 pb-7 pt-8 shadow-[var(--shadow-2)]">
         <div className="flex items-center justify-between text-[11px] tracking-[.04em] text-subtle">
           <span>取件口令</span>

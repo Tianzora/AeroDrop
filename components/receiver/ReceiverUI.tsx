@@ -89,7 +89,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = (props) => {
           <p className="mt-4 text-[15px] leading-[1.7] text-muted">输入发送方给你的 6 位口令</p>
         )}
       </header>
-      {body}
+      <div key={state} className="motion-rise w-full">{body}</div>
     </div>
   );
 };
