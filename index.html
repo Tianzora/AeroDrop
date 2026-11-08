@@ -46,16 +46,6 @@
 </head>
   <body class="bg-slate-50 text-slate-900 font-sans antialiased selection:bg-brand-500 selection:text-white dark:bg-slate-950 dark:text-slate-100 overscroll-none">
     <div id="root"></div>
-     <!-- Cloudflare Web Analytics：无 cookie，只在生产域名加载，避免本地开发/E2E 打点 -->
-    <script>
-      if (location.hostname === 'drop.tianzora.uno') {
-        const beacon = document.createElement('script');
-        beacon.type = 'module';
-        beacon.src = 'https://static.cloudflareinsights.com/beacon.min.js';
-        beacon.dataset.cfBeacon = '{"token":"e981fda9d57846adb2ddf5216658c889"}';
-        document.head.appendChild(beacon);
-      }
-    </script>
-    <script type="module" src="/index.tsx"></script>
+     <script type="module" src="/index.tsx"></script>
   </body>
 </html>

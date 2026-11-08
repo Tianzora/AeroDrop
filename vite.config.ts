@@ -1,9 +1,25 @@
 import path from 'path';
-import { defineConfig } from 'vite';
+import { defineConfig, type Plugin } from 'vite';
 import react from '@vitejs/plugin-react';
 import tailwindcss from '@tailwindcss/vite';
 
-export default defineConfig({
+const CF_WEB_ANALYTICS_SNIPPET =
+  '<script type="module" src="https://static.cloudflareinsights.com/beacon.min.js" data-cf-beacon=\'{"token":"e981fda9d57846adb2ddf5216658c889"}\'></script>';
+
+/**
+ * 只在生产构建注入 Cloudflare Web Analytics（无 cookie，页面浏览量统计）。
+ * dev 与 mode=e2e 的构建不注入，避免本地和 E2E 往真实站点报数。
+ */
+const cloudflareWebAnalytics = (): Plugin => ({
+  name: 'aerodrop:cf-web-analytics',
+  apply: 'build',
+  transformIndexHtml: {
+    order: 'post',
+    handler: (html) => html.replace('</head>', `  ${CF_WEB_ANALYTICS_SNIPPET}\n  </head>`),
+  },
+});
+
+export default defineConfig(({ mode }) => ({
   server: {
     port: 3000,
     host: '0.0.0.0',
@@ -24,7 +40,7 @@ export default defineConfig({
       },
     },
   },
-  plugins: [react(), tailwindcss()],
+  plugins: [react(), tailwindcss(), ...(mode === 'production' ? [cloudflareWebAnalytics()] : [])],
   resolve: {
     alias: {
       '@': path.resolve(__dirname, '.'),
@@ -36,4 +52,4 @@ export default defineConfig({
     cssCodeSplit: true,
     chunkSizeWarningLimit: 1000
   }
-});
+}));
