@@ -1,7 +1,7 @@
 {
   "name": "AeroDrop",
   "short_name": "AeroDrop",
-  "description": "Secure P2P File Transfer",
+  "description": "WebRTC 点对点文件传输与屏幕共享，免注册登录",
   "theme_color": "#ffffff",
   "background_color": "#ffffff",
   "display": "standalone",

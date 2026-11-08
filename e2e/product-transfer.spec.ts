@@ -56,6 +56,27 @@ const createPayload = () => {
   return bytes;
 };
 
+test('serves SEO metadata and keeps share links out of search', async ({ request }) => {
+  const robots = await request.get('/robots.txt');
+  expect(robots.status()).toBe(200);
+  expect(robots.headers()['content-type']).toContain('text/plain');
+  expect(await robots.text()).toContain('Sitemap: https://drop.tianzora.uno/sitemap.xml');
+
+  const sitemap = await request.get('/sitemap.xml');
+  expect(sitemap.status()).toBe(200);
+  expect(sitemap.headers()['content-type']).toContain('xml');
+  expect(await sitemap.text()).toContain('<loc>https://drop.tianzora.uno/</loc>');
+
+  const ogImage = await request.get('/og.png');
+  expect(ogImage.status()).toBe(200);
+  expect(ogImage.headers()['content-type']).toContain('image/png');
+
+  // 分享链接不能被收录：文件分享用 ?code=，屏幕共享用 ?view=。
+  expect((await request.get('/?code=123456')).headers()['x-robots-tag']).toBe('noindex');
+  expect((await request.get('/?view=abc')).headers()['x-robots-tag']).toBe('noindex');
+  expect((await request.get('/')).headers()['x-robots-tag']).toBeUndefined();
+});
+
 test('production Sender and Receiver transfer and download a 2 MiB file', async ({ browser }) => {
   const iceConfig = getProductIceConfig();
   const shareCode = createShareCode();

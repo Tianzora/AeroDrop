@@ -190,6 +190,13 @@ const applyResponsePolicies = (request: Request, response: Response): Response =
       headers.set('Cache-Control', IMMUTABLE_ASSET_CACHE_CONTROL);
     } else if (pathname === '/' || pathname.endsWith('/index.html') || pathname.endsWith('.html')) {
       headers.set('Cache-Control', HTML_CACHE_CONTROL);
+
+      // 分享链接（文件 ?code=、屏幕共享 ?view=）只对持链接的人有效，不该被搜索引擎收录。
+      // 响应头对不执行 JS 的爬虫同样生效，静态 meta 做不到这一点。
+      const url = new URL(request.url);
+      if (url.searchParams.has('code') || url.searchParams.has('view')) {
+        headers.set('X-Robots-Tag', 'noindex');
+      }
     }
   }
 

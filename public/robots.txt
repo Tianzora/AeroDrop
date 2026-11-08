@@ -1,0 +1,7 @@
+# 搜索可以抓取，分享链接靠响应头 X-Robots-Tag: noindex 排除，因此不封带参数的 URL。
+User-agent: *
+Allow: /
+Disallow: /api/
+Disallow: /ws-signaling
+
+Sitemap: https://drop.tianzora.uno/sitemap.xml
