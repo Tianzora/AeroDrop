@@ -1,7 +1,12 @@
+import { readFile } from 'node:fs/promises';
+
 import { expect, test } from '@playwright/test';
 
 const FILE_BYTES = 2 * 1024 * 1024;
-const SHARE_CODE = '764200';
+
+// 分享口令绑定在 Worker 的 Durable Object 里，重启本地 preview 也不会清空，
+// 固定口令会在第二次运行时命中 409；每次运行用一个新口令。
+const createShareCode = () => String(Math.floor(100_000 + Math.random() * 900_000));
 
 type ProductIceConfig = {
   iceServers: RTCIceServer[];
@@ -51,59 +56,25 @@ const createPayload = () => {
   return bytes;
 };
 
-test('production Sender and Receiver transfer and persist a 2 MiB file', async ({ browser }) => {
+test('production Sender and Receiver transfer and download a 2 MiB file', async ({ browser }) => {
   const iceConfig = getProductIceConfig();
+  const shareCode = createShareCode();
   const senderContext = await browser.newContext();
   const receiverContext = await browser.newContext();
 
   // Only `--mode e2e` builds honor `__AERODROP_E2E__` (see services/e2eHooks.ts).
   // This spec targets the production bundle served by wrangler, so the override is
-  // inert here and the app uses the worker-issued ICE config; the byte-level
-  // assertions below rely on `__AERODROP_PRODUCT_SINK__` instead.
+  // inert here and the app uses the worker-issued ICE config. The receiver downloads
+  // straight to the browser download directory, so bytes are verified through
+  // Playwright's download capture.
   await Promise.all([senderContext, receiverContext].map((context) => context.addInitScript((config) => {
     (window as Window & { __AERODROP_E2E__?: unknown }).__AERODROP_E2E__ = {
       getIceConfigOverride: () => config,
     };
   }, iceConfig)));
 
-  await receiverContext.addInitScript(() => {
-    type Sink = {
-      chunks: Uint8Array[];
-      size: number;
-      closed: boolean;
-    };
-
-    const sink: Sink = { chunks: [], size: 0, closed: false };
-    const sinkWindow = window as Window & { __AERODROP_PRODUCT_SINK__?: Sink };
-    sinkWindow.__AERODROP_PRODUCT_SINK__ = sink;
-
-    const handle = {
-      kind: 'file' as const,
-      name: 'aerodrop-product-2m.bin',
-      createWritable: async () => ({
-        write: async (value: ArrayBuffer | ArrayBufferView) => {
-          const bytes = ArrayBuffer.isView(value)
-            ? new Uint8Array(value.buffer, value.byteOffset, value.byteLength)
-            : new Uint8Array(value);
-          const copy = new Uint8Array(bytes.byteLength);
-          copy.set(bytes);
-          sink.chunks.push(copy);
-          sink.size += copy.byteLength;
-        },
-        close: async () => {
-          sink.closed = true;
-        },
-        seek: async () => {},
-        truncate: async () => {},
-      }),
-      getFile: async () => new File(sink.chunks, 'aerodrop-product-2m.bin'),
-    };
-
-    Object.defineProperty(window, 'showSaveFilePicker', {
-      configurable: true,
-      value: async () => handle,
-    });
-  });
+  // The receiver downloads straight to the browser download directory for in-limit
+  // transfers (no save picker), so the file is verified through Playwright's download capture.
 
   try {
     const sender = await senderContext.newPage();
@@ -116,49 +87,37 @@ test('production Sender and Receiver transfer and persist a 2 MiB file', async (
       mimeType: 'application/octet-stream',
       buffer: payload,
     });
-    await sender.locator('input[type="text"][inputmode="numeric"]').fill(SHARE_CODE);
+    await sender.locator('input[type="text"][inputmode="numeric"]').fill(shareCode);
     await sender.getByRole('button', { name: '创建分享' }).click();
-    await expect(sender.getByText(SHARE_CODE, { exact: true })).toBeVisible();
+    await expect(sender.getByText(shareCode, { exact: true })).toBeVisible();
 
     await receiver.getByRole('button', { name: '接收' }).click();
-    await receiver.locator('input[type="text"]').fill(SHARE_CODE);
+    await receiver.locator('input[type="text"]').fill(shareCode);
     const accept = receiver.getByRole('button', { name: /确认并下载|继续下载/ });
     await expect(accept).toBeVisible({ timeout: 15_000 });
 
+    const downloadPromise = receiver.waitForEvent('download', { timeout: 30_000 });
     const startedAt = Date.now();
     await accept.click();
-    await receiver.waitForFunction(
-      (expectedBytes) => {
-        const sink = (window as Window & {
-          __AERODROP_PRODUCT_SINK__?: { size: number; closed: boolean };
-        }).__AERODROP_PRODUCT_SINK__;
-        return sink?.closed === true && sink.size === expectedBytes;
-      },
-      FILE_BYTES,
-      { timeout: 30_000 },
-    );
+    const download = await downloadPromise;
+    const downloadPath = await download.path();
+    if (!downloadPath) throw new Error('Receiver download did not produce a file');
+    const received = await readFile(downloadPath);
 
-    const result = await receiver.evaluate(() => {
-      const sink = (window as Window & {
-        __AERODROP_PRODUCT_SINK__?: { chunks: Uint8Array[]; size: number };
-      }).__AERODROP_PRODUCT_SINK__;
-      if (!sink) throw new Error('Product transfer sink is unavailable');
-
-      let offset = 0;
-      for (const chunk of sink.chunks) {
-        for (let index = 0; index < chunk.byteLength; index += 1) {
-          const expected = (offset * 31 + (offset >>> 8) + 17) & 0xff;
-          if (chunk[index] !== expected) {
-            return { size: sink.size, mismatchOffset: offset };
-          }
-          offset += 1;
+    const result = (() => {
+      const length = Math.min(received.length, FILE_BYTES);
+      for (let offset = 0; offset < length; offset += 1) {
+        const expected = (offset * 31 + (offset >>> 8) + 17) & 0xff;
+        if (received[offset] !== expected) {
+          return { size: received.length, mismatchOffset: offset };
         }
       }
-      return { size: sink.size, mismatchOffset: -1 };
-    });
+      return { size: received.length, mismatchOffset: received.length === FILE_BYTES ? -1 : length };
+    })();
 
     const elapsedMs = Date.now() - startedAt;
     console.log(`AeroDrop product 2 MiB: ${elapsedMs}ms`);
+    expect(download.suggestedFilename()).toBe('aerodrop-product-2m.bin');
     expect(result).toEqual({ size: FILE_BYTES, mismatchOffset: -1 });
     await expect(sender.getByText('文件发送完成！')).toBeVisible({ timeout: 5_000 });
 

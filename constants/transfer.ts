@@ -61,6 +61,9 @@ export const RECEIVE_STORAGE = {
   IOS_IDB_PRUNE_LOCK_TTL_MS: 45 * 1000,
   // 暂存总量超过该值时不再拼内存 zip，降级为逐个保存，避免收完之后 OOM。
   ARCHIVE_MAX_IN_MEMORY_BYTES: 1024 * 1024 * 1024,
+  // 单文件自动直下（不弹保存框）的上限：直下要先在内存/IDB 里缓冲完整文件，
+  // 超过该上限就回退成选择保存位置 + 零内存流式写入，避免大文件撑爆内存。
+  DIRECT_DOWNLOAD_MAX_BYTES: 512 * 1024 * 1024,
 } as const;
 
 // 控制面消息上限：JSON 字符串再序列化时引号会转义，最坏情况体积翻倍，

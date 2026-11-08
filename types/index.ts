@@ -268,8 +268,11 @@ declare global {
 
   interface Window {
     showSaveFilePicker?: (options?: SaveFilePickerOptions) => Promise<FileSystemFileHandle>;
-    showDirectoryPicker?: (options?: { mode?: 'read' | 'readwrite' }) => Promise<FileSystemDirectoryHandle>;
+    showDirectoryPicker?: (options?: DirectoryPickerOptions) => Promise<FileSystemDirectoryHandle>;
   }
+
+  // File System Access API 提示目录的 WellKnownDirectory 简化版。
+  type FilePickerStartIn = 'desktop' | 'documents' | 'downloads' | 'music' | 'pictures' | 'videos';
 
   interface SaveFilePickerOptions {
     suggestedName?: string;
@@ -278,6 +281,15 @@ declare global {
       accept: Record<string, string[]>;
     }[];
     excludeAcceptAllOption?: boolean;
+    // 用固定 id 让浏览器记住上次选择的位置，减少重复弹窗。
+    id?: string;
+    startIn?: FilePickerStartIn;
+  }
+
+  interface DirectoryPickerOptions {
+    mode?: 'read' | 'readwrite';
+    id?: string;
+    startIn?: FilePickerStartIn;
   }
 
   interface FileSystemFileHandle {

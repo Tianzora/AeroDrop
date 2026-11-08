@@ -37,6 +37,7 @@ import {
 } from '../services/connectionTelemetry';
 import { getBrowserNetworkProfile } from '../services/networkProfile';
 import { createReceivePersistenceAdapter, type ReceivePersistenceAdapter } from '../services/receive/persistenceAdapter';
+import { resolveDirectDownloadPolicy } from '../services/receive/directDownloadPolicy';
 import { createReceiveRecoveryCoordinator, type ReceiveRecoveryCoordinator } from '../services/receive/recoveryCoordinator';
 import { createReceivePersistenceOrchestrator, type ReceivePersistenceOrchestrator } from '../services/receive/persistenceOrchestrator';
 import { createReceiveRouteArbiter } from '../services/receive/routeArbiter';
@@ -260,8 +261,21 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const isSafari = /^((?!chrome|android).)*safari/i.test(navigator.userAgent);
   const isMobileDevice = /android|iphone|ipad|ipod/i.test(navigator.userAgent) ||
     (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+  const supportsSaveFilePicker = typeof window.showSaveFilePicker === 'function';
+  const supportsDirectoryPicker = typeof window.showDirectoryPicker === 'function';
+  // 直下模式下不建立原生写入目标，会话协调器据此改走内存/blob 路径。
+  const preferBrowserDownloadRef = useRef<boolean>(false);
 
   const metadataRef = useRef<FileMetadata | null>(null);
+  // 直下策略只取决于载荷体积与浏览器能力，无需用户设置；每次接收/续传前重算。
+  const resolveReceiveDirectDownloadPolicy = () =>
+    resolveDirectDownloadPolicy({
+      fileCount: metadataRef.current?.files?.length ?? 0,
+      totalBytes: metadataRef.current?.totalSize ?? 0,
+      isIOS,
+      isSafari,
+      supportsSaveFilePicker,
+    });
   const metadataChunkAssemblerRef = useRef(createMetadataChunkAssembler());
   const acceptingRef = useRef<boolean>(false);
   const currentFileIndexRef = useRef<number>(0); 
@@ -2132,6 +2146,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       requestReselectReceiveTarget: async ({ fileIndex, byteOffset }) => {
         // 刷新后原来的写入目标已经失效，需要用户重新授权一次保存位置才能按偏移续写。
         currentFileIndexRef.current = fileIndex;
+        // 直下模式没有流式写入目标，字节只存在于内存/IDB，无法按偏移续写，交给上层从头重收。
+        if (preferBrowserDownloadRef.current) {
+          return false;
+        }
         try {
           if (multiFileSaveModeRef.current === 'directory-direct') {
             const resolution = await resolveDirectoryHandleForResume({
@@ -2147,7 +2165,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
               },
               pickDirectory: async () =>
                 typeof window.showDirectoryPicker === 'function'
-                  ? window.showDirectoryPicker({ mode: 'readwrite' })
+                  ? window.showDirectoryPicker({
+                      mode: 'readwrite',
+                      id: 'aerodrop-save-directory',
+                      startIn: 'downloads',
+                    })
                   : null,
             });
             if (!resolution) return false;
@@ -2161,7 +2183,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           const suggestedName = sanitizeFileName(
             metadataRef.current?.files?.[fileIndex]?.name || `file_${Date.now()}.bin`
           );
-          const fileHandle = await window.showSaveFilePicker({ suggestedName });
+          const fileHandle = await window.showSaveFilePicker({
+            suggestedName,
+            id: 'aerodrop-save-file',
+            startIn: 'downloads',
+          });
           if (!fileHandle) return false;
           nativeFileHandleRef.current = fileHandle;
           preparedNativeWriterFileIndexRef.current = null;
@@ -2265,7 +2291,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       awaitPendingFileFinalize: (reason) => receivePersistenceOrchestrator.awaitPendingFileFinalize(reason),
       isIOS,
       isSafari,
-      preferBrowserDownload: false,
+      isBrowserDownloadPreferred: () => preferBrowserDownloadRef.current,
       supportsStreamSaver: !!streamSaver,
       indexedDbThresholdBytes: IOS_IDB_BUFFER_THRESHOLD_BYTES,
       getMetadataFileCount: () => metadataRef.current?.files?.length ?? 0,
@@ -2787,12 +2813,18 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       isTransferActiveRef.current = true;
       preparedNativeWriterFileIndexRef.current = null;
       nativeFileHandleRef.current = null;
+      const fileCount = metadataRef.current?.files?.length ?? 0;
+      const directDownloadPolicy = resolveReceiveDirectDownloadPolicy();
+      preferBrowserDownloadRef.current = directDownloadPolicy.useDirectDownload;
+      if (directDownloadPolicy.fallbackReason === 'too-large' && onNotification) {
+        onNotification('文件较大，请选择保存位置后流式写入（不占用内存）。', 'info');
+      }
       const multiFileResolution = resolveMultiFileSaveMode({
-        fileCount: metadataRef.current?.files?.length ?? 0,
+        fileCount,
         isIOS,
         isSafari,
-        supportsDirectoryPicker: typeof window.showDirectoryPicker === 'function',
-        supportsArchiveExport: (metadataRef.current?.files?.length ?? 0) > 1,
+        supportsDirectoryPicker,
+        supportsArchiveExport: fileCount > 1,
       });
       multiFileSaveModeRef.current = multiFileResolution.mode;
 
@@ -2811,7 +2843,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           }
         } else {
           try {
-            const directoryHandle = await window.showDirectoryPicker({ mode: 'readwrite' });
+            const directoryHandle = await window.showDirectoryPicker({
+              mode: 'readwrite',
+              id: 'aerodrop-save-directory',
+              startIn: 'downloads',
+            });
             sessionDirectoryHandleCacheRef.current.remember(directoryHandle);
             void persistedDirectoryHandleRef.current.save(directoryHandle);
             directorySaveSessionRef.current.attachRootDirectory(directoryHandle);
@@ -2835,7 +2871,11 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         }
       }
 
-      if (
+      if (directDownloadPolicy.useDirectDownload) {
+        if (onNotification) {
+          onNotification('正在下载到浏览器默认下载目录，无需选择保存位置。', 'info');
+        }
+      } else if (
         !isIOS &&
         !isSafari &&
         !!window.showSaveFilePicker &&
@@ -2847,6 +2887,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         try {
           nativeFileHandleRef.current = await window.showSaveFilePicker({
             suggestedName,
+            id: 'aerodrop-save-file',
+            startIn: 'downloads',
           });
           if (onNotification) {
             onNotification("已启用原生流式写入模式。", 'info');
@@ -3016,6 +3058,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   };
 
   const resumeTransfer = () => {
+      // 续传沿用同一套自动策略，避免刷新后又弹出保存框。
+      preferBrowserDownloadRef.current = resolveReceiveDirectDownloadPolicy().useDirectDownload;
       const { overallTransferredBytes } = getOverallTransferSnapshot();
       lastDurableProgressBytesRef.current = overallTransferredBytes;
       lastDurableProgressAtRef.current = Date.now();
