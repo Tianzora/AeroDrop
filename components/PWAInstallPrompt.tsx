@@ -110,18 +110,19 @@ export const PWAInstallPrompt: React.FC = () => {
 
   return (
     <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-4 md:w-96 z-50 animate-slide-up">
-      <div className="bg-white dark:bg-slate-800 rounded-2xl shadow-2xl border border-slate-200 dark:border-slate-700 p-4 relative overflow-hidden">
+      <div className="bg-white dark:bg-slate-800 rounded-card shadow-card border border-slate-200 dark:border-slate-700 p-4 relative overflow-hidden">
 
         <button
           onClick={dismissPrompt}
-          className="absolute top-2 right-2 p-1 text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
+          className="absolute top-1 right-1 inline-flex min-w-11 min-h-11 items-center justify-center rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
+          aria-label="关闭安装提示"
         >
           <X size={16} />
         </button>
 
         <div className="flex gap-4">
-          <div className="bg-brand-100 dark:bg-brand-900/30 rounded-xl p-3 h-fit shrink-0">
-            <Download size={24} className="text-brand-600 dark:text-brand-400" />
+          <div className="bg-brand-100 dark:bg-brand-900/30 rounded-control p-3 h-fit shrink-0">
+            <Download size={20} className="text-brand-600 dark:text-brand-400" />
           </div>
 
           <div className="flex-1">
@@ -133,18 +134,18 @@ export const PWAInstallPrompt: React.FC = () => {
             </p>
 
             {isIOS ? (
-              <div className="bg-slate-50 dark:bg-slate-900/50 rounded-lg p-3 text-xs text-slate-600 dark:text-slate-300 border border-slate-100 dark:border-slate-700/50">
+              <div className="bg-slate-50 dark:bg-slate-900/50 rounded-control p-3 text-xs text-slate-600 dark:text-slate-300 border border-slate-100 dark:border-slate-700/50">
                 <div className="flex items-center gap-2 mb-2">
-                  1. 点击浏览器底部的 <Share size={14} className="inline text-blue-500" /> 分享按钮
+                  1. 点击浏览器底部的 <Share size={16} className="inline text-brand-500" /> 分享按钮
                 </div>
                 <div className="flex items-center gap-2">
-                  2. 选择 <PlusSquare size={14} className="inline text-slate-500" /> "添加到主屏幕"
+                  2. 选择 <PlusSquare size={16} className="inline text-slate-500" /> "添加到主屏幕"
                 </div>
               </div>
             ) : (
               <button
                 onClick={handleInstallClick}
-                className="w-full bg-brand-600 hover:bg-brand-700 text-white text-sm font-bold py-2 rounded-lg transition-colors shadow-sm active:scale-[0.98]"
+                className="w-full bg-brand-600 hover:bg-brand-700 text-white text-sm font-bold py-2 rounded-control transition-colors shadow-sm active:scale-[0.98]"
               >
                 立即安装
               </button>

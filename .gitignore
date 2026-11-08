@@ -60,3 +60,6 @@ skills/
 
 # Defensive rule for accidental OS/cache dumps into repo root
 %SystemDrive%/
+
+# 本地临时脚本/截图/构建验证产物
+.tmp/

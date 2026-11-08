@@ -200,6 +200,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     _setState(newState);
   };
   const [code, setCode] = useState<string>('');
+  // 口令校验结果：只影响输入行自身（打勾 / 叉 + 抖动），不再整页跳转 ERROR
+  const [codeStatus, setCodeStatus] = useState<'idle' | 'error' | 'success'>('idle');
   const [metadata, setMetadata] = useState<FileMetadata | null>(null);
   const [progress, setProgress] = useState<number>(0);
   const [errorMsg, setErrorMsg] = useState<string>('');
@@ -1880,6 +1882,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         setReconnectAttempt(reconnectAttempt);
         setErrorMsg('连接中断，正在尝试恢复...');
         setConnectingStage('reconnecting');
+        // 一旦进入重连，打勾扫光的停留就没有意义，立刻撤掉，避免挡住重连文案
+        setCodeStatus('idle');
         setState(TransferState.WAITING_FOR_PEER);
         if (onNotification) {
           onNotification(`连接中断，正在尝试第 ${reconnectAttempt} 次重连...`, 'info');
@@ -2384,6 +2388,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     forceRelay?: boolean;
   }) => {
     if (!isValidShareCode(code)) return;
+    setCodeStatus('idle');
     const receiverActivityToken = receiverActivityTrackerRef.current.begin();
     clearCommittedReconnectTimer();
     backgroundTimeoutGroupRef.current.clearAll();
@@ -2395,13 +2400,24 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     const resolvedPeerId = await resolveSenderPeerId(code);
     if (!resolvedPeerId) {
       if (receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) {
+        // 输错口令不换页：输入行播叉 + 抖动，行内提示，停在本页等重输
         setErrorMsg('口令不存在或已过期，请确认后重试。');
-        setState(TransferState.ERROR);
+        setCodeStatus('error');
       }
       return;
     }
     resolvedSenderPeerIdRef.current = resolvedPeerId;
     connectTelemetryRef.current = createConnectionSession('receiver', { code });
+    // 只有用户首次提交口令时才播放打勾扫光；内部重连（preserveCommittedReconnectAttempts）
+    // 必须立刻让出等待页文案，不能被这段停留挡住：760ms 覆盖官方成功动画全程
+    // （wash 300ms、末位数字下沉到 ~510ms、勾 280ms 延迟 + 350ms 弹簧 ≈ 630ms）。
+    if (!options?.preserveCommittedReconnectAttempts) {
+      setCodeStatus('success');
+      window.setTimeout(() => {
+        if (!isMountedRef.current) return;
+        setCodeStatus((prev) => (prev === 'success' ? 'idle' : prev));
+      }, 760);
+    }
     setState(TransferState.WAITING_FOR_PEER);
     setConnectingStage('fetching_ice');
     setErrorMsg('');
@@ -3048,6 +3064,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         }
         setMetadata(null);
         setCode('');
+        setCodeStatus('idle');
         setState(TransferState.IDLE);
         setErrorMsg('');
         setConnectingStage('');
@@ -3066,15 +3083,25 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   
   const handleRetry = () => { if (isValidShareCode(code)) handleConnect(); else reset(); };
-  const handleDigitClick = (digit: string) => { if (code.length < 6) setCode(prev => prev + digit); };
-  const handleBackspace = () => { setCode(prev => prev.slice(0, -1)); };
-  const handleClear = () => { setCode(''); };
+  // 所有口令输入都走这里：一旦重新输入就撤掉错误态与行内提示；清空（错误后自动排空）保持提示
+  const applyCode = (next: string) => {
+    const normalized = normalizeShareCodeInput(next);
+    // 成功动画播放期间（760ms）忽略新的非空输入：此时已进入连接流程，避免闭包里旧的 code.length 再写入一位。
+    if (codeStatus === 'success' && normalized.length > 0) return;
+    // 官方 CodeSlots 在错误排空结束后也会回调一次空串，此处一并回到 idle，让危险色退场、输入可用。
+    if (codeStatus !== 'idle') setCodeStatus('idle');
+    if (normalized.length > 0 && errorMsg) setErrorMsg('');
+    setCode(normalized);
+  };
+  const handleDigitClick = (digit: string) => { if (code.length < 6) applyCode(code + digit); };
+  const handleBackspace = () => { applyCode(code.slice(0, -1)); };
+  const handleClear = () => { applyCode(''); };
   const handlePasteFromClipboard = async () => {
     try {
       const text = await navigator.clipboard.readText();
       const parsed = parseShareCodeFromClipboard(text);
       if (parsed) {
-        setCode(parsed);
+        applyCode(parsed);
         return;
       }
       if (onNotification) onNotification("剪贴板中未找到 6 位口令", 'info');
@@ -3126,9 +3153,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     <ReceiverUI
       state={state}
       code={code}
+      codeStatus={codeStatus}
       inputRef={inputRef}
       isMobileDevice={isMobileDevice}
-      onCodeChange={(value) => setCode(normalizeShareCodeInput(value))}
+      onCodeChange={applyCode}
       onDigitClick={handleDigitClick}
       onPasteFromClipboard={handlePasteFromClipboard}
       onBackspace={handleBackspace}
