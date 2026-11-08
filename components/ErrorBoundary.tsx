@@ -46,7 +46,7 @@ export class ErrorBoundary extends Component<Props, State> {
 
       return (
         <div className="min-h-[50vh] flex items-center justify-center p-6">
-          <div className="max-w-md w-full bg-white dark:bg-slate-800 rounded-2xl shadow-xl border border-slate-100 dark:border-slate-700 p-8 text-center">
+          <div className="max-w-md w-full bg-white dark:bg-slate-800 rounded-card shadow-card border border-slate-100 dark:border-slate-700 p-8 text-center">
             <div className="w-16 h-16 bg-red-100 dark:bg-red-900/30 text-red-600 dark:text-red-400 rounded-full flex items-center justify-center mx-auto mb-6">
               <AlertTriangle size={32} />
             </div>
@@ -59,7 +59,7 @@ export class ErrorBoundary extends Component<Props, State> {
             </p>
 
             {process.env.NODE_ENV === 'development' && this.state.error && (
-              <details className="text-left mb-6 bg-slate-50 dark:bg-slate-900 rounded-lg p-4 text-xs">
+              <details className="text-left mb-6 bg-slate-50 dark:bg-slate-900 rounded-control p-4 text-xs">
                 <summary className="cursor-pointer text-slate-600 dark:text-slate-300 font-medium mb-2">
                   错误详情 (开发模式)
                 </summary>
@@ -73,13 +73,13 @@ export class ErrorBoundary extends Component<Props, State> {
             <div className="flex gap-3 justify-center">
               <button
                 onClick={this.handleReset}
-                className="px-5 py-2.5 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-lg font-medium hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
+                className="px-5 py-2.5 bg-slate-100 dark:bg-slate-700 text-slate-700 dark:text-slate-200 rounded-control font-medium hover:bg-slate-200 dark:hover:bg-slate-600 transition-colors"
               >
                 重试
               </button>
               <button
                 onClick={this.handleReload}
-                className="px-5 py-2.5 bg-brand-600 text-white rounded-lg font-medium hover:bg-brand-700 transition-colors flex items-center gap-2"
+                className="px-5 py-2.5 bg-brand-600 text-white rounded-control font-medium hover:bg-brand-700 transition-colors flex items-center gap-2"
               >
                 <RefreshCw size={16} />
                 刷新页面

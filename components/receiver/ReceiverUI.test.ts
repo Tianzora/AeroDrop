@@ -14,6 +14,7 @@ const singleFileMetadata: FileMetadata = {
 const baseProps: React.ComponentProps<typeof ReceiverUI> = {
   state: TransferState.PEER_CONNECTED,
   code: '',
+  codeStatus: 'idle' as const,
   inputRef: { current: null },
   isMobileDevice: false,
   onCodeChange: () => {},

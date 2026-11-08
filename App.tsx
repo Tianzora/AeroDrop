@@ -2,9 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import { Sender } from './components/Sender';
 import { Receiver } from './components/Receiver';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { Share, DownloadCloud, Bell, Monitor, Package, ShieldAlert, X } from 'lucide-react';
+import { Send, Inbox, Monitor, Package, ShieldAlert, X } from 'lucide-react';
+import { Toaster, toast } from 'sonner';
 import { ScreenShare } from './components/ScreenShare';
-import { GradientText } from './components/GradientText';
 import { AppNotification } from './types';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 import { getInitialDeviceName } from './services/deviceName';
@@ -56,7 +56,8 @@ const NOTIFICATION_DEDUPE_WINDOW_MS = 1500;
 const App: React.FC = () => {
   const [initialRoute] = useState<InitialRouteState>(() => getInitialRouteState());
   const [mode, setMode] = useState<Mode>(initialRoute.mode);
-  const [notifications, setNotifications] = useState<AppNotification[]>([]);
+  // Toast 由 sonner 渲染；这里只保留去重窗口内的记录，用同一个 notificationPolicy 判重。
+  const recentNotificationsRef = useRef<AppNotification[]>([]);
   const [showRiskBanner, setShowRiskBanner] = useState(false);
   const [isRiskBannerExpanded, setIsRiskBannerExpanded] = useState(false);
   const [swUpdateReady, setSwUpdateReady] = useState(false);
@@ -276,66 +277,30 @@ const App: React.FC = () => {
     );
   }, [initialRoute.mode, initialRoute.viewId]);
 
-  useEffect(() => {
-    // Touch/coarse-pointer devices don't benefit from mouse glow tracking.
-    if (
-      window.matchMedia('(any-hover: none)').matches ||
-      window.matchMedia('(pointer: coarse)').matches
-    ) {
-      return;
-    }
-
-    const docEl = document.documentElement;
-    let rafId: number | null = null;
-    let pendingX = 0;
-    let pendingY = 0;
-
-    const flushMousePosition = () => {
-      docEl.style.setProperty('--mouse-x', `${pendingX}px`);
-      docEl.style.setProperty('--mouse-y', `${pendingY}px`);
-      rafId = null;
-    };
-
-    const handleMouseMove = (e: MouseEvent) => {
-      pendingX = e.clientX;
-      pendingY = e.clientY;
-      if (rafId === null) {
-        rafId = window.requestAnimationFrame(flushMousePosition);
-      }
-    };
-    window.addEventListener('mousemove', handleMouseMove, { passive: true });
-    return () => {
-      window.removeEventListener('mousemove', handleMouseMove);
-      if (rafId !== null) {
-        window.cancelAnimationFrame(rafId);
-      }
-    };
-  }, []);
-
   const addNotification = (message: string, type: 'success' | 'info' | 'error') => {
     const now = Date.now();
-    const id = now.toString() + Math.random().toString(36).substring(2, 9);
-    setNotifications((prev) => {
-      if (!shouldEnqueueNotification(prev, { message, type, now, dedupeWindowMs: NOTIFICATION_DEDUPE_WINDOW_MS })) {
-        return prev;
-      }
-      return [...prev, { id, message, type, timestamp: now }];
-    });
+    const recent = recentNotificationsRef.current;
+    if (!shouldEnqueueNotification(recent, { message, type, now, dedupeWindowMs: NOTIFICATION_DEDUPE_WINDOW_MS })) {
+      return;
+    }
+    recentNotificationsRef.current = [
+      ...recent.filter(n => now - n.timestamp < NOTIFICATION_DEDUPE_WINDOW_MS),
+      { id: String(now), message, type, timestamp: now },
+    ];
 
-    setTimeout(() => {
-      setNotifications(prev => prev.filter(n => n.id !== id));
-    }, 4000);
+    const notify = type === 'success' ? toast.success : type === 'error' ? toast.error : toast.info;
+    notify(message, { duration: 4000 });
   };
 
   return (
-    <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-950 flex flex-col transition-colors duration-300 relative overflow-hidden">
+    <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-950 flex flex-col transition-colors motion-base relative overflow-hidden">
       {swUpdateReady && (
         <div className="fixed top-4 left-4 right-4 md:left-auto md:right-4 z-50 pointer-events-auto">
-          <div className="flex items-center justify-between gap-3 rounded-xl border border-blue-200 bg-blue-50/95 px-4 py-3 text-blue-900 shadow-lg backdrop-blur dark:border-blue-900 dark:bg-slate-900/95 dark:text-blue-200">
+          <div className="flex items-center justify-between gap-3 rounded-control border border-brand-100 bg-brand-50/95 px-4 py-3 text-brand-900 shadow-lg backdrop-blur dark:border-brand-900 dark:bg-slate-900/95 dark:text-brand-200">
             <p className="text-sm font-medium">发现新版本，建议刷新以避免新旧版本混用导致连接异常。</p>
             <button
               onClick={applySwUpdate}
-              className="shrink-0 rounded-lg bg-blue-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-70"
+              className="shrink-0 rounded-control bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-70"
               disabled={isApplyingSwUpdate}
             >
               {isApplyingSwUpdate ? '更新中...' : '立即刷新'}
@@ -344,42 +309,27 @@ const App: React.FC = () => {
         </div>
       )}
 
-      <div
-        className="fixed inset-0 pointer-events-none z-0 transition-opacity duration-700"
-        style={{
-          background: `radial-gradient(circle 600px at var(--mouse-x, 50%) var(--mouse-y, 50%), rgba(100, 150, 255, 0.15), transparent 80%)`,
-          filter: 'blur(80px)',
-        }}
+      {/* sonner：官方 toast 组件，自带图标、堆叠、滑动手势与深浅色主题；固定底部避免遮挡顶部导航 */}
+      <Toaster
+        position="bottom-center"
+        theme="system"
+        duration={4000}
+        offset={16}
+        mobileOffset={16}
+        toastOptions={{ className: 'font-sans', style: { fontSize: '14px' } }}
       />
 
-      <div className="fixed top-20 left-4 right-4 md:left-auto md:right-4 z-50 flex flex-col gap-2 pointer-events-none">
-        {notifications.map(n => (
-          <div key={n.id} className={`pointer-events-auto flex items-center gap-3 px-4 py-3 rounded-xl shadow-lg border animate-pop-in ${
-            n.type === 'success' ? 'bg-white dark:bg-slate-800 border-green-200 dark:border-green-900 text-slate-800 dark:text-slate-100' : 
-            n.type === 'error' ? 'bg-red-50 dark:bg-slate-800 border-red-200 dark:border-red-900 text-red-800 dark:text-red-300' : 
-            'bg-white dark:bg-slate-800 border-slate-200 dark:border-slate-700 text-slate-800 dark:text-slate-100'
-          }`}>
-            <Bell size={16} className={n.type === 'success' ? 'text-green-500' : n.type === 'error' ? 'text-red-500' : 'text-blue-500'} />
-            <span className="text-sm font-medium">{n.message}</span>
-          </div>
-        ))}
-      </div>
-
-      <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-20 transition-colors duration-300">
+      <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-20 transition-colors motion-base">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-14 md:h-16 flex items-center justify-between">
           <div className="flex items-center gap-3 cursor-pointer" onClick={() => setMode('send')}>
             <div className="bg-brand-600 p-1.5 md:p-2 rounded-[26.5%] text-white shadow-sm">
               <Package size={20} className="md:w-6 md:h-6" />
             </div>
             <div className="flex items-baseline gap-2">
-              <h1 className="text-xl md:text-2xl font-bold text-slate-900 dark:text-white tracking-tighter">AeroDrop</h1>
-              <GradientText
-                colors={["#2563eb", "#60a5fa", "#4f46e5", "#2563eb"]}
-                animationSpeed={8}
-                className="text-[10px] md:text-xs font-bold tracking-tight opacity-90 pb-0.5"
-              >
+              <h1 className="text-xl font-bold text-slate-900 dark:text-white tracking-tighter">AeroDrop</h1>
+              <span className="text-xs font-bold tracking-tight text-brand-600 dark:text-brand-400 pb-0.5">
                 @Tianzora
-              </GradientText>
+              </span>
             </div>
           </div>
 
@@ -394,16 +344,16 @@ const App: React.FC = () => {
                   </span>
                   <button
                     onClick={dismissRiskBanner}
-                    className="ml-1 p-0.5 rounded-full hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400 transition-colors"
+                    className="relative ml-1 p-2 rounded-full after:absolute after:-inset-2 after:content-[''] hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400 transition-colors"
                     aria-label="关闭警告"
                   >
-                    <X size={14} />
+                    <X size={16} />
                   </button>
                 </div>
 
                 {/* Mobile Icon Button */}
                 <button
-                  className={`sm:hidden p-2 rounded-full transition-colors relative ${
+                  className={`sm:hidden inline-flex min-w-11 min-h-11 items-center justify-center rounded-full transition-colors relative ${
                     isRiskBannerExpanded
                       ? 'bg-amber-100 dark:bg-amber-800/50 text-amber-600 dark:text-amber-400'
                       : 'text-amber-500 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30'
@@ -438,7 +388,8 @@ const App: React.FC = () => {
             onClick={() => {
               dismissRiskBanner();
             }}
-            className="p-1 -mr-1 -mt-1 rounded-full hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400"
+            className="inline-flex min-w-11 min-h-11 items-center justify-center -mr-2 -my-2 rounded-full hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400"
+            aria-label="关闭警告"
           >
             <X size={16} />
           </button>
@@ -448,65 +399,68 @@ const App: React.FC = () => {
       <main className="flex-1 flex flex-col items-center justify-start pt-4 md:pt-8 pb-8 px-3 md:px-4 w-full max-w-5xl mx-auto overflow-hidden">
 
         <div className="w-full max-w-xl mb-8 relative z-10">
-            <div className="bg-white dark:bg-slate-900 p-1.5 rounded-full grid grid-cols-3 relative transition-all duration-300 shadow-[0_12px_30px_rgba(0,0,0,0.08)] border border-slate-50 dark:border-slate-800">
+            <div className="bg-white dark:bg-slate-900 p-1.5 rounded-full grid grid-cols-3 relative shadow-card border border-slate-50 dark:border-slate-800">
               <div
                   className="absolute top-1.5 left-1.5 bottom-1.5 w-[calc((100%-0.75rem)/3)] bg-brand-600 dark:bg-brand-500 rounded-full shadow-[inset_2px_2px_6px_rgba(0,0,0,0.2)]"
                   style={{
                     transform: `translateX(${mode === 'send' ? '0%' : mode === 'receive' ? '100%' : '200%'})`,
-                    transition: 'transform 300ms cubic-bezier(0.25, 0.8, 0.25, 1)'
+                    transition: 'transform var(--dur-base) var(--ease-move)'
                   }}
               ></div>
 
               <button
                 onClick={() => setMode('send')}
-                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-all duration-300 whitespace-nowrap ${
+                aria-pressed={mode === 'send'}
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-[color] motion-fast whitespace-nowrap ${
                   mode === 'send'
                     ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:scale-105'
+                    : 'text-slate-500 hover:text-slate-700 hover:bg-slate-100 dark:text-slate-400 dark:hover:text-slate-200 dark:hover:bg-slate-800'
                 }`}
               >
-                <Share size={18} className={`transition-transform duration-300 ${mode === 'send' ? 'scale-110' : ''}`} />
+                <Send size={18} className={`transition-transform motion-base ${mode === 'send' ? 'scale-110' : ''}`} />
                 发送
               </button>
               <button
                 onClick={() => setMode('receive')}
-                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-all duration-300 whitespace-nowrap ${
+                aria-pressed={mode === 'receive'}
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-[color] motion-fast whitespace-nowrap ${
                   mode === 'receive'
                     ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:scale-105'
+                    : 'text-slate-500 hover:text-slate-700 hover:bg-slate-100 dark:text-slate-400 dark:hover:text-slate-200 dark:hover:bg-slate-800'
                 }`}
               >
-                <DownloadCloud size={18} className={`transition-transform duration-300 ${mode === 'receive' ? 'scale-110' : ''}`} />
+                <Inbox size={18} className={`transition-transform motion-base ${mode === 'receive' ? 'scale-110' : ''}`} />
                 接收
               </button>
               <button
                 onClick={() => setMode('screen')}
-                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-all duration-300 whitespace-nowrap ${
+                aria-pressed={mode === 'screen'}
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-[color] motion-fast whitespace-nowrap ${
                   mode === 'screen'
                     ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-700 dark:text-slate-400 dark:hover:text-slate-200 hover:scale-105'
+                    : 'text-slate-500 hover:text-slate-700 hover:bg-slate-100 dark:text-slate-400 dark:hover:text-slate-200 dark:hover:bg-slate-800'
                 }`}
               >
-                <Monitor size={18} className={`transition-transform duration-300 ${mode === 'screen' ? 'scale-110' : ''}`} />
+                <Monitor size={18} className={`transition-transform motion-base ${mode === 'screen' ? 'scale-110' : ''}`} />
                 共享
               </button>
             </div>
         </div>
 
-        <div className="w-full flex-1 flex flex-col perspective-[2000px]">
+        <div className="w-full flex-1 flex flex-col">
           <ErrorBoundary>
             {mode === 'send' && (
-              <div className="block animate-flip-in h-full transform-style-3d">
+              <div className="block animate-slide-up h-full">
                 <Sender onNotification={addNotification} deviceName={deviceName} />
               </div>
             )}
             {mode === 'receive' && (
-              <div className="block animate-flip-in h-full transform-style-3d">
+              <div className="block animate-slide-up h-full">
                 <Receiver initialCode={initialCode} onNotification={addNotification} deviceName={deviceName} />
               </div>
             )}
             {mode === 'screen' && (
-              <div className="block animate-flip-in h-full transform-style-3d">
+              <div className="block animate-slide-up h-full">
                 <ScreenShare initialViewId={initialViewId} onNotification={addNotification} />
               </div>
             )}
@@ -514,7 +468,7 @@ const App: React.FC = () => {
         </div>
         
         <div className="mt-8 text-center max-w-md mx-auto space-y-2 pb-4 md:pb-0">
-          <p className="text-[10px] md:text-xs text-slate-400 dark:text-slate-600">
+          <p className="text-xs text-slate-500 dark:text-slate-400">
             Powered by WebRTC. 数据直接在设备间点对点传输，不经过云端存储。
           </p>
         </div>

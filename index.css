@@ -1,7 +1,7 @@
 @import "tailwindcss";
 
 @theme {
-  /* Brand Colors */
+  /* ---- Brand colors — 视觉世界不变 ---- */
   --color-brand-50: #eff6ff;
   --color-brand-100: #dbeafe;
   --color-brand-400: #60a5fa;
@@ -11,84 +11,169 @@
   --color-brand-800: #1e40af;
   --color-brand-900: #1e3a8a;
 
-  /* Animations */
-  --animate-pulse-slow: pulse 3s cubic-bezier(0.4, 0, 0.6, 1) infinite;
-  --animate-float: float 3s ease-in-out infinite;
-  --animate-shimmer: shimmer 1.5s linear infinite;
-  --animate-flip-in: flipIn 0.6s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
-  --animate-slide-up: slideUp 0.5s ease-out forwards;
-  --animate-pop-in: popIn 0.4s cubic-bezier(0.175, 0.885, 0.32, 1.275) forwards;
-  --animate-scale-in: scaleIn 0.3s ease-out forwards;
-  --animate-fade-in-up: fadeInUp 0.5s ease-out forwards;
+  /* ---- Motion language: 3 durations + 2 easings, single source of truth ----
+     fast  140ms 按压/悬停反馈
+     base  240ms 小元素进场、淡入
+     slow  420ms 模式切换、较大位移
+     ease-ui   = ease-out   进场与反馈（UI 里不要用 ease-in）
+     ease-move = ease-in-out 屏内位移（指示器、抽屉） */
+  --dur-fast: 140ms;
+  --dur-base: 240ms;
+  --dur-slow: 420ms;
+  --ease-ui: cubic-bezier(0.23, 1, 0.32, 1);
+  --ease-move: cubic-bezier(0.77, 0, 0.175, 1);
 
-  @keyframes float {
-    0%, 100% { transform: translateY(0); }
-    50% { transform: translateY(-10px); }
-  }
-  @keyframes shimmer {
-    0% { background-position: -200% 0; }
-    100% { background-position: 200% 0; }
-  }
+  /* ---- Radius: 2 layout tiers + 1 pill primitive ---- */
+  --radius-card: 1.5rem;      /* 24px — 与原 rounded-3xl 卡片一致 */
+  --radius-control: 0.75rem;  /* 12px — 输入框、按键、方块 */
+  --radius-pill: 9999px;      /* 圆点、进度条端帽、分段指示器、药丸按钮 */
+
+  /* ---- Elevation: 只有带 offset + 柔和 blur 的一层，禁止零偏移彩光 ---- */
+  --shadow-card: 0 10px 30px -12px rgba(15, 23, 42, 0.18);
+
+  /* ---- Animations — 全部时长/缓动引用上面的 token ---- */
+  --animate-flip-in: flipIn var(--dur-slow) var(--ease-ui) forwards;
+  --animate-slide-up: slideUp var(--dur-base) var(--ease-ui) forwards;
+  --animate-slide-down: slideDown var(--dur-base) var(--ease-ui) forwards;
+  --animate-pop-in: popIn var(--dur-base) var(--ease-ui) forwards;
+
   @keyframes flipIn {
     0% { transform: rotateY(-90deg); opacity: 0; }
     100% { transform: rotateY(0deg); opacity: 1; }
   }
   @keyframes slideUp {
-    0% { transform: translateY(20px); opacity: 0; }
+    0% { transform: translateY(12px); opacity: 0; }
+    100% { transform: translateY(0); opacity: 1; }
+  }
+  @keyframes slideDown {
+    0% { transform: translateY(-10px); opacity: 0; }
     100% { transform: translateY(0); opacity: 1; }
   }
   @keyframes popIn {
-    0% { transform: scale(0.95); opacity: 0; }
+    0% { transform: scale(0.96); opacity: 0; }
     100% { transform: scale(1); opacity: 1; }
-  }
-  @keyframes scaleIn {
-    0% { transform: scale(0.8); opacity: 0; }
-    100% { transform: scale(1); opacity: 1; }
-  }
-  @keyframes fadeInUp {
-    0% { transform: translateY(10px); opacity: 0; }
-    100% { transform: translateY(0); opacity: 1; }
   }
 }
 
-/* Custom Scrollbar - Light Mode */
-::-webkit-scrollbar {
-  width: 8px;
-  height: 8px;
-}
-::-webkit-scrollbar-track {
-  background: #f1f1f1;
-}
-::-webkit-scrollbar-thumb {
-  background: #c1c1c1;
-  border-radius: 4px;
-}
-::-webkit-scrollbar-thumb:hover {
-  background: #a8a8a8;
-}
+@layer base {
+  html {
+    -webkit-font-smoothing: antialiased;
+    text-rendering: optimizeLegibility;
+  }
 
-/* Dark mode scrollbar */
-@media (prefers-color-scheme: dark) {
+  /* 浏览器面进设计系统：选区 / 光标 / 焦点环 / 下划线偏移 */
+  ::selection {
+    background-color: var(--color-brand-500);
+    color: #ffffff;
+  }
+  body {
+    caret-color: var(--color-brand-600);
+  }
+  @media (prefers-color-scheme: dark) {
+    body {
+      caret-color: var(--color-brand-400);
+    }
+  }
+
+  /* 统一焦点环：2px + 2px offset，深浅两套都可见 */
+  :focus-visible {
+    outline: 2px solid var(--color-brand-600);
+    outline-offset: 2px;
+  }
+  @media (prefers-color-scheme: dark) {
+    :focus-visible {
+      outline-color: var(--color-brand-400);
+    }
+  }
+
+  a,
+  .underline {
+    text-underline-offset: 2px;
+  }
+
+  /* 只给可交互元素加微过渡（原来是 * 全量过渡，任何布局元素都被带进去，易抖动） */
+  :where(button, a, [role="button"], input, select, textarea, label, summary) {
+    transition-property: background-color, border-color, color, fill, stroke, box-shadow, transform, opacity;
+    transition-timing-function: var(--ease-ui);
+    transition-duration: var(--dur-fast);
+  }
+
+  /* 滚条 */
+  ::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
   ::-webkit-scrollbar-track {
-    background: #1e293b;
+    background: transparent;
   }
   ::-webkit-scrollbar-thumb {
-    background: #475569;
+    background: rgba(100, 116, 139, 0.35);
+    border-radius: var(--radius-pill);
   }
   ::-webkit-scrollbar-thumb:hover {
-    background: #64748b;
+    background: rgba(100, 116, 139, 0.55);
   }
 }
 
-/* Ensure smooth color transitions */
-*, *::before, *::after {
-  transition-property: background-color, border-color, color, fill, stroke;
-  transition-timing-function: cubic-bezier(0.4, 0, 0.2, 1);
-  transition-duration: 150ms;
+@layer utilities {
+  /* 数字等宽：口令、进度、速度、剩余时间 */
+  .tnum {
+    font-variant-numeric: tabular-nums;
+  }
+
+  /* 动效档位：全站只允许这三档时长 + 两个缓动 token，禁止在组件里写 duration-150/200/300 */
+  .motion-fast {
+    transition-duration: var(--dur-fast);
+    transition-timing-function: var(--ease-ui);
+  }
+  .motion-base {
+    transition-duration: var(--dur-base);
+    transition-timing-function: var(--ease-ui);
+  }
+  .motion-slow {
+    transition-duration: var(--dur-slow);
+    transition-timing-function: var(--ease-ui);
+  }
+  /* 屏内位移（模式指示器）用 ease-move */
+  .motion-move {
+    transition-duration: var(--dur-base);
+    transition-timing-function: var(--ease-move);
+  }
+  /* 过渡属性白名单：颜色/描边/阴影 + 只动 transform/opacity，替代 transition-all */
+  .transition-ui {
+    transition-property: color, background-color, border-color, fill, stroke, box-shadow, opacity, transform;
+  }
 }
 
-/* Disable transition on animations */
-.animate-spin, .animate-ping, .animate-pulse, .animate-bounce,
-[class*="animate-"] {
-  transition: none;
+/* prefers-reduced-motion：位置与可见性瞬时变化，而不是把时长压到 0.01ms 造成跳帧 */
+@media (prefers-reduced-motion: reduce) {
+  /* 真·减少动效：直接取消动画与过渡（位置/可见性瞬时到位），
+     不是把时长压到 1ms —— 压缩时长仍会逐帧插值，会造成闪烁与抖动。 */
+  *,
+  *::before,
+  *::after {
+    animation: none !important;
+    transition: none !important;
+    animation-iteration-count: 1 !important;
+  }
+  /* 进场动画的 keyframes 从 0% 透明/位移起步，取消动画后必须补回终态 */
+  [class*="animate-"] {
+    opacity: 1 !important;
+    transform: none !important;
+  }
+}
+
+/* sonner toast 表面色：与卡片表面一致（浅色白、深色 slate-800），圆角统一 12px */
+html [data-sonner-toaster][data-sonner-theme='light'] {
+  --border-radius: 12px;
+  --normal-bg: #ffffff;
+  --normal-border: #e2e8f0;
+  --normal-text: #0f172a;
+}
+
+html [data-sonner-toaster][data-sonner-theme='dark'] {
+  --border-radius: 12px;
+  --normal-bg: #1e293b;
+  --normal-border: #334155;
+  --normal-text: #f8fafc;
 }

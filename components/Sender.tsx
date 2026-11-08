@@ -546,11 +546,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               peerConnectionTypeRef.current.set(conn.peer, networkType);
 
               if (shouldUpdateUi) {
-                  if (activeConnections.current.size === 1) {
-                    setConnectionStatus(`已连接 | ${protocol.toUpperCase()} | ${networkType}`);
-                  } else {
-                    setConnectionStatus(`已连接 ${activeConnections.current.size} 个设备`);
-                  }
+                  setConnectionStatus(`已连接 ${activeConnections.current.size} 个设备`);
               }
           }
       } catch (e) {
@@ -1977,10 +1973,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const perDeviceTotalBytes = metadata?.totalSize ?? 0;
   const activeTransferStats = individualStats.filter((s) => s.status !== 'waiting');
   const transferTargetCount = activeTransferStats.length;
-  const totalBytes = activeTransferStats.reduce((acc, s) => {
+  const summedTotalBytes = activeTransferStats.reduce((acc, s) => {
     const peerTotal = peerTotalBytesRef.current.get(s.peerId);
     return acc + (typeof peerTotal === 'number' && peerTotal > 0 ? peerTotal : perDeviceTotalBytes);
   }, 0);
+  // 第一个进度包到达前 individualStats 仍是 waiting，求和为 0，会显示「总任务字节: 0 Bytes」。
+  const totalBytes = summedTotalBytes > 0 ? summedTotalBytes : perDeviceTotalBytes;
   const transferredBytes = activeTransferStats.reduce((acc, s) => {
     const peerTotal = peerTotalBytesRef.current.get(s.peerId);
     const fallbackTotal = typeof peerTotal === 'number' && peerTotal > 0 ? peerTotal : perDeviceTotalBytes;
