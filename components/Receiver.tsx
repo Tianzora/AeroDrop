@@ -13,7 +13,7 @@ import {
 import { formatFileSize } from '../services/fileUtils';
 import { createCrc32Hasher, Crc32Hasher } from '../services/crc32WorkerClient';
 import { loadPeerRuntime, type Peer, type DataConnection } from '../services/peerRuntime';
-import { createHappyEyeballsPlan } from '../services/connectionPolicy';
+import { createHappyEyeballsPlan, shouldResetReconnectBudget } from '../services/connectionPolicy';
 import {
   getReceiverDisconnectedMessage,
   getReceiverPreTransferFailureMessage,
@@ -246,6 +246,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const committedReconnectAttemptsRef = useRef(0);
   const pendingCommittedReconnectResumeRef = useRef(false);
   const forceRelayOnCommittedReconnectRef = useRef(false);
+  const stableConnectionSinceRef = useRef<number | null>(null);
   const pendingRouteMessagesRef = useRef<Map<string, P2PMessage[]>>(new Map());
   const routeSelectionDecisionRef = useRef<ReturnType<typeof getRouteSelectionDecision> | null>(null);
   const latestRouteAttemptIdsRef = useRef<Record<RouteAttemptKind, string | null>>({
@@ -362,6 +363,41 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       clearInterval(heartbeatTimerRef.current);
       heartbeatTimerRef.current = null;
     }
+  };
+
+  /**
+   * 只有连接稳定存活过 RECEIVER_RECONNECT_BUDGET_STABLE_MS 才把重连预算清零。
+   * 否则「连上即断」的抖动会让预算永远用不完，退化成无限重连。
+   */
+  const refreshReconnectBudgetIfStable = () => {
+    const stable = shouldResetReconnectBudget({
+      connectedSinceMs: stableConnectionSinceRef.current,
+      nowMs: Date.now(),
+      stableWindowMs: CONNECTION_TIMINGS.RECEIVER_RECONNECT_BUDGET_STABLE_MS,
+    });
+    if (!stable) return false;
+    retryCountRef.current = 0;
+    committedReconnectAttemptsRef.current = 0;
+    stableConnectionSinceRef.current = null;
+    return true;
+  };
+
+  /**
+   * 快速重连预算耗尽、且没有其它在途尝试时要收口成错误态。只停手不置错的话，界面会永远
+   * 停在「正在建立点对点通道...」，用户既看不到失败也拿不到可操作的重试入口。
+   */
+  const failFastReconnectIfExhausted = (attemptId: string | null) => {
+    if (stateRef.current !== TransferState.WAITING_FOR_PEER) return false;
+    const hasOtherAttempt = Array.from(routeAttemptsRef.current.keys()).some(
+      (otherAttemptId) => otherAttemptId !== attemptId
+    );
+    if (hasOtherAttempt) return false;
+    markConnectionFailure(connectTelemetryRef.current, 'connection_closed', {
+      state: TransferState.WAITING_FOR_PEER,
+    });
+    setErrorMsg(getReceiverDisconnectedMessage(hasTurnRef.current, true));
+    setState(TransferState.ERROR);
+    return true;
   };
 
   const clearProgressAckTimer = () => {
@@ -1427,7 +1463,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       resumeCheckpointRef.current = checkpoint;
       lastCheckpointWriteRef.current = { bytes: 0, at: 0 };
       setCanResume(isResumable || checkpoint !== null);
-      committedReconnectAttemptsRef.current = 0;
+      // 不在这里清零 committedReconnectAttemptsRef：METADATA 是每次重连成功都会收到的，
+      // 在这里清零会让重连上限永不生效（连上→收到元数据→秒断→再连，无限循环）。
+      // 预算由 refreshReconnectBudgetIfStable 在连接稳定后清零。
       isTransferActiveRef.current = false;
 
       const shouldAutoResume = shouldAutoResumeCommittedReconnect({
@@ -1631,6 +1669,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       if (attemptKind !== 'all') return false;
       if (happyEyeballsWonRef.current) return false;
       if (stateRef.current !== TransferState.WAITING_FOR_PEER) return false;
+      refreshReconnectBudgetIfStable();
       if (retryCountRef.current >= MAX_CONNECT_RETRY) return false;
       if (!peerRef.current || peerRef.current.destroyed) return false;
 
@@ -1672,7 +1711,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         return;
       }
       clearConnectionTimeout();
-      retryCountRef.current = 0;
+      // 这里不能清零 retryCountRef：连接只要 open 就清零会让「open 后立刻被关」的抖动
+      // 永远用不完快速重连预算（间隔恒 700ms 的无限重连）。预算只在连接稳定过、
+      // 或 handleConnect 开始新一轮尝试时清零。
 
       if (happyEyeballsWonRef.current) {
         closeRouteAttempt(attemptId, 'winner_selected');
@@ -1853,7 +1894,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         unregisterRouteAttempt(attemptId);
         if (happyEyeballsWonRef.current) return;
         if (stateRef.current === TransferState.WAITING_FOR_PEER) {
-          scheduleFastReconnect();
+          if (!scheduleFastReconnect()) {
+            failFastReconnectIfExhausted(attemptId);
+          }
         }
         return;
        }
@@ -1884,6 +1927,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         if (committedReconnectTimerRef.current !== null) {
           return;
         }
+        refreshReconnectBudgetIfStable();
         if (committedReconnectAttemptsRef.current >= MAX_COMMITTED_RECONNECT_RETRY) {
           setErrorMsg(getReceiverDisconnectedMessage(hasTurnRef.current, false));
           setState(TransferState.ERROR);
@@ -1943,7 +1987,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       if (connRef.current !== conn) {
         if (happyEyeballsWonRef.current) return;
         if (stateRef.current === TransferState.WAITING_FOR_PEER) {
-          scheduleFastReconnect();
+          if (!scheduleFastReconnect()) {
+            failFastReconnectIfExhausted(attemptId);
+          }
         }
         return;
       }
@@ -2448,6 +2494,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     setConnectingStage('fetching_ice');
     setErrorMsg('');
     retryCountRef.current = 0;
+    stableConnectionSinceRef.current = null;
     happyEyeballsWonRef.current = false;
     allAttemptProgressedRef.current = false;
     resetRouteAttemptState();
@@ -2506,6 +2553,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         clearConnectionTimeout();
         connRef.current = winner.conn;
         happyEyeballsWonRef.current = true;
+        stableConnectionSinceRef.current = Date.now();
         preferredIcePolicyRef.current = winningKind;
         closeNonWinningRouteAttempts(winnerAttemptId);
         cleanupLosingPeer(winner.conn);
@@ -3119,6 +3167,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         indexedDbNotifiedRef.current = false;
         nativeFileHandleRef.current = null;
         committedReconnectAttemptsRef.current = 0;
+        stableConnectionSinceRef.current = null;
         rotateSessionId();
         resetStateForNewTransfer();
         metadataChunkAssemblerRef.current.reset();

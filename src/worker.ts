@@ -1036,6 +1036,34 @@ export class SignalingHub extends DurableObject {
       return new Response(null, { status: 101, webSocket: client });
     }
 
+    // peerId 冲突：同一个 peerId 只应有一条活着的信令连接。旧实现直接拒绝新连接，但旧
+    // socket 的 close 事件经常晚于新连接到达（网络切换、刷新页面时必然出现的竞态），于是
+    // 重连会一直拿到 unavailable-id（终态），页面停在「口令已被占用」。这里改成「新连接
+    // 接管」：旧 socket 收到终态 error 后停止重连，它占用的会话名额立刻释放，避免名额被
+    // 永久占住把同一出口 IP 拖进 4029。
+    const existing = this.sessionsByPeer.get(peerId);
+    if (existing && existing !== server) {
+      this.sessionsByPeer.delete(peerId);
+      this.peerBySocket.delete(existing);
+      const existingClientKey = this.clientBySocket.get(existing);
+      if (existingClientKey) {
+        this.clientBySocket.delete(existing);
+        this.sessionLimiter.release(existingClientKey);
+      }
+      try {
+        existing.send(
+          JSON.stringify({
+            type: 'error',
+            code: 'unavailable-id',
+            message: 'Peer ID taken over by a newer connection',
+          } satisfies SignalingEnvelope)
+        );
+        existing.close(4009, 'Peer ID taken over by a newer connection');
+      } catch {
+        // 旧 socket 可能已经断开，发送/关闭失败无需处理。
+      }
+    }
+
     if (!this.sessionLimiter.tryAcquire(clientKey)) {
       server.send(
         JSON.stringify({
@@ -1045,20 +1073,6 @@ export class SignalingHub extends DurableObject {
         } satisfies SignalingEnvelope)
       );
       server.close(4029, 'Too many sessions');
-      return new Response(null, { status: 101, webSocket: client });
-    }
-
-    const existing = this.sessionsByPeer.get(peerId);
-    if (existing && existing !== server) {
-      this.sessionLimiter.release(clientKey);
-      server.send(
-        JSON.stringify({
-          type: 'error',
-          code: 'unavailable-id',
-          message: 'Peer ID already in use',
-        } satisfies SignalingEnvelope)
-      );
-      server.close(4009, 'Peer ID already in use');
       return new Response(null, { status: 101, webSocket: client });
     }
 

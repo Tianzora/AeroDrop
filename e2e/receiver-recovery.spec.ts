@@ -11,7 +11,11 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
         protocolVersion: number;
       };
       holdNextOpen: boolean;
+      /** 每次连接 open 后立刻被远端 close，且不回 ROUTE_READY / ROUTE_COMMIT / METADATA。 */
+      autoCloseOnOpen: boolean;
       connectionCount: number;
+      /** 每次 connect() 的 Date.now()，用于量测重连间隔。 */
+      connectionTimes: number[];
       connectionPolicies: RTCIceTransportPolicy[];
       sentMessages: any[];
       latestConnection: FakeConnection | null;
@@ -41,6 +45,8 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
 
       send(message: any) {
         this.scenario.sentMessages.push(message);
+        // 「open 后立刻断开」抖动场景：对端从不应答任何控制面消息。
+        if (this.scenario.autoCloseOnOpen) return;
         if (message?.type === 'ROUTE_PROBE') {
           queueMicrotask(() => {
             this.emit('data', {
@@ -99,6 +105,7 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
 
         queueMicrotask(() => {
           this.openNow();
+          if (this.scenario.autoCloseOnOpen) this.remoteClose();
         });
       }
 
@@ -137,6 +144,7 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
         const code = targetPeerId.replace(/^(?:aerodrop-|peer-)/, '');
         const scenario = ensureScenario(code);
         scenario.connectionCount += 1;
+        scenario.connectionTimes.push(Date.now());
         scenario.connectionPolicies.push(this.iceTransportPolicy);
         const connection = new FakeConnection(this, scenario);
         scenario.latestConnection = connection;
@@ -187,7 +195,9 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
             protocolVersion: 4,
           },
           holdNextOpen: false,
+          autoCloseOnOpen: false,
           connectionCount: 0,
+          connectionTimes: [],
           connectionPolicies: [],
           sentMessages: [],
           latestConnection: null,
@@ -245,6 +255,17 @@ const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
       },
       getConnectionCount(code: string) {
         return ensureScenario(code).connectionCount;
+      },
+      getConnectionTimes(code: string) {
+        return ensureScenario(code).connectionTimes.slice();
+      },
+      getSentMessageTypes(code: string) {
+        const counts: Record<string, number> = {};
+        for (const message of ensureScenario(code).sentMessages) {
+          const type = typeof message?.type === 'string' ? message.type : 'binary';
+          counts[type] = (counts[type] ?? 0) + 1;
+        }
+        return counts;
       },
       getConnectionPolicies(code: string) {
         return ensureScenario(code).connectionPolicies;
@@ -331,6 +352,48 @@ const getPersistedProgress = async (page: import('@playwright/test').Page, code:
   return page.evaluate(([scenarioCode]) => {
     return (window as any).__AERODROP_E2E_DRIVER__.getPersistedProgress(scenarioCode);
   }, [code]);
+};
+
+const setScenarioWith = async (
+  page: import('@playwright/test').Page,
+  code: string,
+  overrides: Record<string, unknown>,
+) => {
+  await page.evaluate(([scenarioCode, scenarioOverrides]) => {
+    (window as any).__AERODROP_E2E_DRIVER__.setScenario(scenarioCode, scenarioOverrides);
+  }, [code, overrides] as const);
+};
+
+const getConnectionTimes = async (page: import('@playwright/test').Page, code: string) => {
+  return page.evaluate(([scenarioCode]) => {
+    return (window as any).__AERODROP_E2E_DRIVER__.getConnectionTimes(scenarioCode);
+  }, [code]) as Promise<number[]>;
+};
+
+const getSentMessageTypes = async (page: import('@playwright/test').Page, code: string) => {
+  return page.evaluate(([scenarioCode]) => {
+    return (window as any).__AERODROP_E2E_DRIVER__.getSentMessageTypes(scenarioCode);
+  }, [code]) as Promise<Record<string, number>>;
+};
+
+const getBodyText = async (page: import('@playwright/test').Page) =>
+  page.evaluate(() => document.body.innerText);
+
+/**
+ * 逐段推进 fake clock，直到条件成立。clock.install() 之后 fastForward 每个到期
+ * timer 最多触发一次，嵌套 timer（重连 -> 建连 -> 握手）必须靠 runFor 连续推进。
+ */
+const advanceClockUntil = async (
+  page: import('@playwright/test').Page,
+  check: () => Promise<boolean>,
+  { maxSteps = 40, stepMs = 300 } = {},
+) => {
+  for (let step = 0; step < maxSteps; step += 1) {
+    if (await check()) return true;
+    await page.clock.runFor(stepMs);
+    await page.waitForTimeout(25); // 让 React 提交与微任务落地
+  }
+  return check();
 };
 
 const openReceiverAndEnterCode = async (
@@ -472,4 +535,151 @@ test('cancelled receive stays idle even if a stale reconnect connection opens la
   await expect(page.getByRole('button', { name: '0', exact: true })).toBeVisible();
   await expect(page.getByRole('button', { name: /确认并下载|继续下载/ })).toHaveCount(0);
   await expect(page.getByText('连接中断，正在尝试恢复...')).toHaveCount(0);
+});
+
+test('open-then-close churn exhausts the fast reconnect budget instead of looping forever', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.clock.install();
+  await page.goto('/');
+  // 每次新连接 open 后立刻被远端关闭：不 ROUTE_COMMIT、不发送 METADATA，
+  // 即「连上即断」的最坏抖动。修复前 retryCountRef 在 open 时清零，这种抖动
+  // 会以恒定 700ms 间隔无限重连。
+  await setScenarioWith(page, '555555', { autoCloseOnOpen: true });
+  await page.getByRole('button', { name: '接收' }).click();
+  await page.locator('input[type="text"]').fill('555555');
+
+  await expect.poll(async () => getConnectionCount(page, '555555'), { timeout: 15_000 })
+    .toBeGreaterThanOrEqual(1);
+
+  // 快速重试预算 = 6 次，退避 700/1400/2800/5000/5000/5000ms，合计 19.9s。
+  await page.clock.runFor(30_000);
+  await expect.poll(async () => getConnectionCount(page, '555555')).toBe(7);
+  await page.waitForTimeout(100);
+
+  const times = await getConnectionTimes(page, '555555');
+  const deltas = times.slice(1).map((time, index) => time - times[index]);
+  const sentTypes = await getSentMessageTypes(page, '555555');
+  // 预算耗尽后必须收口成 ERROR，而不是停在「正在建立点对点通道...」。
+  // 源码：components/Receiver.tsx 的 failFastReconnectIfExhausted（约 :386-403），
+  // 由 conn.on('close') 中 `connRef.current !== conn` 的分支调用（约 :1896）。
+  // hasTurn=true 且仍在等待对端 ⇒ 文案是「请检查口令」那条，而非 committed 上限的「连接已断开」。
+  await expect(page.getByText('连接已断开，请检查口令是否正确后重试。')).toBeVisible();
+  await expect(page.getByText(/正在建立点对点通道/)).toHaveCount(0);
+
+  const bodyText = await getBodyText(page);
+
+  await test.info().attach('fast-reconnect-budget-report.json', {
+    body: JSON.stringify({ deltas, sentTypes, bodyTail: bodyText.slice(-500) }, null, 2),
+    contentType: 'application/json',
+  });
+  console.log('[fast-reconnect] deltas(ms):', JSON.stringify(deltas));
+  console.log('[fast-reconnect] sentTypes:', JSON.stringify(sentTypes));
+  console.log('[fast-reconnect] bodyTail:', bodyText.slice(-300));
+
+  // 1 次首连 + 6 次重试；间隔必须指数退避到 5s 上限，而不是恒定 700ms。
+  // 首段 timer 可能是在真实时间流动时触发的，允许 ±100ms 抖动。
+  const expectedIntervals = [700, 1_400, 2_800, 5_000, 5_000, 5_000];
+  expect(deltas).toHaveLength(expectedIntervals.length);
+  deltas.forEach((delta, index) => {
+    expect(Math.abs(delta - expectedIntervals[index])).toBeLessThanOrEqual(100);
+  });
+  expect(sentTypes.ROUTE_PROBE).toBe(7);
+
+  // ERROR 之后不得再起新连接：再推 30s，连接数与 ROUTE_PROBE 都不增长。
+  await page.clock.runFor(30_000);
+  await page.waitForTimeout(100);
+  expect(await getConnectionCount(page, '555555')).toBe(7);
+  expect((await getSentMessageTypes(page, '555555')).ROUTE_PROBE).toBe(7);
+});
+
+test('committed reconnect budget caps at 3 attempts and then reports an error', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.goto('/');
+  await setScenario(page, '888888');
+  await page.getByRole('button', { name: '接收' }).click();
+  await page.locator('input[type="text"]').fill('888888');
+
+  await expect(getReadyToReceiveButton(page)).toBeVisible();
+
+  const banner = page.getByText(/第 \d+ 次自动重连中/);
+  const attempts: number[] = [];
+  const connectionCounts: number[] = [];
+
+  for (let round = 1; round <= 3; round += 1) {
+    const connectionsBefore = await getConnectionCount(page, '888888');
+    await disconnectLatest(page, '888888');
+
+    await expect(banner).toBeVisible({ timeout: 15_000 });
+    const bannerText = (await banner.innerText()).trim();
+    const attempt = Number(/第 (\d+) 次自动重连中/.exec(bannerText)?.[1]);
+    attempts.push(attempt);
+
+    // 重连成功并再次收到 METADATA 的唯一外部信号：重连文案消失、连接数 +1。
+    await expect.poll(async () => getConnectionCount(page, '888888'), { timeout: 15_000 })
+      .toBe(connectionsBefore + 1);
+    await expect(banner).toHaveCount(0, { timeout: 15_000 });
+    connectionCounts.push(await getConnectionCount(page, '888888'));
+  }
+
+  // 第 4 次断连：已连续 3 次不稳定，不再重连，直接进入 ERROR。
+  const connectionsBeforeCap = await getConnectionCount(page, '888888');
+  await disconnectLatest(page, '888888');
+  await expect(page.getByText('连接已断开')).toBeVisible({ timeout: 10_000 });
+  await expect(banner).toHaveCount(0);
+
+  await page.waitForTimeout(2_000);
+  const connectionsAfterCap = await getConnectionCount(page, '888888');
+  const bodyText = await getBodyText(page);
+
+  await test.info().attach('committed-reconnect-budget-report.json', {
+    body: JSON.stringify({ attempts, connectionCounts, connectionsAfterCap, bodyTail: bodyText.slice(-500) }, null, 2),
+    contentType: 'application/json',
+  });
+  console.log('[committed-reconnect] attempts:', JSON.stringify(attempts), 'counts:', JSON.stringify(connectionCounts));
+  console.log('[committed-reconnect] bodyTail:', bodyText.slice(-300));
+
+  expect(attempts).toEqual([1, 2, 3]);
+  expect(connectionCounts).toEqual([2, 3, 4]);
+  expect(connectionsAfterCap).toBe(connectionsBeforeCap);
+});
+
+test('a connection that stays stable for 15s refreshes the reconnect budget', async ({ page }) => {
+  test.setTimeout(120_000);
+  await page.clock.install();
+  await page.goto('/');
+  await setScenario(page, '777777');
+  await page.getByRole('button', { name: '接收' }).click();
+  await page.locator('input[type="text"]').fill('777777');
+
+  await expect(getReadyToReceiveButton(page)).toBeVisible();
+
+  const banner = page.getByText(/第 \d+ 次自动重连中/);
+  const expectBannerAttempt = async (attempt: number) => {
+    await expect(
+      page.getByText(`第 ${attempt} 次自动重连中，请保持此页面打开，无需重新输入口令。`),
+    ).toBeVisible({ timeout: 15_000 });
+  };
+  const waitForReconnect = async (expectedConnections: number) => {
+    const settled = await advanceClockUntil(page, async () => {
+      return (await getConnectionCount(page, '777777')) === expectedConnections
+        && (await banner.count()) === 0;
+    });
+    expect(settled).toBe(true);
+  };
+
+  // 连续 3 次「连上即断」：预算依次用掉 1、2、3，最后一次重连成功。
+  for (let round = 1; round <= 3; round += 1) {
+    await disconnectLatest(page, '777777');
+    await expectBannerAttempt(round);
+    await waitForReconnect(round + 1);
+  }
+
+  // 稳定存活超过 RECEIVER_RECONNECT_BUDGET_STABLE_MS(15s) 后再断：预算应清零，
+  // 从第 1 次重新开始。若上限是「整场 3 次」，这里会直接进入 ERROR 而不是重连。
+  await page.clock.runFor(16_000);
+  await page.waitForTimeout(50);
+  await disconnectLatest(page, '777777');
+  await expectBannerAttempt(1);
+  await waitForReconnect(5);
+  await expect(page.getByText('连接已断开')).toHaveCount(0);
 });

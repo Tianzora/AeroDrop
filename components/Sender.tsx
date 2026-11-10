@@ -13,7 +13,10 @@ import { createCrc32Hasher } from '../services/crc32WorkerClient';
 import { DEFAULT_MAX_PREFIX_CRC_BYTES, computePrefixCrc32 } from '../services/send/prefixCrc';
 import { isValidShareCode, requestShareCode, revokeShareSession } from '../services/shareCodeSession';
 import { loadPeerRuntime, type Peer, type DataConnection } from '../services/peerRuntime';
-import { NO_TURN_WARNING_MESSAGE } from '../services/connectionGuidance';
+import {
+  NO_TURN_WARNING_MESSAGE,
+  RATE_LIMITED_CONNECTION_MESSAGE,
+} from '../services/connectionGuidance';
 import { getIceConfig } from '../services/stunService';
 import {
   CONNECTION_TIMINGS,
@@ -1300,12 +1303,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           setPreparingStage('fetching_ice');
           setState(TransferState.WAITING_FOR_PEER);
       });
-      peer.on('disconnected', () => {
-          if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken) || peerRef.current !== peer) {
-              return;
-          }
-          if (peer && !peer.destroyed) peer.reconnect();
-      });
+      // 信令断开后由 peerRuntime 自己按指数退避重连（scheduleReconnect）。这里不要直调
+      // peer.reconnect()：它会绕过退避，把「握手成功即被关」放大成每秒一次的重连风暴。
       peer.on('error', (err) => {
           if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken) || peerRef.current !== peer) {
               return;
@@ -1314,6 +1313,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               markConnectionFailure(shareTelemetryRef.current, 'code_unavailable');
               setErrorMsg('该口令已被占用，请换一个。');
               setState(TransferState.CONFIGURING);
+          } else if (err.type === 'rate-limited') {
+              // 信令层已被服务端明确拒绝（每 IP 会话数超限 / 消息超限），重连不会自愈，
+              // 给用户一个可操作的提示，不要在后台继续重连。
+              markConnectionFailure(shareTelemetryRef.current, 'rate_limited');
+              setErrorMsg(RATE_LIMITED_CONNECTION_MESSAGE);
+              setPreparingStage('fetching_ice');
+              setState(TransferState.ERROR);
           } else {
               if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') { return; }
               if (!shouldSuppressNoisyPeerError({
@@ -1595,17 +1601,20 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     while (activeSendingPeersRef.current.has(conn.peer)) {
         await new Promise(r => setTimeout(r, 50));
         waitAttempts++;
+        // 旧序列持有的连接已经不可用：它剩下的写入/等待必然失败并很快退出，没必要再等
+        // 满 6s。重连时旧连接几乎总是已经关闭，这能把每次重连的空窗从秒级压到毫秒级。
+        const previousConn = activeSendConnRef.current.get(conn.peer);
+        if (!previousConn || !previousConn.open) {
+            logDebug('warn', 'send sequence took over a dead previous loop', {
+                peerId: conn.peer,
+                waitAttempts,
+            });
+            // 只释放活动集合，不要取消信用闸门：此刻地图里已经是本次新序列的闸门。
+            activeSendingPeersRef.current.delete(conn.peer);
+            activeSendConnRef.current.delete(conn.peer);
+            break;
+        }
         if (waitAttempts > 120) {
-            // 旧序列卡在死连接的 await 上时不会自己退出。若它持有的连接已经不可用，
-            // 直接接管：旧序列的 conn 已关闭，无法再写入，不会污染新的数据流。
-            const staleConn = activeSendConnRef.current.get(conn.peer);
-            if (!staleConn || !staleConn.open) {
-                logDebug('warn', 'resume sequence released a stale send loop', { peerId: conn.peer });
-                // 只释放活动集合，不要取消信用闸门：此刻地图里已经是本次新序列的闸门。
-                activeSendingPeersRef.current.delete(conn.peer);
-                activeSendConnRef.current.delete(conn.peer);
-                break;
-            }
             // Safety cap — clean up pending since this attempt failed.
             logDebug('warn', 'send sequence gave up waiting for a live previous loop', { peerId: conn.peer });
             pendingSendPeersRef.current.delete(conn.peer);

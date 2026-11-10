@@ -1,5 +1,6 @@
 import { logDebug } from './diagnostics';
 import { getAeroDropE2EHooks, type AeroDropPeerRuntimeModuleLike } from './e2eHooks';
+import { CONNECTION_TIMINGS } from '../constants/transfer';
 
 type Listener = (...args: any[]) => void;
 
@@ -158,6 +159,17 @@ const IMPORTANT_SIGNAL_INFO_EVENTS = new Set([
 
 const TERMINAL_SIGNALING_ERROR_CODES = new Set(['unavailable-id', 'invalid-id', 'unauthorized']);
 
+/**
+ * 这些 close code 表示「继续重连也没有意义」：服务端已经因为这层连接本身拒绝了我们
+ * （每 IP 会话数超限、消息体超限）。若继续按退避重连，用户会看到永不停息的重连而
+ * 没有可操作的提示，所以直接终止并把原因交给上层展示。
+ * 1008（消息过多）刻意不在此列：它是瞬时拥塞，退避后重连通常能恢复。
+ */
+const TERMINAL_SIGNALING_CLOSE_CODES = new Map<number, { type: PeerRuntimeErrorType; message: string }>([
+  [1009, { type: 'rate-limited', message: 'Signaling message exceeded server limit' }],
+  [4029, { type: 'rate-limited', message: 'Too many signaling sessions from this network' }],
+]);
+
 const createRuntimeError = (
   type: PeerRuntimeErrorType,
   message: string,
@@ -280,6 +292,7 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
   protected remoteDescriptionReady = false;
   protected closed = false;
   private pendingCandidates: RTCIceCandidateInit[] = [];
+  private transportGraceTimer: number | null = null;
 
   constructor(
     provider: WorkerSignaledPeer,
@@ -300,9 +313,7 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
     this.peerConnection.onconnectionstatechange = () => {
       const state = this.peerConnection.connectionState;
       this.provider.logConnectionEvent(this, 'pc_connection_state', { state });
-      if (state === 'failed' || state === 'closed' || state === 'disconnected') {
-        this.handleTransportClosed();
-      }
+      this.handleConnectionStateChange(state);
     };
     this.peerConnection.oniceconnectionstatechange = () => {
       this.provider.logConnectionEvent(this, 'pc_ice_connection_state', {
@@ -363,8 +374,43 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
     this.open = true;
   }
 
+  /**
+   * 'disconnected' 是可自愈的瞬态：跨网络、中继抖动、Wi-Fi/蜂窝切换时都很常见，ICE 往往
+   * 几秒内自行恢复。若在当帧就关连接，一次抖动会被上层看成断链并触发一轮重连。这里给它
+   * 一个宽限期，恢复 connected 就继续复用；'failed'/'closed' 仍然立即关闭。
+   */
+  protected handleConnectionStateChange(state: RTCPeerConnectionState): void {
+    if (state === 'connected') {
+      this.clearTransportGraceTimer();
+      return;
+    }
+    if (state === 'failed' || state === 'closed') {
+      this.handleTransportClosed();
+      return;
+    }
+    if (state !== 'disconnected' || this.closed || this.transportGraceTimer !== null) {
+      return;
+    }
+    this.transportGraceTimer = window.setTimeout(() => {
+      this.transportGraceTimer = null;
+      if (this.closed) return;
+      this.provider.logConnectionEvent(this, 'pc_disconnected_grace_expired', {
+        state: this.peerConnection.connectionState,
+      });
+      this.handleTransportClosed();
+    }, CONNECTION_TIMINGS.TRANSPORT_DISCONNECTED_GRACE_MS);
+  }
+
+  private clearTransportGraceTimer(): void {
+    if (this.transportGraceTimer !== null) {
+      window.clearTimeout(this.transportGraceTimer);
+      this.transportGraceTimer = null;
+    }
+  }
+
   protected handleTransportClosed(): void {
     if (this.closed) return;
+    this.clearTransportGraceTimer();
     this.closed = true;
     this.open = false;
     this.provider.removeConnection(this);
@@ -566,6 +612,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
   private pongTimeoutTimer: number | null = null;
   private reconnectTimer: number | null = null;
   private reconnectAttempts = 0;
+  private signalingOpenedAt: number | null = null;
   private awaitingPong = false;
   private registrationRejected = false;
 
@@ -648,17 +695,23 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       signalingBase: SIGNALING_BASE,
       signalingPath: SIGNALING_PATH,
     });
-    this.websocket = new WebSocket(url);
-    this.websocket.onopen = () => {
+    const websocket = new WebSocket(url);
+    this.websocket = websocket;
+    // 只处理「当前」socket 的事件：旧 socket 迟到的 close/error/message 不应该再改写
+    // 重连状态（例如把刚建立的新连接的退避计数清零，或给新连接打上终态标记）。
+    websocket.onopen = () => {
+      if (this.websocket !== websocket) return;
       this.disconnected = false;
-      this.reconnectAttempts = 0;
+      this.signalingOpenedAt = Date.now();
       this.startHeartbeat();
       this.log('info', 'signaling_ws_open', { url: redactSignalingUrl(url) });
     };
-    this.websocket.onmessage = (event) => {
+    websocket.onmessage = (event) => {
+      if (this.websocket !== websocket) return;
       this.handleSignalingMessage(event.data);
     };
-    this.websocket.onerror = () => {
+    websocket.onerror = () => {
+      if (this.websocket !== websocket) return;
       if (this.destroyed) return;
       const error = createRuntimeError('socket-error', 'Signaling WebSocket connection failed');
       if (!this.openedOnce) {
@@ -667,16 +720,43 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       this.log('error', 'signaling_ws_error');
       this.emit('error', error);
     };
-    this.websocket.onclose = (event) => {
+    websocket.onclose = (event) => {
+      if (this.websocket !== websocket) return;
       const wasOpened = this.openedOnce;
       this.websocket = null;
       this.stopHeartbeat();
+      // 退避计数只在「这次连接确实稳定存活过」后才清零；否则「握手成功→立刻被服务端关」
+      // 会让 onopen 每次都把退避重置成 1s，形成无休止的快速重连。
+      const signalingOpenedAt = this.signalingOpenedAt;
+      this.signalingOpenedAt = null;
+      if (
+        signalingOpenedAt !== null &&
+        Date.now() - signalingOpenedAt >= CONNECTION_TIMINGS.SIGNALING_RECONNECT_STABLE_MS
+      ) {
+        this.reconnectAttempts = 0;
+      }
       if (this.destroyed || this.isManualClose) {
         return;
       }
       this.disconnected = true;
       if (this.registrationRejected) {
         this.log('warn', 'signaling_registration_rejected_close');
+        return;
+      }
+      const terminalClose = TERMINAL_SIGNALING_CLOSE_CODES.get(event.code);
+      if (terminalClose) {
+        // 这一层连接已被服务端明确拒绝，重连只会制造「一直重连」的假象。
+        this.registrationRejected = true;
+        const error = createRuntimeError(terminalClose.type, terminalClose.message);
+        this.log('warn', 'signaling_terminal_close', {
+          code: event.code,
+          reason: event.reason || undefined,
+          wasOpened,
+        });
+        if (!this.openedOnce) {
+          this.rejectReadyPromise(error);
+        }
+        this.emit('error', error);
         return;
       }
       this.log(wasOpened ? 'warn' : 'error', 'signaling_ws_close', {
@@ -822,6 +902,15 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
         this.log('warn', 'signaling_registration_rejected', { code: message.code });
         if (!this.openedOnce) {
           this.rejectReadyPromise(error);
+        }
+        // 服务端随后也会关掉这条 socket；这里主动关一次，避免「已被顶替/已被拒绝」的连接
+        // 继续占着服务端会话名额（close 帧是否送达取决于运行时，不能依赖它）。
+        if (this.websocket && this.websocket.readyState === WebSocket.OPEN) {
+          try {
+            this.websocket.close(1000, 'Terminal signaling error');
+          } catch {
+            // Ignore close errors.
+          }
         }
       }
       if (message.connectionId) {

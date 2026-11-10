@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createHappyEyeballsPlan } from './connectionPolicy.ts';
+import { createHappyEyeballsPlan, shouldResetReconnectBudget } from './connectionPolicy.ts';
 import type { BrowserNetworkProfile } from './networkProfile.ts';
 import type { IceConfigResult } from './stunService.ts';
 
@@ -112,4 +112,23 @@ test('a stalled committed transfer retries through relay without changing the de
   });
   assert.equal(withoutTurn.initialPolicy, 'all');
   assert.equal(withoutTurn.reason, 'default');
+});
+
+test('shouldResetReconnectBudget 只在连接稳定活过窗口后返回 true', () => {
+  assert.equal(
+    shouldResetReconnectBudget({ connectedSinceMs: null, nowMs: 20_000, stableWindowMs: 15_000 }),
+    false,
+  );
+  assert.equal(
+    shouldResetReconnectBudget({ connectedSinceMs: 0, nowMs: 20_000, stableWindowMs: 15_000 }),
+    false,
+  );
+  assert.equal(
+    shouldResetReconnectBudget({ connectedSinceMs: 1_000, nowMs: 15_999, stableWindowMs: 15_000 }),
+    false,
+  );
+  assert.equal(
+    shouldResetReconnectBudget({ connectedSinceMs: 1_000, nowMs: 16_000, stableWindowMs: 15_000 }),
+    true,
+  );
 });
