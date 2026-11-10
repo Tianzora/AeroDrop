@@ -1,4 +1,17 @@
 import { expect, test } from '@playwright/test';
+import { CONNECTION_TIMINGS } from '../constants/transfer';
+
+// 与 components/Receiver.tsx 的 scheduleFastReconnect 一致：第 n 次重试延迟
+// min(BASE * 2^(n-1), MAX)，次数上限 RECEIVER_MAX_CONNECT_RETRY。
+const FAST_RETRY_INTERVALS = Array.from(
+  { length: CONNECTION_TIMINGS.RECEIVER_MAX_CONNECT_RETRY },
+  (_, index) =>
+    Math.min(
+      CONNECTION_TIMINGS.RECEIVER_FAST_RETRY_BASE_MS * 2 ** index,
+      CONNECTION_TIMINGS.RECEIVER_FAST_RETRY_MAX_MS
+    )
+);
+const EXPECTED_ATTEMPT_CONNECTIONS = 1 + CONNECTION_TIMINGS.RECEIVER_MAX_CONNECT_RETRY;
 
 const setupReceiverHarness = async (page: import('@playwright/test').Page) => {
   await page.addInitScript(() => {
@@ -551,17 +564,17 @@ test('open-then-close churn exhausts the fast reconnect budget instead of loopin
   await expect.poll(async () => getConnectionCount(page, '555555'), { timeout: 15_000 })
     .toBeGreaterThanOrEqual(1);
 
-  // 快速重试预算 = 6 次，退避 700/1400/2800/5000/5000/5000ms，合计 19.9s。
+  // 快速重试预算用满：间隔见 FAST_RETRY_INTERVALS（指数退避到上限）。
   await page.clock.runFor(30_000);
-  await expect.poll(async () => getConnectionCount(page, '555555')).toBe(7);
+  await expect.poll(async () => getConnectionCount(page, '555555')).toBe(EXPECTED_ATTEMPT_CONNECTIONS);
   await page.waitForTimeout(100);
 
   const times = await getConnectionTimes(page, '555555');
   const deltas = times.slice(1).map((time, index) => time - times[index]);
   const sentTypes = await getSentMessageTypes(page, '555555');
   // 预算耗尽后必须收口成 ERROR，而不是停在「正在建立点对点通道...」。
-  // 源码：components/Receiver.tsx 的 failFastReconnectIfExhausted（约 :386-403），
-  // 由 conn.on('close') 中 `connRef.current !== conn` 的分支调用（约 :1896）。
+  // 判定点在 services/connectionPolicy.ts 的 shouldAbandonExhaustedFastReconnect，
+  // 由 Receiver 的 conn.on('close') 里 `connRef.current !== conn` 分支调用。
   // hasTurn=true 且仍在等待对端 ⇒ 文案是「请检查口令」那条，而非 committed 上限的「连接已断开」。
   await expect(page.getByText('连接已断开，请检查口令是否正确后重试。')).toBeVisible();
   await expect(page.getByText(/正在建立点对点通道/)).toHaveCount(0);
@@ -576,20 +589,19 @@ test('open-then-close churn exhausts the fast reconnect budget instead of loopin
   console.log('[fast-reconnect] sentTypes:', JSON.stringify(sentTypes));
   console.log('[fast-reconnect] bodyTail:', bodyText.slice(-300));
 
-  // 1 次首连 + 6 次重试；间隔必须指数退避到 5s 上限，而不是恒定 700ms。
+  // 1 次首连 + RECEIVER_MAX_CONNECT_RETRY 次重试；间隔必须指数退避到上限，而不是恒定 700ms。
   // 首段 timer 可能是在真实时间流动时触发的，允许 ±100ms 抖动。
-  const expectedIntervals = [700, 1_400, 2_800, 5_000, 5_000, 5_000];
-  expect(deltas).toHaveLength(expectedIntervals.length);
+  expect(deltas).toHaveLength(FAST_RETRY_INTERVALS.length);
   deltas.forEach((delta, index) => {
-    expect(Math.abs(delta - expectedIntervals[index])).toBeLessThanOrEqual(100);
+    expect(Math.abs(delta - FAST_RETRY_INTERVALS[index])).toBeLessThanOrEqual(100);
   });
-  expect(sentTypes.ROUTE_PROBE).toBe(7);
+  expect(sentTypes.ROUTE_PROBE).toBe(EXPECTED_ATTEMPT_CONNECTIONS);
 
   // ERROR 之后不得再起新连接：再推 30s，连接数与 ROUTE_PROBE 都不增长。
   await page.clock.runFor(30_000);
   await page.waitForTimeout(100);
-  expect(await getConnectionCount(page, '555555')).toBe(7);
-  expect((await getSentMessageTypes(page, '555555')).ROUTE_PROBE).toBe(7);
+  expect(await getConnectionCount(page, '555555')).toBe(EXPECTED_ATTEMPT_CONNECTIONS);
+  expect((await getSentMessageTypes(page, '555555')).ROUTE_PROBE).toBe(EXPECTED_ATTEMPT_CONNECTIONS);
 });
 
 test('committed reconnect budget caps at 3 attempts and then reports an error', async ({ page }) => {

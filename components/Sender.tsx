@@ -14,8 +14,8 @@ import { DEFAULT_MAX_PREFIX_CRC_BYTES, computePrefixCrc32 } from '../services/se
 import { isValidShareCode, requestShareCode, revokeShareSession } from '../services/shareCodeSession';
 import { loadPeerRuntime, type Peer, type DataConnection } from '../services/peerRuntime';
 import {
+  getPeerRuntimeErrorMessage,
   NO_TURN_WARNING_MESSAGE,
-  RATE_LIMITED_CONNECTION_MESSAGE,
 } from '../services/connectionGuidance';
 import { getIceConfig } from '../services/stunService';
 import {
@@ -1313,12 +1313,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               markConnectionFailure(shareTelemetryRef.current, 'code_unavailable');
               setErrorMsg('该口令已被占用，请换一个。');
               setState(TransferState.CONFIGURING);
-          } else if (err.type === 'rate-limited') {
+          } else if (err.type === 'rate-limited' || err.type === 'message-too-large') {
               // 信令层已被服务端明确拒绝（每 IP 会话数超限 / 消息超限），重连不会自愈，
               // 给用户一个可操作的提示，不要在后台继续重连。
-              markConnectionFailure(shareTelemetryRef.current, 'rate_limited');
-              setErrorMsg(RATE_LIMITED_CONNECTION_MESSAGE);
-              setPreparingStage('fetching_ice');
+              markConnectionFailure(shareTelemetryRef.current, err.type === 'rate-limited' ? 'rate_limited' : 'message_too_large');
+              setErrorMsg(getPeerRuntimeErrorMessage(err.type));
               setState(TransferState.ERROR);
           } else {
               if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') { return; }
@@ -1331,8 +1330,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
               }
               markConnectionFailure(shareTelemetryRef.current, `peer_error:${err.type}`);
               if (activeConnections.current.size === 0) {
-                 setErrorMsg(`连接错误: ${err.type}`);
-                 setPreparingStage('fetching_ice');
+                 setErrorMsg(getPeerRuntimeErrorMessage(err.type));
                  setState(TransferState.ERROR);
               }
           }
@@ -1853,16 +1851,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
     } finally {
         fileHasher.terminate();
         window.clearInterval(adaptiveTimer);
-        // Always remove — the new sequence adds itself only after this
-        // sequence has exited, so there is no ownership conflict.
-        activeSendingPeersRef.current.delete(peerId);
+        // 只清理本序列仍然拥有的标记：重连时新序列可能在旧循环退出前就接管（死连接不再
+        // 等 6s），无条件删除会把新序列的所有权抹掉，随后一次 open 就会再起一个并发发送
+        // 循环，接收端会看到重复分片与 hash 不匹配。
         if (activeSendConnRef.current.get(peerId) === conn) {
+            activeSendingPeersRef.current.delete(peerId);
             activeSendConnRef.current.delete(peerId);
         }
-        if (transferSessionId.current === currentSessionId) {
-            if (!sendCompleted) {
-                activeTransfersCount.current = Math.max(0, activeTransfersCount.current - 1);
-            }
+        // 计数必须按本序列自己的 +1 归还，不能放进上面的归属守卫：接管分支会把地图换成
+        // 新序列，旧序列退出时守卫为假，这次 +1 就永远还不回去（UI 停 100% 仍显示「正在
+        // 发送…」，完成 toast 也被抑制）。
+        if (transferSessionId.current === currentSessionId && !sendCompleted) {
+            activeTransfersCount.current = Math.max(0, activeTransfersCount.current - 1);
         }
     }
   };

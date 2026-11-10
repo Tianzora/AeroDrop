@@ -1041,27 +1041,14 @@ export class SignalingHub extends DurableObject {
     // 重连会一直拿到 unavailable-id（终态），页面停在「口令已被占用」。这里改成「新连接
     // 接管」：旧 socket 收到终态 error 后停止重连，它占用的会话名额立刻释放，避免名额被
     // 永久占住把同一出口 IP 拖进 4029。
+    // 同一个 peerId 的新连接接管旧连接（抖动后的重连会复用 peerId）。名额必须先领取
+    // 再驱逐：否则新连接因出口 IP 满额被 4029 时，旧会话已经被关掉，双方都没人服务。
     const existing = this.sessionsByPeer.get(peerId);
-    if (existing && existing !== server) {
-      this.sessionsByPeer.delete(peerId);
-      this.peerBySocket.delete(existing);
-      const existingClientKey = this.clientBySocket.get(existing);
-      if (existingClientKey) {
-        this.clientBySocket.delete(existing);
-        this.sessionLimiter.release(existingClientKey);
-      }
-      try {
-        existing.send(
-          JSON.stringify({
-            type: 'error',
-            code: 'unavailable-id',
-            message: 'Peer ID taken over by a newer connection',
-          } satisfies SignalingEnvelope)
-        );
-        existing.close(4009, 'Peer ID taken over by a newer connection');
-      } catch {
-        // 旧 socket 可能已经断开，发送/关闭失败无需处理。
-      }
+    const isTakeover = existing !== undefined && existing !== server;
+    const existingClientKey = isTakeover ? this.clientBySocket.get(existing) : undefined;
+    if (isTakeover && existingClientKey === clientKey) {
+      // 同一出口 IP 的接管：名额此刻在旧 socket 手里，先收回再领取，等价于原子迁移。
+      this.sessionLimiter.release(clientKey);
     }
 
     if (!this.sessionLimiter.tryAcquire(clientKey)) {
@@ -1074,6 +1061,34 @@ export class SignalingHub extends DurableObject {
       );
       server.close(4029, 'Too many sessions');
       return new Response(null, { status: 101, webSocket: client });
+    }
+
+    if (isTakeover) {
+      this.sessionsByPeer.delete(peerId);
+      this.peerBySocket.delete(existing);
+      this.clientBySocket.delete(existing);
+      if (existingClientKey !== undefined && existingClientKey !== clientKey) {
+        this.sessionLimiter.release(existingClientKey);
+      }
+      try {
+        existing.send(
+          JSON.stringify({
+            type: 'error',
+            code: 'unavailable-id',
+            message: 'Peer ID taken over by a newer connection',
+          } satisfies SignalingEnvelope)
+        );
+      } catch (error) {
+        // 旧 socket 可能已经断开；记录而不是静默吞掉，否则排障时看不到接管失败。
+        console.warn('Failed to notify replaced signaling session', { peerId, error });
+      } finally {
+        // 通知失败也必须关掉旧会话，否则它会以「已注册」的假象继续占着 peerId。
+        try {
+          existing.close(4009, 'Peer ID taken over by a newer connection');
+        } catch (error) {
+          console.warn('Failed to close replaced signaling session', { peerId, error });
+        }
+      }
     }
 
     this.sessionsByPeer.set(peerId, server);

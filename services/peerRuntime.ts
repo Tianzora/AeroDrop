@@ -1,6 +1,7 @@
 import { logDebug } from './diagnostics';
 import { getAeroDropE2EHooks, type AeroDropPeerRuntimeModuleLike } from './e2eHooks';
 import { CONNECTION_TIMINGS } from '../constants/transfer';
+import { shouldResetReconnectBudget } from './connectionPolicy';
 
 type Listener = (...args: any[]) => void;
 
@@ -14,6 +15,7 @@ type PeerRuntimeErrorType =
   | 'network'
   | 'server-error'
   | 'socket-error'
+  | 'message-too-large'
   | 'webrtc-error';
 
 type ChannelKind = 'data' | 'media';
@@ -166,7 +168,9 @@ const TERMINAL_SIGNALING_ERROR_CODES = new Set(['unavailable-id', 'invalid-id', 
  * 1008（消息过多）刻意不在此列：它是瞬时拥塞，退避后重连通常能恢复。
  */
 const TERMINAL_SIGNALING_CLOSE_CODES = new Map<number, { type: PeerRuntimeErrorType; message: string }>([
-  [1009, { type: 'rate-limited', message: 'Signaling message exceeded server limit' }],
+  // 1009 是我们自己发出的单条消息超限（分片/大小校验回归），重试修不好，也不能记成
+  // 「请求过多」——那会把真正的原因藏起来。
+  [1009, { type: 'message-too-large', message: 'Signaling message exceeded server limit' }],
   [4029, { type: 'rate-limited', message: 'Too many signaling sessions from this network' }],
 ]);
 
@@ -293,6 +297,7 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
   protected closed = false;
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private transportGraceTimer: number | null = null;
+  private closeEmitted = false;
 
   constructor(
     provider: WorkerSignaledPeer,
@@ -419,7 +424,16 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
     } catch {
       // Ignore close errors.
     }
+    // 关闭可能由 datachannel、peerConnection 状态或宽限计时器触发，而且这些触发会互相
+    // 嵌套（pc.close() 会让 datachannel 再关一次）。上层只应收到一次 close。
+    if (!this.closeEmitted) {
+      this.closeEmitted = true;
+      this.emitClose();
+    }
   }
+
+  /** 子类在这里把 close 发给上层；由 BaseConnection 保证只发一次。 */
+  protected emitClose(): void {}
 
   close(): void {
     if (this.closed) return;
@@ -449,7 +463,6 @@ export class DataConnection extends BaseConnection<DataConnectionEvents> {
       this.provider.logConnectionEvent(this, 'data_channel_close', {
         readyState: this.dataChannel?.readyState,
       });
-      this.emit('close');
     };
     this.dataChannel.onerror = () => {
       this.provider.logConnectionEvent(this, 'data_channel_error', {
@@ -509,6 +522,10 @@ export class DataConnection extends BaseConnection<DataConnectionEvents> {
     this.dataChannel.send(JSON.stringify({ __type: JSON_ENVELOPE, payload: data }));
   }
 
+  protected override emitClose(): void {
+    this.emit('close');
+  }
+
   override close(): void {
     if (this.dataChannel && this.dataChannel.readyState !== 'closed') {
       try {
@@ -517,11 +534,7 @@ export class DataConnection extends BaseConnection<DataConnectionEvents> {
         // Ignore close errors.
       }
     }
-    const wasClosed = this.closed;
     super.close();
-    if (!wasClosed) {
-      this.emit('close');
-    }
   }
 }
 
@@ -561,10 +574,9 @@ export class MediaConnection extends BaseConnection<MediaConnectionEvents> {
       if (state === 'connected' && !this.open) {
         this.markOpen();
       }
-      if (state === 'failed' || state === 'closed' || state === 'disconnected') {
-        this.handleTransportClosed();
-        this.emit('close');
-      }
+      // 媒体连接没有 data channel 兜底，必须走同一套状态处理（含 'disconnected' 宽限），
+      // 否则屏幕共享仍然会把可自愈的抖动当断链。
+      this.handleConnectionStateChange(state);
     };
   }
 
@@ -579,12 +591,8 @@ export class MediaConnection extends BaseConnection<MediaConnectionEvents> {
     this.provider.forwardAnswer(this, answer);
   }
 
-  override close(): void {
-    const wasClosed = this.closed;
-    super.close();
-    if (!wasClosed) {
-      this.emit('close');
-    }
+  protected override emitClose(): void {
+    this.emit('close');
   }
 }
 
@@ -689,6 +697,9 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       window.clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
+    // 终态拒绝只针对「被拒的那一次注册」。自动重连不会走到这里（终态路径直接 return），
+    // 所以在这里复位不会重新制造重连循环；反之不复位会让一个实例被拒一次后永久失联。
+    this.registrationRejected = false;
     const url = createSignalingUrl(this.id, this.options);
     this.log('info', 'signaling_ws_connect_start', {
       url: redactSignalingUrl(url),
@@ -730,8 +741,11 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       const signalingOpenedAt = this.signalingOpenedAt;
       this.signalingOpenedAt = null;
       if (
-        signalingOpenedAt !== null &&
-        Date.now() - signalingOpenedAt >= CONNECTION_TIMINGS.SIGNALING_RECONNECT_STABLE_MS
+        shouldResetReconnectBudget({
+          connectedSinceMs: signalingOpenedAt,
+          nowMs: Date.now(),
+          stableWindowMs: CONNECTION_TIMINGS.SIGNALING_RECONNECT_STABLE_MS,
+        })
       ) {
         this.reconnectAttempts = 0;
       }
@@ -831,6 +845,16 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     if (this.destroyed || this.isManualClose || this.registrationRejected || this.reconnectTimer !== null) {
       return;
     }
+    if (this.reconnectAttempts >= CONNECTION_TIMINGS.MAX_SIGNALING_RECONNECT_ATTEMPTS) {
+      // 退避已封顶还要继续重连，只会让界面永远停在「正在连接」；停下来把原因交给上层。
+      const error = createRuntimeError('disconnected', 'Signaling reconnect attempts exhausted');
+      this.log('error', 'signaling_reconnect_exhausted', { attempts: this.reconnectAttempts });
+      if (!this.openedOnce) {
+        this.rejectReadyPromise(error);
+      }
+      this.emit('error', error);
+      return;
+    }
     this.reconnectAttempts += 1;
     const delay = Math.min(
       DEFAULT_SIGNALING_RECONNECT_BASE_MS * Math.pow(2, Math.max(0, this.reconnectAttempts - 1)),
@@ -842,7 +866,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     });
     this.reconnectTimer = window.setTimeout(() => {
       this.reconnectTimer = null;
-      this.reconnect();
+      this.reconnectInternal();
     }, delay);
   }
 
@@ -1140,7 +1164,18 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     }
   }
 
+  /** 显式重连（用户重试、屏幕共享兜底）：重新给一轮退避预算。 */
   reconnect(): void {
+    if (this.destroyed) return;
+    if (this.websocket && (this.websocket.readyState === WebSocket.OPEN || this.websocket.readyState === WebSocket.CONNECTING)) {
+      return;
+    }
+    this.reconnectAttempts = 0;
+    this.reconnectInternal();
+  }
+
+  /** 自动退避重连：保留计数，避免「能握手但立刻被关」时无限重试。 */
+  private reconnectInternal(): void {
     if (this.destroyed) return;
     if (this.websocket && (this.websocket.readyState === WebSocket.OPEN || this.websocket.readyState === WebSocket.CONNECTING)) {
       return;
@@ -1151,6 +1186,27 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     }
     this.log('warn', 'signaling_reconnect');
     this.connectSignaling();
+  }
+
+  /**
+   * 自动恢复用的重连：不重置退避预算，预算耗尽后拒绝再建 socket 并返回 false。
+   * 与 reconnect() 的区别只在「谁应决定预算」——用户显式重试可以重开一轮，后台自动
+   * 恢复必须受同一个上限约束，否则屏端恢复逻辑会把无限重连带回来。
+   */
+  retrySignaling(): boolean {
+    if (this.destroyed || this.isManualClose) return false;
+    // 服务端已经明确拒绝过（4029/1009/被顶替）：自动路径不要反复撞墙，交给调用方换一条
+    // 信令会话（例如屏端重建 peer）。显式 reconnect() 仍然允许用户重开一轮。
+    if (this.registrationRejected) return false;
+    if (this.websocket && (this.websocket.readyState === WebSocket.OPEN || this.websocket.readyState === WebSocket.CONNECTING)) {
+      return false;
+    }
+    if (this.reconnectAttempts >= CONNECTION_TIMINGS.MAX_SIGNALING_RECONNECT_ATTEMPTS) {
+      return false;
+    }
+    this.reconnectAttempts += 1;
+    this.reconnectInternal();
+    return true;
   }
 
   destroy(): void {

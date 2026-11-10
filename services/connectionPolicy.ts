@@ -1,6 +1,7 @@
 import type { BrowserNetworkProfile } from './networkProfile';
 import type { IceConfigResult } from './stunService';
 import { getRouteSelectionTimings } from './routeSelectionPolicy.ts';
+import { TransferState } from '../types/index.ts';
 
 export type HappyEyeballsPlan = {
   initialPolicy: RTCIceTransportPolicy;
@@ -100,5 +101,31 @@ export const shouldResetReconnectBudget = (options: {
   stableWindowMs: number;
 }) =>
   options.connectedSinceMs !== null &&
-  options.connectedSinceMs > 0 &&
   options.nowMs - options.connectedSinceMs >= options.stableWindowMs;
+
+/**
+ * 快速重连（未完成路由提交时的重试）的次数上限与退避延迟。
+ * 两个调用点（连接关闭后的调度、peer-unavailable 重试）必须共用这里，避免同一策略在两处
+ * 分叉；attempt 是 1 起算的本次重试序号。
+ */
+export const canAttemptFastReconnect = (retryCount: number, maxRetries: number) =>
+  retryCount < maxRetries;
+
+export const getFastReconnectDelayMs = (options: {
+  attempt: number;
+  baseMs: number;
+  maxMs: number;
+}) =>
+  Math.min(
+    options.baseMs * 2 ** (Math.max(1, options.attempt) - 1),
+    options.maxMs
+  );
+
+/**
+ * 快速重连预算耗尽后是否该终止这一轮连接：只有「还没连上发送端」且没有其它在途路由尝试时
+ * 才判定失败。relay 尝试仍在进行时提前报错会把本来还有机会的连接误判掉。
+ */
+export const shouldAbandonExhaustedFastReconnect = (options: {
+  currentState: TransferState;
+  hasOtherRouteAttempt: boolean;
+}) => options.currentState === TransferState.WAITING_FOR_PEER && !options.hasOtherRouteAttempt;

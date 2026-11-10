@@ -46,12 +46,20 @@ export const CONNECTION_TIMINGS = {
   SENDER_MAX_SIGNALING_OPEN_RETRY: 1,
   /** 信令连接稳定存活这么久才清零重连退避计数，否则「握手成功即被关」会让退避永远从 1s 起。 */
   SIGNALING_RECONNECT_STABLE_MS: 15_000,
+  /**
+   * 信令退避重连的次数上限。退避封顶 10s 后仍打不开（断网、被墙、Worker 不可达）时，
+   * 再重连也只是让用户对着「正在连接」无限等待，不如停下来给一条可操作的错误。
+   */
+  MAX_SIGNALING_RECONNECT_ATTEMPTS: 8, // 退避基数/上限（1s、10s）在 services/peerRuntime.ts，调参时两处一起看
   SENDER_GHOST_SWEEP_INTERVAL_MS: 4_000,
   SENDER_GHOST_GRACE_MS: 10_000,
   SENDER_HEARTBEAT_TIMEOUT_MS: 30_000,
   SENDER_HARD_HEARTBEAT_TIMEOUT_MS: 5 * 60 * 1000,
   SCREEN_SHARE_CONNECT_TIMEOUT_MS: 20_000,
   SCREEN_SHARE_MAX_RECONNECT_ATTEMPTS: 5,
+  // 信令预算耗尽后重建 PeerRuntime 的次数上限：每次重建都会拿到新的信令预算，不限次
+  // 就会变成「重建-耗尽-重建」的慢循环。
+  SCREEN_SHARE_MAX_PEER_REBUILDS: 2,
   SCREEN_SHARE_RECONNECT_BASE_DELAY_MS: 2_000,
   SCREEN_SHARE_RECONNECT_MAX_DELAY_MS: 10_000,
   SCREEN_SHARE_HEARTBEAT_INTERVAL_MS: 3_000,

@@ -12,6 +12,7 @@ import {
 } from '../services/screenShareViewerSession';
 import { ScreenShareUI, ScreenShareViewerConnectingStage } from './screen-share/ScreenShareUI';
 import { logDebug } from '../services/diagnostics';
+import { SIGNALING_UNREACHABLE_MESSAGE } from '../services/connectionGuidance';
 import { CONNECTION_TIMINGS } from '../constants/transfer';
 
 interface ScreenShareProps {
@@ -116,6 +117,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const [error, setError] = useState<string | null>(null);
   const [peerId, setPeerId] = useState<string | null>(null);
   const [isPeerReady, setIsPeerReady] = useState(false);
+  // 信令层自己退避耗尽后不会再触发 isPeerReady 变化，用它把恢复 effect 再唤醒一次。
+  const [sharerRecoveryTick, setSharerRecoveryTick] = useState(0);
   const [copied, setCopied] = useState(false);
   const [viewerCount, setViewerCount] = useState(0);
   const [targetSharerId, setTargetSharerId] = useState<string | null>(null);
@@ -159,9 +162,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const remoteShareEndHandledRef = useRef(false);
   const sharerReconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const sharerReconnectAttemptsRef = useRef(0);
+  // 这次信令连接是什么时候打开的：只有稳定存活过才重置重试预算，否则「握手成功即被关」
+  // 会把计数一直清零，屏端的自动恢复又变成不限次数。
+  const sharerPeerOpenedAtRef = useRef<number | null>(null);
+  const sharerPeerRebuildsRef = useRef(0);
   const {
     SCREEN_SHARE_CONNECT_TIMEOUT_MS,
     SCREEN_SHARE_MAX_RECONNECT_ATTEMPTS,
+    SCREEN_SHARE_MAX_PEER_REBUILDS,
     SCREEN_SHARE_RECONNECT_BASE_DELAY_MS,
     SCREEN_SHARE_RECONNECT_MAX_DELAY_MS,
     SCREEN_SHARE_HEARTBEAT_INTERVAL_MS,
@@ -836,7 +844,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         clearTimeout(sharerReconnectTimerRef.current);
         sharerReconnectTimerRef.current = null;
       }
-      sharerReconnectAttemptsRef.current = 0;
+      sharerPeerOpenedAtRef.current = Date.now();
       setPeerId(openedId);
       setIsPeerReady(true);
       onNotification(`连接 ID: ${openedId}`, 'info');
@@ -926,20 +934,23 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     peer.on('error', (err) => {
       console.error('Peer error:', err);
+      if (err?.type === 'disconnected') {
+        // 信令重连预算耗尽：peerRuntime 自己不会再发 disconnected 事件，靠 tick 让恢复
+        // effect 再跑一次，由它决定重建 peer 还是放弃。
+        setError(SIGNALING_UNREACHABLE_MESSAGE);
+        setIsPeerReady(false);
+        setSharerRecoveryTick((tick) => tick + 1);
+        return;
+      }
       setError(`PeerJS 错误: ${err.message}`);
       setIsPeerReady(false);
     });
 
     peer.on('disconnected', () => {
       logDebug('log', 'Peer disconnected');
+      // 不在这里直调 peer.reconnect()：那会绕过指数退避，把「握手成功即被关」放大成
+      // 每秒一次的重连风暴。退避与重建由下面的 recovery effect 统一负责。
       setIsPeerReady(false);
-      if (!peer.destroyed) {
-        try {
-          peer.reconnect();
-        } catch {
-          // Fallback reconnect will be handled by the recovery effect.
-        }
-      }
     });
 
     peerRef.current = peer;
@@ -990,6 +1001,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         sharerReconnectTimerRef.current = null;
       }
       sharerReconnectAttemptsRef.current = 0;
+      sharerPeerOpenedAtRef.current = null;
+      sharerPeerRebuildsRef.current = 0;
       return;
     }
 
@@ -998,13 +1011,31 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         clearTimeout(sharerReconnectTimerRef.current);
         sharerReconnectTimerRef.current = null;
       }
-      sharerReconnectAttemptsRef.current = 0;
+      // 稳定存活过才算恢复成功；刚 open 就被关的抖动不清零，否则重试计数永远走不到上限。
+      const openedAt = sharerPeerOpenedAtRef.current;
+      if (
+        openedAt !== null &&
+        Date.now() - openedAt >= CONNECTION_TIMINGS.SIGNALING_RECONNECT_STABLE_MS
+      ) {
+        sharerReconnectAttemptsRef.current = 0;
+        sharerPeerRebuildsRef.current = 0;
+      }
       return;
     }
 
     // Recover only after we had a valid sharer peer id once.
     if (!peerId) return;
     if (sharerReconnectTimerRef.current) return;
+
+    // 上一轮连接活够久再断：视为新故障，重新给一轮重试预算。
+    const openedAt = sharerPeerOpenedAtRef.current;
+    if (
+      openedAt !== null &&
+      Date.now() - openedAt >= CONNECTION_TIMINGS.SIGNALING_RECONNECT_STABLE_MS
+    ) {
+      sharerReconnectAttemptsRef.current = 0;
+    }
+    sharerPeerOpenedAtRef.current = null;
 
     const attempt = sharerReconnectAttemptsRef.current + 1;
     sharerReconnectAttemptsRef.current = attempt;
@@ -1015,28 +1046,40 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       const currentPeer = peerRef.current;
       if (!currentPeer || currentPeer.destroyed || !isSharing) return;
 
+      let signalingRestarted = true;
       try {
         if (currentPeer.disconnected) {
-          currentPeer.reconnect();
+          // 自动恢复走受预算约束的接口：reconnect() 会重置退避计数，只给用户显式重试用。
+          signalingRestarted = currentPeer.retrySignaling();
         }
       } catch {
-        // Ignore and continue to fallback rebuild path below.
+        signalingRestarted = false;
       }
 
-      // Final fallback: rebuild peer when repeated reconnect attempts fail.
-      if (attempt >= MAX_SHARER_SIGNAL_RECONNECT_ATTEMPTS) {
-        try {
-          if (!currentPeer.destroyed) currentPeer.destroy();
-        } catch {
-          // Ignore destroy errors.
-        }
-        if (isSharing) {
-          onNotification('信令连接恢复失败，正在重建共享连接 ID...', 'info');
-          await initializePeer();
-        }
+      // 重试用尽或信令预算耗尽：重建 peer（换一条信令会话）再试，重建次数有上限。
+      const shouldRebuild =
+        !signalingRestarted || attempt >= MAX_SHARER_SIGNAL_RECONNECT_ATTEMPTS;
+      if (!shouldRebuild) return;
+
+      if (sharerPeerRebuildsRef.current >= SCREEN_SHARE_MAX_PEER_REBUILDS) {
+        onNotification('信令连接持续失败，请刷新页面后重新开始共享。', 'error');
+        return;
+      }
+      sharerPeerRebuildsRef.current += 1;
+
+      try {
+        if (!currentPeer.destroyed) currentPeer.destroy();
+      } catch {
+        // Ignore destroy errors.
+      }
+      if (isSharing) {
+        onNotification('信令连接恢复失败，正在重建共享连接 ID...', 'info');
+        await initializePeer();
+        sharerReconnectAttemptsRef.current = 0;
+        sharerPeerOpenedAtRef.current = null;
       }
     }, delay);
-  }, [isSharing, isPeerReady, peerId, onNotification, initializePeer]);
+  }, [isSharing, isPeerReady, peerId, sharerRecoveryTick, onNotification, initializePeer]);
 
 
 

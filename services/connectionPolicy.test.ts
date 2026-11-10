@@ -1,7 +1,14 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createHappyEyeballsPlan, shouldResetReconnectBudget } from './connectionPolicy.ts';
+import {
+  canAttemptFastReconnect,
+  createHappyEyeballsPlan,
+  getFastReconnectDelayMs,
+  shouldAbandonExhaustedFastReconnect,
+  shouldResetReconnectBudget,
+} from './connectionPolicy.ts';
+import { TransferState } from '../types/index.ts';
 import type { BrowserNetworkProfile } from './networkProfile.ts';
 import type { IceConfigResult } from './stunService.ts';
 
@@ -120,7 +127,7 @@ test('shouldResetReconnectBudget 只在连接稳定活过窗口后返回 true', 
     false,
   );
   assert.equal(
-    shouldResetReconnectBudget({ connectedSinceMs: 0, nowMs: 20_000, stableWindowMs: 15_000 }),
+    shouldResetReconnectBudget({ connectedSinceMs: 0, nowMs: 14_999, stableWindowMs: 15_000 }),
     false,
   );
   assert.equal(
@@ -130,5 +137,41 @@ test('shouldResetReconnectBudget 只在连接稳定活过窗口后返回 true', 
   assert.equal(
     shouldResetReconnectBudget({ connectedSinceMs: 1_000, nowMs: 16_000, stableWindowMs: 15_000 }),
     true,
+  );
+});
+
+test('快速重连上限与退避延迟只由策略函数决定', () => {
+  assert.equal(canAttemptFastReconnect(5, 6), true);
+  assert.equal(canAttemptFastReconnect(6, 6), false);
+
+  const delays = [1, 2, 3, 4, 5, 6].map((attempt) =>
+    getFastReconnectDelayMs({ attempt, baseMs: 700, maxMs: 5_000 }),
+  );
+  assert.deepEqual(delays, [700, 1_400, 2_800, 5_000, 5_000, 5_000]);
+  // attempt 从 1 起算的防御：0/负数按第 1 次算，不会算出 350ms 之类的怪值。
+  assert.equal(getFastReconnectDelayMs({ attempt: 0, baseMs: 700, maxMs: 5_000 }), 700);
+});
+
+test('shouldAbandonExhaustedFastReconnect 只在还没连上且没有其它在途尝试时放弃', () => {
+  assert.equal(
+    shouldAbandonExhaustedFastReconnect({
+      currentState: TransferState.WAITING_FOR_PEER,
+      hasOtherRouteAttempt: false,
+    }),
+    true,
+  );
+  assert.equal(
+    shouldAbandonExhaustedFastReconnect({
+      currentState: TransferState.WAITING_FOR_PEER,
+      hasOtherRouteAttempt: true,
+    }),
+    false,
+  );
+  assert.equal(
+    shouldAbandonExhaustedFastReconnect({
+      currentState: TransferState.TRANSFERRING,
+      hasOtherRouteAttempt: false,
+    }),
+    false,
   );
 });

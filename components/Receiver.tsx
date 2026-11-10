@@ -13,8 +13,15 @@ import {
 import { formatFileSize } from '../services/fileUtils';
 import { createCrc32Hasher, Crc32Hasher } from '../services/crc32WorkerClient';
 import { loadPeerRuntime, type Peer, type DataConnection } from '../services/peerRuntime';
-import { createHappyEyeballsPlan, shouldResetReconnectBudget } from '../services/connectionPolicy';
 import {
+  canAttemptFastReconnect,
+  createHappyEyeballsPlan,
+  getFastReconnectDelayMs,
+  shouldAbandonExhaustedFastReconnect,
+  shouldResetReconnectBudget,
+} from '../services/connectionPolicy';
+import {
+  getPeerRuntimeErrorMessage,
   getReceiverDisconnectedMessage,
   getReceiverPreTransferFailureMessage,
   NO_TURN_WARNING_MESSAGE,
@@ -375,29 +382,33 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       nowMs: Date.now(),
       stableWindowMs: CONNECTION_TIMINGS.RECEIVER_RECONNECT_BUDGET_STABLE_MS,
     });
-    if (!stable) return false;
+    if (!stable) return;
     retryCountRef.current = 0;
     committedReconnectAttemptsRef.current = 0;
     stableConnectionSinceRef.current = null;
-    return true;
   };
 
   /**
    * 快速重连预算耗尽、且没有其它在途尝试时要收口成错误态。只停手不置错的话，界面会永远
    * 停在「正在建立点对点通道...」，用户既看不到失败也拿不到可操作的重试入口。
    */
-  const failFastReconnectIfExhausted = (attemptId: string | null) => {
-    if (stateRef.current !== TransferState.WAITING_FOR_PEER) return false;
-    const hasOtherAttempt = Array.from(routeAttemptsRef.current.keys()).some(
+  const reportExhaustedFastReconnect = (attemptId: string | null) => {
+    const hasOtherRouteAttempt = Array.from(routeAttemptsRef.current.keys()).some(
       (otherAttemptId) => otherAttemptId !== attemptId
     );
-    if (hasOtherAttempt) return false;
+    if (
+      !shouldAbandonExhaustedFastReconnect({
+        currentState: stateRef.current,
+        hasOtherRouteAttempt,
+      })
+    ) {
+      return;
+    }
     markConnectionFailure(connectTelemetryRef.current, 'connection_closed', {
       state: TransferState.WAITING_FOR_PEER,
     });
     setErrorMsg(getReceiverDisconnectedMessage(hasTurnRef.current, true));
     setState(TransferState.ERROR);
-    return true;
   };
 
   const clearProgressAckTimer = () => {
@@ -1670,12 +1681,16 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       if (happyEyeballsWonRef.current) return false;
       if (stateRef.current !== TransferState.WAITING_FOR_PEER) return false;
       refreshReconnectBudgetIfStable();
-      if (retryCountRef.current >= MAX_CONNECT_RETRY) return false;
+      if (!canAttemptFastReconnect(retryCountRef.current, MAX_CONNECT_RETRY)) return false;
       if (!peerRef.current || peerRef.current.destroyed) return false;
 
       reconnectScheduled = true;
       retryCountRef.current += 1;
-      const delay = Math.min(FAST_RETRY_BASE_MS * Math.pow(2, retryCountRef.current - 1), FAST_RETRY_MAX_MS);
+      const delay = getFastReconnectDelayMs({
+        attempt: retryCountRef.current,
+        baseMs: FAST_RETRY_BASE_MS,
+        maxMs: FAST_RETRY_MAX_MS,
+      });
       markConnectionRetry(connectTelemetryRef.current, 'data_channel_close_or_error');
       backgroundTimeoutGroupRef.current.schedule(() => {
         const activePeer = peerRef.current;
@@ -1895,7 +1910,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         if (happyEyeballsWonRef.current) return;
         if (stateRef.current === TransferState.WAITING_FOR_PEER) {
           if (!scheduleFastReconnect()) {
-            failFastReconnectIfExhausted(attemptId);
+            reportExhaustedFastReconnect(attemptId);
           }
         }
         return;
@@ -1988,7 +2003,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         if (happyEyeballsWonRef.current) return;
         if (stateRef.current === TransferState.WAITING_FOR_PEER) {
           if (!scheduleFastReconnect()) {
-            failFastReconnectIfExhausted(attemptId);
+            reportExhaustedFastReconnect(attemptId);
           }
         }
         return;
@@ -2717,12 +2732,20 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           markConnectionFailure(connectTelemetryRef.current, 'rate_limited');
           setErrorMsg(RATE_LIMITED_CONNECTION_MESSAGE);
           setState(TransferState.ERROR);
-        } else if (err.type === 'peer-unavailable' && retryCountRef.current < MAX_CONNECT_RETRY) {
+        } else if (
+          err.type === 'peer-unavailable' &&
+          canAttemptFastReconnect(retryCountRef.current, MAX_CONNECT_RETRY)
+        ) {
           // Skip peer-unavailable retries for the background relay attempt
           // to avoid burning the shared retry budget and routing through the wrong peer.
           if (policy === 'relay') return;
+          refreshReconnectBudgetIfStable();
           retryCountRef.current++;
-          const delay = Math.min(FAST_RETRY_BASE_MS * Math.pow(2, retryCountRef.current - 1), FAST_RETRY_MAX_MS);
+          const delay = getFastReconnectDelayMs({
+            attempt: retryCountRef.current,
+            baseMs: FAST_RETRY_BASE_MS,
+            maxMs: FAST_RETRY_MAX_MS,
+          });
           markConnectionRetry(connectTelemetryRef.current, 'peer_unavailable');
           backgroundTimeoutGroupRef.current.schedule(() => {
             if (!receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) return;
@@ -2743,9 +2766,21 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         } else {
           // Only fail if this is the primary peer (not a background relay attempt).
           if (policy === 'relay' && peerRef.current && !peerRef.current.destroyed) return;
+          // 信令退避耗尽只说明信令打不通，数据通道仍可能是通的：传输进行中不要因此把
+          // 页面切到错误态，真正的断链由停滞检测（12s 无落盘进度）兜底。
+          const activeConnection = connRef.current;
+          if (
+            err.type === 'disconnected' &&
+            activeConnection?.open &&
+            (stateRef.current === TransferState.TRANSFERRING ||
+              stateRef.current === TransferState.PEER_CONNECTED)
+          ) {
+            logDebug('warn', 'Signaling reconnect exhausted while transfer is active');
+            return;
+          }
           clearConnectionTimeout();
           markConnectionFailure(connectTelemetryRef.current, `peer_error:${err.type}`);
-          setErrorMsg(`连接错误: ${err.type}`);
+          setErrorMsg(getPeerRuntimeErrorMessage(err.type));
           setState(TransferState.ERROR);
         }
       });
