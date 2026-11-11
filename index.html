@@ -2,7 +2,7 @@
 <html lang="zh-CN">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no, viewport-fit=cover" />
     <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
     <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)" />
     <meta name="description" content="AeroDrop 是基于 WebRTC 的点对点文件传输与屏幕共享工具：免注册登录，文件直连不经过服务器，P2P 不可达时自动回退 TURN 中继，支持断点续传" />
@@ -10,7 +10,9 @@
     <!-- iOS PWA -->
     <meta name="mobile-web-app-capable" content="yes" />
     <meta name="apple-mobile-web-app-capable" content="yes" />
-    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <!-- default：状态栏跟随系统浅/深色（浅色白底黑字、深色黑底白字），与白色顶栏在浅色下无缝相邻；
+         black-translucent 会强制白色图标盖在白色顶栏上导致看不清 -->
+    <meta name="apple-mobile-web-app-status-bar-style" content="default" />
     <meta name="apple-mobile-web-app-title" content="AeroDrop" />
     <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
 
