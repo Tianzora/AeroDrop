@@ -535,7 +535,7 @@ const App: React.FC = () => {
         <div className="w-full flex-1 flex flex-col">
           <ErrorBoundary>
             {mode === 'send' && (
-              <div className="block animate-slide-up h-full">
+              <div className="block animate-flip-in h-full">
                 <Sender
                   onNotification={addNotification}
                   deviceName={deviceName}
@@ -544,7 +544,7 @@ const App: React.FC = () => {
               </div>
             )}
             {mode === 'receive' && (
-              <div className="block animate-slide-up h-full">
+              <div className="block animate-flip-in h-full">
                 <Receiver
                   initialCode={initialCode}
                   onNotification={addNotification}
@@ -554,7 +554,7 @@ const App: React.FC = () => {
               </div>
             )}
             {mode === 'screen' && (
-              <div className="block animate-slide-up h-full">
+              <div className="block animate-flip-in h-full">
                 <ScreenShare
                   initialViewId={initialViewId}
                   onNotification={addNotification}
