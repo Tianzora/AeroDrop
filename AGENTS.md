@@ -2,6 +2,8 @@
 
 浏览器即开即用的 WebRTC 文件传输与屏幕共享应用。P2P 优先，不可达时回退 TURN 中继；信令走自管 Cloudflare Worker + Durable Object + WebSocket。
 
+线上环境：https://drop.tianzora.uno/
+
 ## 命令
 
 ```powershell
@@ -15,9 +17,10 @@ npm run test:all                      # test:services + test:components + test:s
 npm run test:e2e                      # Playwright（自动起 vite preview :3401）
 npm run test:e2e:rtc                  # RTC 专项
 npm run build
-npm run deploy                        # wrangler deploy
+npm run deploy                        # 手动发布（能生效，但绕过 Git 集成的构建记录，正常不用）
 ```
 
+- 部署走 Cloudflare 的 Git 集成：推送到 `main` 即自动构建并发布到 https://drop.tianzora.uno/ ，这是常规路径。
 - 产品级 E2E 走 `npm run test:e2e:product-transfer`，默认打 `AERODROP_BASE_URL`，未设置时用 `http://127.0.0.1:8787`。
 - `test:e2e`/`test:e2e:rtc` 的构建固定为 `vite build --mode e2e`：只有该模式会启用 E2E 测试钩子，生产构建里 `__AERODROP_E2E__` 不生效。
 - 改完代码的顺序：`typecheck` → `test:all` → 相关 E2E。

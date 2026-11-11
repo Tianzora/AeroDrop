@@ -2,6 +2,8 @@
 
 轻量级 WebRTC 文件传输与屏幕共享应用。默认优先端对端（P2P），不可达时回退 TURN 中继。
 
+线上地址：https://drop.tianzora.uno/
+
 ## Features
 
 - 文件传输：6 位口令 / 分享链接连接，支持多文件与文件夹
@@ -31,7 +33,9 @@ npm run build
 
 ## Deploy
 
-Cloudflare Worker:
+生产部署走 Cloudflare 的 Git 集成：推送到 `main` 后自动构建并发布，无需本地操作。
+
+紧急情况下也可以手动发布（能生效，但绕过 Git 集成的构建记录，正常流程不要用）：
 
 ```bash
 npm run deploy
