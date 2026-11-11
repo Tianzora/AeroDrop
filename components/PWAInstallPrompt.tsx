@@ -110,28 +110,28 @@ export const PWAInstallPrompt: React.FC = () => {
 
   return (
     <div className="fixed bottom-4 left-4 right-4 md:left-auto md:right-4 md:w-96 z-50 animate-slide-up">
-      <div className="bg-white dark:bg-slate-800 rounded-card shadow-card border border-slate-200 dark:border-slate-700 p-4 relative overflow-hidden">
+      <div className="bg-white dark:bg-night-850 rounded-card shadow-card border border-slate-200 dark:border-night-750 p-4 relative overflow-hidden">
 
         <button
           onClick={dismissPrompt}
-          className="absolute top-1 right-1 inline-flex min-w-11 min-h-11 items-center justify-center rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-slate-200 transition-colors"
+          className="absolute top-1 right-1 inline-flex min-w-11 min-h-11 items-center justify-center rounded-full text-slate-400 hover:text-slate-600 dark:hover:text-night-200 transition-colors"
           aria-label="关闭安装提示"
         >
           <X size={16} />
         </button>
 
         <div className="flex gap-4">
-          <div className="bg-brand-100 dark:bg-brand-900/30 rounded-control p-3 h-fit shrink-0">
+          <div className="bg-brand-100 dark:bg-brand-500/12 rounded-control p-3 h-fit shrink-0">
             <Download size={20} className="text-brand-600 dark:text-brand-400" />
           </div>
 
           <div className="flex-1">
-            <h3 className="font-bold text-slate-900 dark:text-white mb-3">
+            <h3 className="font-bold text-slate-900 dark:text-night-100 mb-3">
               安装 AeroDrop
             </h3>
 
             {isIOS ? (
-              <div className="bg-slate-50 dark:bg-slate-900/50 rounded-control p-3 text-xs text-slate-600 dark:text-slate-300 border border-slate-100 dark:border-slate-700/50">
+              <div className="bg-slate-50 dark:bg-night-900/50 rounded-control p-3 text-xs text-slate-600 dark:text-night-300 border border-slate-100 dark:border-night-750/50">
                 <div className="flex items-center gap-2 mb-2">
                   1. 点击浏览器底部的 <Share size={16} className="inline text-brand-500" /> 分享按钮
                 </div>

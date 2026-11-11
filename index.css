@@ -11,6 +11,21 @@
   --color-brand-800: #1e40af;
   --color-brand-900: #1e3a8a;
 
+  /* ---- Night surfaces：深色模式专用中性阶，低彩度冷灰（M3 的「明度分层」思路）
+     950 页面底 / 900 顶栏与高层容器 / 850 卡片 / 800 控件与键帽 / 750 悬停抬升 / 700 强边框
+     文本阶 400 次要 / 300 正文 / 200 小标题 / 100 大标题。避免纯黑与高饱和深蓝。 */
+  --color-night-950: #05070e;
+  --color-night-900: #0a0f1a;
+  --color-night-850: #0f1724;
+  --color-night-800: #182031;
+  --color-night-750: #202b3e;
+  --color-night-700: #253247;
+  --color-night-600: #35455c;
+  --color-night-400: #a3aec2;
+  --color-night-300: #d8dee9;
+  --color-night-200: #e8edf5;
+  --color-night-100: #f5f8fc;
+
   /* ---- Motion language: 3 durations + 2 easings, single source of truth ----
      fast  140ms 按压/悬停反馈
      base  240ms 小元素进场、淡入
@@ -168,7 +183,7 @@ html [data-sonner-toaster][data-sonner-theme='light'] {
 
 html [data-sonner-toaster][data-sonner-theme='dark'] {
   --border-radius: 12px;
-  --normal-bg: #1e293b;
-  --normal-border: #334155;
-  --normal-text: #f8fafc;
+  --normal-bg: #161e29;
+  --normal-border: #253040;
+  --normal-text: #e7ecf2;
 }

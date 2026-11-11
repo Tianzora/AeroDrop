@@ -500,10 +500,10 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-[100dvh] bg-slate-50 dark:bg-slate-950 flex flex-col transition-colors motion-base relative overflow-hidden">
+    <div className="min-h-[100dvh] bg-slate-50 dark:bg-night-950 flex flex-col transition-colors motion-base relative overflow-hidden">
       {swUpdateReady && (
         <div className="fixed top-[calc(env(safe-area-inset-top)+1rem)] left-4 right-4 md:left-auto md:right-4 z-50 pointer-events-auto">
-          <div className="flex items-center justify-between gap-3 rounded-control border border-brand-100 bg-brand-50/95 px-4 py-3 text-brand-900 shadow-lg backdrop-blur dark:border-brand-900 dark:bg-slate-900/95 dark:text-brand-200">
+          <div className="flex items-center justify-between gap-3 rounded-control border border-brand-100 bg-brand-50/95 px-4 py-3 text-brand-900 shadow-lg backdrop-blur dark:border-brand-500/30 dark:bg-night-900/95 dark:text-brand-200">
             <p className="text-sm font-medium">发现新版本</p>
             <button
               onClick={applySwUpdate}
@@ -528,14 +528,14 @@ const App: React.FC = () => {
 
             {/* 顶部留出 env(safe-area-inset-top)：PWA/刘海屏下让 header 自己的底色铺到状态栏后面（沉浸），
           而不是让状态栏区域露出页面底色。 */}
-      <header className="bg-white dark:bg-slate-900 border-b border-slate-200 dark:border-slate-800 sticky top-0 z-20 pt-[env(safe-area-inset-top)] transition-colors motion-base">
+      <header className="bg-white dark:bg-night-900 border-b border-slate-200 dark:border-night-750 sticky top-0 z-20 pt-[env(safe-area-inset-top)] transition-colors motion-base">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-14 md:h-16 flex items-center justify-between">
           <div className="flex items-center gap-3 cursor-pointer" onClick={() => changeMode('send')}>
             <div className="bg-brand-600 p-1.5 md:p-2 rounded-[26.5%] text-white shadow-sm">
               <Package size={20} className="md:w-6 md:h-6" />
             </div>
             <div className="flex items-baseline gap-2">
-              <h1 className="text-xl font-bold text-slate-900 dark:text-white tracking-tighter">AeroDrop</h1>
+              <h1 className="text-xl font-bold text-slate-900 dark:text-night-100 tracking-tighter">AeroDrop</h1>
               <span className="text-xs font-bold tracking-tight text-brand-600 dark:text-brand-400 pb-0.5">
                 @Tian
               </span>
@@ -546,7 +546,7 @@ const App: React.FC = () => {
             {showRiskBanner && (
               <>
                 {/* Desktop Badge */}
-                <div className="hidden sm:flex items-center gap-2 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 rounded-full px-3 py-1.5 animate-slide-up">
+                <div className="hidden sm:flex items-center gap-2 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-full px-3 py-1.5 animate-slide-up">
                   <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400" />
                   <span className="text-xs font-medium text-amber-700 dark:text-amber-300">
                     检测到代理网络，点对点传输和屏幕共享可能失效，建议关闭代理
@@ -564,7 +564,7 @@ const App: React.FC = () => {
                 <button
                   className={`sm:hidden inline-flex min-w-11 min-h-11 items-center justify-center rounded-full transition-colors relative ${
                     isRiskBannerExpanded
-                      ? 'bg-amber-100 dark:bg-amber-800/50 text-amber-600 dark:text-amber-400'
+                      ? 'bg-amber-100 dark:bg-amber-500/15 text-amber-600 dark:text-amber-400'
                       : 'text-amber-500 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30'
                   }`}
                   onClick={() => setIsRiskBannerExpanded(!isRiskBannerExpanded)}
@@ -572,7 +572,7 @@ const App: React.FC = () => {
                 >
                   <ShieldAlert className="w-5 h-5" />
                   {!isRiskBannerExpanded && (
-                    <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full ring-2 ring-white dark:ring-slate-900"></span>
+                    <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full ring-2 ring-white dark:ring-night-900"></span>
                   )}
                 </button>
               </>
@@ -583,7 +583,7 @@ const App: React.FC = () => {
 
       {/* Mobile only banner - Expandable */}
       {showRiskBanner && isRiskBannerExpanded && (
-        <div className="sm:hidden bg-amber-50 dark:bg-amber-900/30 border-b border-amber-200 dark:border-amber-800 px-4 py-3 flex items-start gap-3 animate-slide-down relative z-10 shadow-sm">
+        <div className="sm:hidden bg-amber-50 dark:bg-amber-500/10 border-b border-amber-200 dark:border-amber-500/30 px-4 py-3 flex items-start gap-3 animate-slide-down relative z-10 shadow-sm">
           <ShieldAlert className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
           <div className="flex-1">
              <p className="text-xs font-medium text-amber-800 dark:text-amber-200 mb-1">
@@ -617,9 +617,9 @@ const App: React.FC = () => {
       >
 
         <div className="w-full max-w-xl mb-8 relative z-10">
-            <div className="bg-white dark:bg-slate-900 p-1.5 rounded-full grid grid-cols-3 relative shadow-card border border-slate-50 dark:border-slate-800">
+            <div className="bg-white dark:bg-night-900 p-1.5 rounded-full grid grid-cols-3 relative shadow-card border border-slate-50 dark:border-night-750">
               <div
-                  className="absolute top-1.5 left-1.5 bottom-1.5 w-[calc((100%-0.75rem)/3)] z-10 pointer-events-none bg-brand-600 dark:bg-brand-500 rounded-full shadow-[inset_2px_2px_6px_rgba(0,0,0,0.2)]"
+                  className="absolute top-1.5 left-1.5 bottom-1.5 w-[calc((100%-0.75rem)/3)] bg-brand-600 dark:bg-brand-500 rounded-full shadow-[inset_2px_2px_6px_rgba(0,0,0,0.2)]"
                   style={{
                     transform: `translateX(${activeMode === 'send' ? '0%' : activeMode === 'receive' ? '100%' : '200%'})`,
                     transition: 'transform var(--dur-base) var(--ease-move)'
@@ -629,44 +629,38 @@ const App: React.FC = () => {
               <button
                 onClick={() => changeMode('send')}
                 aria-pressed={activeMode === 'send'}
-                className={`relative flex items-center justify-center px-3 py-3 rounded-full text-sm font-bold transition-[color] motion-fast whitespace-nowrap ${
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-[color] motion-fast whitespace-nowrap ${
                   activeMode === 'send'
                     ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-700 hover:bg-slate-100 dark:text-slate-400 dark:hover:text-slate-200 dark:hover:bg-slate-800'
+                    : 'text-slate-500 hover:text-slate-900 dark:text-night-400 dark:hover:text-night-100'
                 }`}
               >
-                <span className="relative z-20 flex items-center gap-2">
-                  <Send size={18} className={`transition-transform motion-base ${activeMode === 'send' ? 'scale-110' : ''}`} />
-                  发送
-                </span>
+                <Send size={18} className={`transition-transform motion-base ${activeMode === 'send' ? 'scale-110' : ''}`} />
+                发送
               </button>
               <button
                 onClick={() => changeMode('receive')}
                 aria-pressed={activeMode === 'receive'}
-                className={`relative flex items-center justify-center px-3 py-3 rounded-full text-sm font-bold transition-[color] motion-fast whitespace-nowrap ${
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-[color] motion-fast whitespace-nowrap ${
                   activeMode === 'receive'
                     ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-700 hover:bg-slate-100 dark:text-slate-400 dark:hover:text-slate-200 dark:hover:bg-slate-800'
+                    : 'text-slate-500 hover:text-slate-900 dark:text-night-400 dark:hover:text-night-100'
                 }`}
               >
-                <span className="relative z-20 flex items-center gap-2">
-                  <Inbox size={18} className={`transition-transform motion-base ${activeMode === 'receive' ? 'scale-110' : ''}`} />
-                  接收
-                </span>
+                <Inbox size={18} className={`transition-transform motion-base ${activeMode === 'receive' ? 'scale-110' : ''}`} />
+                接收
               </button>
               <button
                 onClick={() => changeMode('screen')}
                 aria-pressed={activeMode === 'screen'}
-                className={`relative flex items-center justify-center px-3 py-3 rounded-full text-sm font-bold transition-[color] motion-fast whitespace-nowrap ${
+                className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-[color] motion-fast whitespace-nowrap ${
                   activeMode === 'screen'
                     ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-700 hover:bg-slate-100 dark:text-slate-400 dark:hover:text-slate-200 dark:hover:bg-slate-800'
+                    : 'text-slate-500 hover:text-slate-900 dark:text-night-400 dark:hover:text-night-100'
                 }`}
               >
-                <span className="relative z-20 flex items-center gap-2">
-                  <Monitor size={18} className={`transition-transform motion-base ${activeMode === 'screen' ? 'scale-110' : ''}`} />
-                  共享
-                </span>
+                <Monitor size={18} className={`transition-transform motion-base ${activeMode === 'screen' ? 'scale-110' : ''}`} />
+                共享
               </button>
             </div>
         </div>
@@ -703,7 +697,7 @@ const App: React.FC = () => {
         </div>
         
         <div className="mt-8 text-center max-w-md mx-auto space-y-2 pb-4 md:pb-0">
-          <p className="text-xs text-slate-500 dark:text-slate-400">
+          <p className="text-xs text-slate-500 dark:text-night-400">
             Powered by WebRTC.
           </p>
         </div>

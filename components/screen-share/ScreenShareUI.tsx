@@ -199,42 +199,42 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
 
   return (
     <div className="w-full max-w-xl mx-auto">
-      <div className="bg-white dark:bg-slate-800 rounded-card shadow-card border border-slate-100 dark:border-slate-700 p-6 md:p-8 transition-colors motion-base">
+      <div className="bg-white dark:bg-night-850 rounded-card shadow-card border border-slate-100 dark:border-night-750 p-6 md:p-8 transition-colors motion-base">
         {/* 共享 / 观看中把装饰性大头部压成工具条式紧凑头部：Meet / Zoom 进入「正在
             共享」态后都会收起介绍性大标题，把纵向空间让给画面和操作；未开始时保
             留图标 + 标题的引导性头部。 */}
         {isSharing || isViewing ? (
           <div className="mb-6 flex items-center gap-2.5">
-            <div className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-control bg-brand-100 dark:bg-brand-900/30">
+            <div className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-control bg-brand-100 dark:bg-brand-500/12">
               {isViewing ? (
                 <Eye size={20} className="text-brand-600" />
               ) : (
                 <Monitor size={20} className="text-brand-600" />
               )}
             </div>
-            <h2 className="truncate text-xl font-bold text-slate-900 dark:text-white">
+            <h2 className="truncate text-xl font-bold text-slate-900 dark:text-night-100">
               {isViewing ? '观看屏幕' : '屏幕共享'}
             </h2>
             {isViewing && (
-              <p className="ml-auto min-w-0 truncate text-xs text-slate-500 dark:text-slate-400">
+              <p className="ml-auto min-w-0 truncate text-xs text-slate-500 dark:text-night-400">
                 实时观看对方共享的屏幕内容
               </p>
             )}
           </div>
         ) : (
           <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 bg-brand-100 dark:bg-brand-900/30 rounded-card mb-4">
+            <div className="inline-flex items-center justify-center w-16 h-16 bg-brand-100 dark:bg-brand-500/12 rounded-card mb-4">
               {isConnecting ? (
                 <Eye size={32} className="text-brand-600" />
               ) : (
                 <Monitor size={32} className="text-brand-600" />
               )}
             </div>
-            <h2 className="text-xl font-bold text-slate-900 dark:text-white">
+            <h2 className="text-xl font-bold text-slate-900 dark:text-night-100">
               {isConnecting ? '正在连接...' : '屏幕共享'}
             </h2>
             {!isConnecting && (
-              <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+              <p className="mt-2 text-sm text-slate-500 dark:text-night-400">
                 与其他设备实时共享您的屏幕内容
               </p>
             )}
@@ -242,7 +242,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
         )}
 
         {error && !(targetSharerId && !isConnecting && !isViewing && !isSharing) && (
-          <div className="mb-6 p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-card flex items-center gap-3">
+          <div className="mb-6 p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-card flex items-center gap-3">
             <AlertCircle size={20} className="text-red-500 flex-shrink-0" />
             <span className="min-w-0 text-sm break-words text-red-700 dark:text-red-300">{error}</span>
           </div>
@@ -251,7 +251,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
         {isConnecting && (
           <div className="mb-6 flex flex-col items-center justify-center py-12">
             <Loader2 size={32} className="text-brand-600 animate-spin mb-4" />
-            <p className="text-sm text-slate-600 dark:text-slate-300 font-medium mb-4">
+            <p className="text-sm text-slate-600 dark:text-night-300 font-medium mb-4">
               {viewerConnectingStage === 'fetching_ice' && '正在获取网络配置...'}
               {viewerConnectingStage === 'connecting_signaling' && '正在连接信号服务器...'}
               {viewerConnectingStage === 'connecting_media' && '正在建立媒体通道...'}
@@ -260,7 +260,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
             </p>
             <button
               onClick={cancelConnecting}
-              className="flex items-center justify-center gap-2 px-5 py-2.5 text-sm font-medium text-slate-600 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 border border-slate-300 dark:border-slate-600 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+              className="flex items-center justify-center gap-2 px-5 py-2.5 text-sm font-medium text-slate-600 dark:text-night-400 hover:text-slate-800 dark:hover:text-night-200 border border-slate-300 dark:border-night-700 rounded-full hover:bg-slate-100 dark:hover:bg-night-800 transition-colors"
             >
               <X size={16} />
               取消连接
@@ -270,7 +270,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
 
         {error && !isConnecting && !isViewing && !isSharing && targetSharerId && (
           <div className="mb-6">
-            <div className="p-4 bg-red-50 dark:bg-red-900/20 border border-red-200 dark:border-red-800 rounded-card flex items-center gap-3 mb-4">
+            <div className="p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-card flex items-center gap-3 mb-4">
               <AlertCircle size={20} className="text-red-500 flex-shrink-0" />
               <span className="min-w-0 text-sm break-words text-red-700 dark:text-red-300">{error}</span>
             </div>
@@ -284,7 +284,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               </button>
               <button
                 onClick={dismissConnectionError}
-                className="flex items-center justify-center gap-2 px-5 py-2.5 text-slate-600 dark:text-slate-400 hover:text-slate-800 dark:hover:text-slate-200 border border-slate-300 dark:border-slate-600 rounded-full hover:bg-slate-100 dark:hover:bg-slate-800 transition-colors"
+                className="flex items-center justify-center gap-2 px-5 py-2.5 text-slate-600 dark:text-night-400 hover:text-slate-800 dark:hover:text-night-200 border border-slate-300 dark:border-night-700 rounded-full hover:bg-slate-100 dark:hover:bg-night-800 transition-colors"
               >
                 <X size={16} />
                 取消
@@ -297,7 +297,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
           <>
             <div
               ref={viewerContainerRef}
-              className={`mb-4 relative group overflow-hidden bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-sm ${
+              className={`mb-4 relative group overflow-hidden bg-slate-900 border border-slate-200 dark:border-night-750 shadow-sm ${
                 viewerFullscreen ? 'flex h-screen items-center justify-center rounded-none' : 'rounded-card'
               }`}
               onPointerEnter={revealControls}
@@ -408,15 +408,15 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
           <>
 
             {isSharing && shareLink && (
-              <div className="mb-4 rounded-card border border-slate-200 dark:border-slate-700 bg-slate-50 dark:bg-slate-900/50 px-3 py-2.5">
+              <div className="mb-4 rounded-card border border-slate-200 dark:border-night-750 bg-slate-50 dark:bg-night-900/50 px-3 py-2.5">
                 <div className="mb-1 flex items-center justify-between gap-2">
-                  <p className="text-xs font-medium text-slate-600 dark:text-slate-300">
+                  <p className="text-xs font-medium text-slate-600 dark:text-night-300">
                     将此链接分享给观看者
                   </p>
                   {viewerCount > 0 && (
                     /* pr-3 让文字右缘与下方 44px 图标按钮的可见图标右缘对齐
                        （图标 18px 居中，左右各留 13px 内边距） */
-                    <span className="inline-flex shrink-0 items-center gap-1 pr-3 text-xs font-medium text-slate-600 dark:text-slate-300 tabular-nums">
+                    <span className="inline-flex shrink-0 items-center gap-1 pr-3 text-xs font-medium text-slate-600 dark:text-night-300 tabular-nums">
                       <Eye size={16} />
                       {viewerCount} 人观看
                     </span>
@@ -434,7 +434,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                   </a>
                   <button
                     onClick={copyShareLink}
-                    className="inline-flex min-w-11 min-h-11 shrink-0 items-center justify-center rounded-control text-slate-500 dark:text-slate-400 hover:bg-slate-200/70 dark:hover:bg-slate-700/70 hover:text-slate-700 dark:hover:text-slate-200 transition-colors"
+                    className="inline-flex min-w-11 min-h-11 shrink-0 items-center justify-center rounded-control text-slate-500 dark:text-night-400 hover:bg-slate-200/70 dark:hover:bg-night-750/70 hover:text-slate-700 dark:hover:text-night-200 transition-colors"
                     title="复制分享链接"
                     aria-label="复制分享链接"
                   >
@@ -446,7 +446,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                   </button>
                   <button
                     onClick={shareLinkToApps}
-                    className="inline-flex min-w-11 min-h-11 shrink-0 items-center justify-center rounded-control text-slate-500 dark:text-slate-400 hover:bg-slate-200/70 dark:hover:bg-slate-700/70 hover:text-slate-700 dark:hover:text-slate-200 transition-colors"
+                    className="inline-flex min-w-11 min-h-11 shrink-0 items-center justify-center rounded-control text-slate-500 dark:text-night-400 hover:bg-slate-200/70 dark:hover:bg-night-750/70 hover:text-slate-700 dark:hover:text-night-200 transition-colors"
                     title="分享链接"
                     aria-label="分享链接"
                   >
@@ -457,7 +457,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
             )}
 
             {isSharing && (
-              <div className="mb-4 relative group rounded-card overflow-hidden bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-sm">
+              <div className="mb-4 relative group rounded-card overflow-hidden bg-slate-900 border border-slate-200 dark:border-night-750 shadow-sm">
                 <video
                   ref={sharerVideoRef}
                   autoPlay
@@ -510,7 +510,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               <div className="flex items-center gap-2">
                 <button
                   onClick={changeScreenSource}
-                  className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-full border border-slate-300 px-4 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 dark:border-slate-600 dark:text-slate-300 dark:hover:bg-slate-700"
+                  className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-full border border-slate-300 px-4 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 dark:border-night-700 dark:text-night-300 dark:hover:bg-night-750"
                 >
                   <MonitorUp size={18} />
                   切换窗口
