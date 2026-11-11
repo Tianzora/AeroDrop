@@ -55,7 +55,7 @@ export class ErrorBoundary extends Component<Props, State> {
               出现了一些问题
             </h2>
             <p className="text-slate-500 dark:text-slate-400 mb-6">
-              应用遇到了意外错误，请尝试刷新页面。
+              应用遇到了意外错误，请尝试刷新页面
             </p>
 
             {process.env.NODE_ENV === 'development' && this.state.error && (

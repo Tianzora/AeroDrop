@@ -465,7 +465,7 @@ test('receiver auto-recovers after a disconnect and returns to resumable state',
   await disconnectLatest(page, '111111');
 
   await expect(page.getByText('连接中断，正在尝试恢复...')).toBeVisible();
-  await expect(page.getByText('第 1 次自动重连中，请保持此页面打开，无需重新输入口令。')).toBeVisible();
+  await expect(page.getByText('第 1 次自动重连中，请保持此页面打开，无需重新输入口令')).toBeVisible();
 
   await expect(page.getByRole('button', { name: '继续下载' })).toBeVisible();
   await expect.poll(async () => getConnectionCount(page, '111111')).toBe(2);
@@ -576,7 +576,7 @@ test('open-then-close churn exhausts the fast reconnect budget instead of loopin
   // 判定点在 services/connectionPolicy.ts 的 shouldAbandonExhaustedFastReconnect，
   // 由 Receiver 的 conn.on('close') 里 `connRef.current !== conn` 分支调用。
   // hasTurn=true 且仍在等待对端 ⇒ 文案是「请检查口令」那条，而非 committed 上限的「连接已断开」。
-  await expect(page.getByText('连接已断开，请检查口令是否正确后重试。')).toBeVisible();
+  await expect(page.getByText('连接已断开，请检查口令是否正确后重试')).toBeVisible();
   await expect(page.getByText(/正在建立点对点通道/)).toHaveCount(0);
 
   const bodyText = await getBodyText(page);
@@ -668,7 +668,7 @@ test('a connection that stays stable for 15s refreshes the reconnect budget', as
   const banner = page.getByText(/第 \d+ 次自动重连中/);
   const expectBannerAttempt = async (attempt: number) => {
     await expect(
-      page.getByText(`第 ${attempt} 次自动重连中，请保持此页面打开，无需重新输入口令。`),
+      page.getByText(`第 ${attempt} 次自动重连中，请保持此页面打开，无需重新输入口令`),
     ).toBeVisible({ timeout: 15_000 });
   };
   const waitForReconnect = async (expectedConnections: number) => {

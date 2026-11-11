@@ -1,5 +1,5 @@
-import React from 'react';
-import { Monitor, StopCircle, Play, AlertCircle, Copy, Check, ExternalLink, Eye, Loader2, RefreshCw, X, MonitorUp } from 'lucide-react';
+import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { Monitor, StopCircle, Play, Pause, AlertCircle, Copy, Check, Share2, Eye, Loader2, RefreshCw, X, MonitorUp, Maximize, Minimize, Volume2, VolumeX, PictureInPicture } from 'lucide-react';
 
 export type ScreenShareViewerConnectingStage = 'fetching_ice' | 'connecting_signaling' | 'connecting_media' | 'waiting_stream' | '';
 
@@ -58,34 +58,186 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   startScreenShare,
   stopScreenShare,
 }) => {
+  const viewerContainerRef = useRef<HTMLDivElement | null>(null);
+  const viewerElRef = useRef<HTMLVideoElement | null>(null);
+  const hideControlsTimerRef = useRef<number | null>(null);
+  const [viewerPlaying, setViewerPlaying] = useState(true);
+  const [viewerMuted, setViewerMuted] = useState(false);
+  const [viewerFullscreen, setViewerFullscreen] = useState(false);
+  const [controlsVisible, setControlsVisible] = useState(true);
+  const [pipSupported, setPipSupported] = useState(false);
+  const [viewerPip, setViewerPip] = useState(false);
+
+  const attachViewerVideo = useCallback(
+    (element: HTMLVideoElement | null) => {
+      viewerElRef.current = element;
+      viewerVideoRef(element);
+    },
+    [viewerVideoRef]
+  );
+
+  const syncViewerState = useCallback(() => {
+    const element = viewerElRef.current;
+    if (!element) return;
+    setViewerPlaying(!element.paused);
+    setViewerMuted(element.muted);
+    if (element.paused) setControlsVisible(true);
+  }, []);
+
+  useEffect(() => {
+    setPipSupported(document.pictureInPictureEnabled === true);
+  }, []);
+
+  useEffect(() => {
+    const element = viewerElRef.current;
+    if (!element) return;
+    syncViewerState();
+    const handleEnterPip = () => setViewerPip(true);
+    const handleLeavePip = () => setViewerPip(false);
+    element.addEventListener('play', syncViewerState);
+    element.addEventListener('pause', syncViewerState);
+    element.addEventListener('volumechange', syncViewerState);
+    element.addEventListener('enterpictureinpicture', handleEnterPip);
+    element.addEventListener('leavepictureinpicture', handleLeavePip);
+    return () => {
+      element.removeEventListener('play', syncViewerState);
+      element.removeEventListener('pause', syncViewerState);
+      element.removeEventListener('volumechange', syncViewerState);
+      element.removeEventListener('enterpictureinpicture', handleEnterPip);
+      element.removeEventListener('leavepictureinpicture', handleLeavePip);
+    };
+  }, [isViewing, syncViewerState]);
+
+  useEffect(() => {
+    const handleFullscreenChange = () => {
+      setViewerFullscreen(document.fullscreenElement === viewerContainerRef.current);
+    };
+    document.addEventListener('fullscreenchange', handleFullscreenChange);
+    return () => {
+      document.removeEventListener('fullscreenchange', handleFullscreenChange);
+      if (hideControlsTimerRef.current !== null) window.clearTimeout(hideControlsTimerRef.current);
+    };
+  }, []);
+
+  // 控件条只包一层渐变，鼠标停留时显形；遮挡画面时间越长越好，因为这是观看态。
+  const revealControls = useCallback(() => {
+    setControlsVisible(true);
+    if (hideControlsTimerRef.current !== null) window.clearTimeout(hideControlsTimerRef.current);
+    hideControlsTimerRef.current = window.setTimeout(() => {
+      setControlsVisible(Boolean(viewerElRef.current?.paused));
+    }, 2600);
+  }, []);
+
+  const concealControls = useCallback(() => {
+    if (hideControlsTimerRef.current !== null) window.clearTimeout(hideControlsTimerRef.current);
+    if (!viewerElRef.current?.paused) setControlsVisible(false);
+  }, []);
+
+  const toggleViewerPlay = useCallback(() => {
+    const element = viewerElRef.current;
+    if (!element) return;
+    if (element.paused) {
+      void element.play().catch(() => {});
+    } else {
+      element.pause();
+    }
+    revealControls();
+  }, [revealControls]);
+
+  const toggleViewerMute = useCallback(() => {
+    const element = viewerElRef.current;
+    if (!element) return;
+    element.muted = !element.muted;
+    setViewerMuted(element.muted);
+    revealControls();
+  }, [revealControls]);
+
+  const toggleViewerPictureInPicture = useCallback(async () => {
+    const element = viewerElRef.current;
+    if (!element || !document.pictureInPictureEnabled) return;
+    try {
+      if (document.pictureInPictureElement) {
+        await document.exitPictureInPicture();
+      } else {
+        await element.requestPictureInPicture();
+      }
+    } catch {
+      // 浏览器可能拒绝（画面尚未就绪、或正处于系统全屏）：保持原状，不改按钮状态
+    }
+    revealControls();
+  }, [revealControls]);
+
+  const toggleViewerFullscreen = useCallback(() => {
+    const container = viewerContainerRef.current;
+    const element = viewerElRef.current;
+    if (!container || !element) return;
+    if (document.fullscreenElement) {
+      if (typeof document.exitFullscreen === 'function') {
+        void document.exitFullscreen().catch(() => {});
+      }
+      return;
+    }
+    if (typeof container.requestFullscreen === 'function') {
+      void container.requestFullscreen().catch(() => {});
+      return;
+    }
+    // iOS Safari 只允许 video 元素自身进入全屏，走原生播放器界面。
+    (element as HTMLVideoElement & { webkitEnterFullscreen?: () => void }).webkitEnterFullscreen?.();
+  }, []);
+
+  // 系统分享面板（移动端、Chrome/Edge 桌面可用）；不支持时退回复制，避免按钮点了没反应。
+  const shareLinkToApps = useCallback(() => {
+    if (!shareLink) return;
+    if (typeof navigator !== 'undefined' && typeof navigator.share === 'function') {
+      navigator.share({ title: 'AeroDrop 屏幕共享', url: shareLink }).catch(() => {
+        // 用户取消、或系统拒绝分享：保持界面不变
+      });
+      return;
+    }
+    copyShareLink();
+  }, [shareLink, copyShareLink]);
+
   return (
     <div className="w-full max-w-xl mx-auto">
       <div className="bg-white dark:bg-slate-800 rounded-card shadow-card border border-slate-100 dark:border-slate-700 p-6 md:p-8 transition-colors motion-base">
-        {/* 共享中把装饰性大头部压成工具条式紧凑头部：Meet / Zoom 进入「正在共享」
-            态后都会收起介绍性大标题，把纵向空间让给画面和操作；未共享时保留
-            图标 + 标题 + 说明的引导性头部。 */}
-        {isSharing ? (
-          <div className="mb-4 flex items-center gap-2.5">
+        {/* 共享 / 观看中把装饰性大头部压成工具条式紧凑头部：Meet / Zoom 进入「正在
+            共享」态后都会收起介绍性大标题，把纵向空间让给画面和操作；未开始时保
+            留图标 + 标题的引导性头部。 */}
+        {isSharing || isViewing ? (
+          <div className="mb-6 flex items-center gap-2.5">
             <div className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-control bg-brand-100 dark:bg-brand-900/30">
-              <Monitor size={20} className="text-brand-600" />
+              {isViewing ? (
+                <Eye size={20} className="text-brand-600" />
+              ) : (
+                <Monitor size={20} className="text-brand-600" />
+              )}
             </div>
-            <h2 className="truncate text-xl font-bold text-slate-900 dark:text-white">屏幕共享</h2>
+            <h2 className="truncate text-xl font-bold text-slate-900 dark:text-white">
+              {isViewing ? '观看屏幕' : '屏幕共享'}
+            </h2>
+            {isViewing && (
+              <p className="ml-auto min-w-0 truncate text-xs text-slate-500 dark:text-slate-400">
+                实时观看对方共享的屏幕内容
+              </p>
+            )}
           </div>
         ) : (
-          <div className="text-center mb-6">
+          <div className="text-center mb-8">
             <div className="inline-flex items-center justify-center w-16 h-16 bg-brand-100 dark:bg-brand-900/30 rounded-card mb-4">
-              {isViewing || isConnecting ? (
+              {isConnecting ? (
                 <Eye size={32} className="text-brand-600" />
               ) : (
                 <Monitor size={32} className="text-brand-600" />
               )}
             </div>
-            <h2 className="text-xl font-bold text-slate-900 dark:text-white mb-2">
-              {isViewing ? '正在观看屏幕' : isConnecting ? '正在连接...' : '屏幕共享'}
+            <h2 className="text-xl font-bold text-slate-900 dark:text-white">
+              {isConnecting ? '正在连接...' : '屏幕共享'}
             </h2>
-            <p className="text-sm text-slate-500 dark:text-slate-400">
-              {isViewing || isConnecting ? '实时观看对方共享的屏幕内容' : '与其他设备实时共享您的屏幕内容'}
-            </p>
+            {!isConnecting && (
+              <p className="mt-2 text-sm text-slate-500 dark:text-slate-400">
+                与其他设备实时共享您的屏幕内容
+              </p>
+            )}
           </div>
         )}
 
@@ -99,18 +251,12 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
         {isConnecting && (
           <div className="mb-6 flex flex-col items-center justify-center py-12">
             <Loader2 size={32} className="text-brand-600 animate-spin mb-4" />
-            <p className="text-sm text-slate-600 dark:text-slate-300 font-medium mb-1">
+            <p className="text-sm text-slate-600 dark:text-slate-300 font-medium mb-4">
               {viewerConnectingStage === 'fetching_ice' && '正在获取网络配置...'}
               {viewerConnectingStage === 'connecting_signaling' && '正在连接信号服务器...'}
               {viewerConnectingStage === 'connecting_media' && '正在建立媒体通道...'}
               {viewerConnectingStage === 'waiting_stream' && '正在等待屏幕画面...'}
               {!viewerConnectingStage && '正在连接到屏幕共享...'}
-            </p>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mb-4">
-              {viewerConnectingStage === 'fetching_ice' && '获取 STUN/TURN 服务器信息'}
-              {viewerConnectingStage === 'connecting_signaling' && '连接 PeerJS 信令服务'}
-              {viewerConnectingStage === 'connecting_media' && '通过 WebRTC 建立音视频连接'}
-              {viewerConnectingStage === 'waiting_stream' && '已连接，等待对方屏幕画面传输'}
             </p>
             <button
               onClick={cancelConnecting}
@@ -149,15 +295,88 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
 
         {isViewing && (
           <>
-            <div className="mb-4 relative overflow-hidden rounded-card">
-              <div className="bg-slate-900 border border-slate-200 dark:border-slate-700 rounded-card overflow-hidden">
-                <video
-                  ref={viewerVideoRef}
-                  autoPlay
-                  playsInline
-                  controls
-                  className="w-full aspect-video object-contain"
-                />
+            <div
+              ref={viewerContainerRef}
+              className={`mb-4 relative group overflow-hidden bg-slate-900 border border-slate-200 dark:border-slate-700 shadow-sm ${
+                viewerFullscreen ? 'flex h-screen items-center justify-center rounded-none' : 'rounded-card'
+              }`}
+              onPointerEnter={revealControls}
+              onPointerMove={revealControls}
+              onPointerLeave={concealControls}
+            >
+              <video
+                ref={attachViewerVideo}
+                autoPlay
+                playsInline
+                onClick={toggleViewerPlay}
+                className={`block w-full object-contain ${viewerFullscreen ? 'max-h-full' : 'aspect-video'}`}
+              />
+
+              {/* 观看状态与画质叠进画面，与共享者一侧的 LIVE 徽标同构，
+                  不再在播放器下方单独占一行。 */}
+              <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/60 via-black/25 to-transparent p-2.5">
+                <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-sm">
+                  <span className="relative flex h-2 w-2">
+                    <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                    <span className="relative inline-flex h-2 w-2 rounded-full bg-green-400"></span>
+                  </span>
+                  正在观看
+                </span>
+                <span className="flex flex-wrap items-center justify-end gap-1.5">
+                  <span className="inline-flex items-center gap-1 rounded-full bg-black/55 px-2 py-1 text-xs font-medium text-white backdrop-blur-sm">
+                    画质 {qualityLabels[remoteQuality]}
+                  </span>
+                </span>
+              </div>
+
+              {/* 自绘控件条：原生 controls 与页面气质不符，直播画面又不需要进度条，
+                  所以只留播放/静音/画中画/全屏。指针活动时显形，暂停时常驻。 */}
+              <div
+                className={`pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-gradient-to-t from-black/70 via-black/30 to-transparent p-2.5 transition-opacity duration-200 ${
+                  controlsVisible ? 'opacity-100' : 'opacity-0'
+                }`}
+              >
+                <button
+                  type="button"
+                  onClick={toggleViewerPlay}
+                  aria-label={viewerPlaying ? '暂停' : '播放'}
+                  title={viewerPlaying ? '暂停' : '播放'}
+                  className="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-colors hover:bg-black/65"
+                >
+                  {viewerPlaying ? <Pause size={18} /> : <Play size={18} />}
+                </button>
+                <button
+                  type="button"
+                  onClick={toggleViewerMute}
+                  aria-label={viewerMuted ? '取消静音' : '静音'}
+                  title={viewerMuted ? '取消静音' : '静音'}
+                  className="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-colors hover:bg-black/65"
+                >
+                  {viewerMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
+                </button>
+                <span className="flex-1" />
+                {pipSupported && (
+                  <button
+                    type="button"
+                    onClick={() => {
+                      void toggleViewerPictureInPicture();
+                    }}
+                    aria-label={viewerPip ? '退出画中画' : '画中画'}
+                    title={viewerPip ? '退出画中画' : '画中画'}
+                    className="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-colors hover:bg-black/65"
+                  >
+                    <PictureInPicture size={18} />
+                  </button>
+                )}
+                <button
+                  type="button"
+                  onClick={toggleViewerFullscreen}
+                  aria-label={viewerFullscreen ? '退出全屏' : '全屏'}
+                  title={viewerFullscreen ? '退出全屏' : '全屏'}
+                  className="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-colors hover:bg-black/65"
+                >
+                  {viewerFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
+                </button>
               </div>
 
               {needsPlayClick && (
@@ -173,23 +392,14 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               )}
             </div>
 
-            <div className="flex justify-center">
+            <div className="flex items-center gap-2">
               <button
                 onClick={stopViewing}
-                className="flex items-center justify-center gap-3 w-full max-w-xs bg-red-600 hover:bg-red-700 text-white font-bold py-3.5 px-6 rounded-full shadow-card transition-ui motion-fast active:scale-[0.99]"
+                className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full bg-red-600 px-5 text-sm font-bold text-white shadow-card transition-ui motion-fast hover:bg-red-700 active:scale-[0.99]"
               >
-                <StopCircle size={20} />
+                <StopCircle size={18} />
                 停止观看
               </button>
-            </div>
-            <div className="mt-6 flex items-center justify-center gap-2">
-              <span className="relative flex h-3 w-3">
-                <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                <span className="relative inline-flex rounded-full h-3 w-3 bg-green-500"></span>
-              </span>
-              <span className="text-sm font-medium text-green-600 dark:text-green-400">
-                正在观看屏幕共享 | 画质: {qualityLabels[remoteQuality]}
-              </span>
             </div>
           </>
         )}
@@ -204,7 +414,9 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                     将此链接分享给观看者
                   </p>
                   {viewerCount > 0 && (
-                    <span className="inline-flex shrink-0 items-center gap-1 text-xs font-medium text-slate-600 dark:text-slate-300 tabular-nums">
+                    /* pr-3 让文字右缘与下方 44px 图标按钮的可见图标右缘对齐
+                       （图标 18px 居中，左右各留 13px 内边距） */
+                    <span className="inline-flex shrink-0 items-center gap-1 pr-3 text-xs font-medium text-slate-600 dark:text-slate-300 tabular-nums">
                       <Eye size={16} />
                       {viewerCount} 人观看
                     </span>
@@ -232,16 +444,14 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                       <Copy size={18} />
                     )}
                   </button>
-                  <a
-                    href={shareLink}
-                    target="_blank"
-                    rel="noopener noreferrer"
+                  <button
+                    onClick={shareLinkToApps}
                     className="inline-flex min-w-11 min-h-11 shrink-0 items-center justify-center rounded-control text-slate-500 dark:text-slate-400 hover:bg-slate-200/70 dark:hover:bg-slate-700/70 hover:text-slate-700 dark:hover:text-slate-200 transition-colors"
-                    title="在新窗口打开"
-                    aria-label="在新窗口打开"
+                    title="分享链接"
+                    aria-label="分享链接"
                   >
-                    <ExternalLink size={18} />
-                  </a>
+                    <Share2 size={18} />
+                  </button>
                 </div>
               </div>
             )}
@@ -285,7 +495,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
             )}
 
             {!isSharing ? (
-              <div className="flex justify-center">
+              <div className="mt-2 flex justify-center">
                 <button
                   onClick={startScreenShare}
                   className="flex items-center justify-center gap-3 w-full max-w-xs bg-brand-600 hover:bg-brand-700 text-white font-bold py-3.5 px-6 rounded-full shadow-card transition-ui motion-fast active:scale-[0.99]"
@@ -315,13 +525,6 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               </div>
             )}
 
-            {!isSharing && (
-              <div className="mt-6 pt-6 border-t border-slate-100 dark:border-slate-800">
-                <p className="text-xs text-slate-500 dark:text-slate-400 text-center">
-                  点击开始后，浏览器将弹出选择窗口，您可以选择共享整个屏幕、某个应用窗口或浏览器标签页。
-                </p>
-              </div>
-            )}
           </>
         )}
       </div>

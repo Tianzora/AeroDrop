@@ -102,7 +102,7 @@ export const createReceiveRecoveryCoordinator = (
     options.resetFileBuffersForRepair(fileIndex);
     const hasherReady = await options.resetHasherForRepair();
     if (!hasherReady) {
-      options.failTransferPersistence('文件校验初始化失败，请重试传输。');
+      options.failTransferPersistence('文件校验初始化失败，请重试传输');
       return false;
     }
 
@@ -122,11 +122,11 @@ export const createReceiveRecoveryCoordinator = (
         receiveWindowBytes: TRANSFER_CONFIG.RECEIVE_WINDOW_BYTES,
       });
       if (!sent) {
-        options.failTransferPersistence('连接已断开，无法自动修复，请重试。');
+        options.failTransferPersistence('连接已断开，无法自动修复，请重试');
         return false;
       }
     } catch {
-      options.failTransferPersistence('自动修复请求发送失败，请重试。');
+      options.failTransferPersistence('自动修复请求发送失败，请重试');
       return false;
     }
 
@@ -136,7 +136,7 @@ export const createReceiveRecoveryCoordinator = (
   const resumeTransfer = async (): Promise<void> => {
     const conn = options.getConnection();
     if (!conn || !conn.open) {
-      options.setError('连接已断开，请重新连接发送方。');
+      options.setError('连接已断开，请重新连接发送方');
       options.setTransferState(TransferState.ERROR);
       if (options.notify) {
         options.notify('连接已断开，请重试', 'error');
@@ -178,7 +178,7 @@ export const createReceiveRecoveryCoordinator = (
     if (recovery.status === 'unavailable' && recovery.reason === 'flush-failed') {
       // 落盘失败时不能静默 return：此时 transferActive 已置 true，界面会一直停在“传输中”。
       options.setTransferState(TransferState.ERROR);
-      options.failTransferPersistence('文件落盘失败，无法续传，请重试传输。');
+      options.failTransferPersistence('文件落盘失败，无法续传，请重试传输');
       return;
     }
 
@@ -187,7 +187,7 @@ export const createReceiveRecoveryCoordinator = (
       // 刷新后拿到检查点进度，但原 FileSystemHandle 打不开：等 UI 让用户重新选择保存位置后
       // 再次调用 resumeTransfer。此处不能发 byteOffset 0，否则会用 0 覆盖已落盘的数据。
       if (options.notify) {
-        options.notify('需要重新选择保存位置才能继续接收该文件。', 'info');
+        options.notify('需要重新选择保存位置才能继续接收该文件', 'info');
       }
       return;
     }
@@ -196,7 +196,7 @@ export const createReceiveRecoveryCoordinator = (
     canResumeCurrentFile = recovery.status === 'resumed' && byteOffset > 0;
 
     if (!canResumeCurrentFile && receivedSize > 0 && options.notify) {
-      options.notify('当前文件的流式落盘状态无法直接续写，本次将从该文件开头重新下载。', 'info');
+      options.notify('当前文件的流式落盘状态无法直接续写，本次将从该文件开头重新下载', 'info');
     }
 
     conn.send(buildResumeRequest({

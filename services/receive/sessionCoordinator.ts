@@ -116,7 +116,7 @@ export const createReceiveSessionCoordinator = (
           await options.awaitWriteQueue();
           await options.deleteIndexedDbChunksForFile(fileIndex);
         } catch {
-          options.failTransferPersistence('无法初始化 iOS 大文件缓存，请重试。');
+          options.failTransferPersistence('无法初始化 iOS 大文件缓存，请重试');
           return;
         }
       }
@@ -137,7 +137,7 @@ export const createReceiveSessionCoordinator = (
 
     const hasherReady = await options.resetFileHasher();
     if (!hasherReady) {
-      options.failTransferPersistence('文件校验初始化失败，请重试。');
+      options.failTransferPersistence('文件校验初始化失败，请重试');
       return;
     }
 
@@ -182,7 +182,7 @@ export const createReceiveSessionCoordinator = (
       try {
         actualHash = await options.finalizeHasher();
       } catch {
-        options.failTransferPersistence('文件校验计算失败，请重试。');
+        options.failTransferPersistence('文件校验计算失败，请重试');
         return;
       }
 
@@ -227,14 +227,14 @@ export const createReceiveSessionCoordinator = (
     const expectedFiles = options.getExpectedFiles();
     const savedFiles = options.getSavedFiles();
     if (expectedFiles > 0 && savedFiles < expectedFiles) {
-      options.failTransferPersistence(`文件保存不完整（${savedFiles}/${expectedFiles}），请重试。`);
+      options.failTransferPersistence(`文件保存不完整（${savedFiles}/${expectedFiles}），请重试`);
       return;
     }
 
     if (options.shouldStageFilesForArchive()) {
       const exported = await options.finalizeArchiveDownload();
       if (!exported) {
-        options.failTransferPersistence('多文件导出失败，请重试。');
+        options.failTransferPersistence('多文件导出失败，请重试');
         return;
       }
     }

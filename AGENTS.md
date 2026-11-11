@@ -61,7 +61,7 @@ python D:/ovo/Documents/workspace/scripts/agents-md/render.py --root D:/ovo/Docu
 - 运行时：Node 22.12.0（`.nvmrc`）、包管理器 npm@10.8.2
 - 脚本入口：`build` `deploy` `deploy:worker` `dev` `dev:worker` `preview` `preview:e2e` `test:all` `test:components` `test:e2e` `test:e2e:product-transfer` `test:e2e:product-transfer:raw` `test:e2e:raw` `test:e2e:rtc` `test:e2e:rtc:raw` `test:receive` `test:scripts` `test:send` `test:services` `typecheck`
 - 锁文件：`package-lock.json`
-- 顶层目录：`components/` `constants/` `docs/` `e2e/` `public/` `scripts/` `services/` `skills/` `src/` `types/`
+- 顶层目录：`components/` `constants/` `docs/` `e2e/` `miniflare-email-store/` `public/` `scripts/` `services/` `skills/` `src/` `types/`
 <!-- agents:auto:end -->
 
 ## 深入文档

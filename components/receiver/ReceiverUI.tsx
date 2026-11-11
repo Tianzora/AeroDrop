@@ -195,7 +195,9 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
         <div className="flex flex-col items-center py-10 animate-pop-in">
           <Loader2 size={32} className="animate-spin text-brand-500 mb-4" />
           <p className="text-slate-600 dark:text-slate-300 font-medium">{waitingStatus.title}</p>
-          <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{waitingStatus.detail}</p>
+          {waitingStatus.detail && (
+            <p className="text-xs text-slate-500 dark:text-slate-400 mt-1">{waitingStatus.detail}</p>
+          )}
           <button onClick={onReset} className="mt-8 px-6 py-2 bg-white dark:bg-slate-700 border border-slate-200 dark:border-slate-600 text-slate-600 dark:text-slate-300 rounded-full text-sm hover:bg-slate-50 dark:hover:bg-slate-600 hover:text-red-500 dark:hover:text-red-400 transition-colors shadow-sm active:scale-95">
             {waitingStatus.cancelLabel}
           </button>

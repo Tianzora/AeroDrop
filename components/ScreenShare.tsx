@@ -18,6 +18,8 @@ import { CONNECTION_TIMINGS } from '../constants/transfer';
 interface ScreenShareProps {
   onNotification: (message: string, type: 'success' | 'info' | 'error') => void;
   initialViewId?: string;
+  /** 共享/观看/建连进行中时为 true：页面滑动据此禁用，避免误触切换页面中断画面 */
+  onBusyChange?: (busy: boolean) => void;
 }
 
 type NetworkRouteClass = 'lan' | 'wan' | 'relay' | 'unknown';
@@ -55,7 +57,7 @@ export const describeScreenCaptureFailure = (error: unknown): ScreenCaptureFailu
       name,
       message,
       isCancel: false,
-      description: '当前环境不支持屏幕录制（无桌面会话、无头浏览器或嵌入式预览框）。',
+      description: '当前环境不支持屏幕录制（无桌面会话、无头浏览器或嵌入式预览框）',
     };
   }
 
@@ -64,7 +66,7 @@ export const describeScreenCaptureFailure = (error: unknown): ScreenCaptureFailu
       name,
       message,
       isCancel: false,
-      description: '系统拒绝了屏幕录制（可能被安全软件或其他应用占用），请重试。',
+      description: '系统拒绝了屏幕录制（可能被安全软件或其他应用占用），请重试',
     };
   }
 
@@ -81,7 +83,7 @@ export const describeScreenCaptureFailure = (error: unknown): ScreenCaptureFailu
         message,
         isCancel: false,
         description:
-          '浏览器拒绝了屏幕录制：当前页面嵌在预览框/iframe 中，浏览器默认禁止在这里录制屏幕，请在新标签页直接打开后重试。',
+          '浏览器拒绝了屏幕录制：当前页面嵌在预览框/iframe 中，浏览器默认禁止在这里录制屏幕，请在新标签页直接打开后重试',
       };
     }
     if (!hasUserActivation()) {
@@ -90,14 +92,14 @@ export const describeScreenCaptureFailure = (error: unknown): ScreenCaptureFailu
         message,
         isCancel: false,
         description:
-          '浏览器没有把这次点击识别为用户手势（可能是脚本或自动化触发），请在页面上手动点击「开始共享屏幕」后重试。',
+          '浏览器没有把这次点击识别为用户手势（可能是脚本或自动化触发），请在页面上手动点击「开始共享屏幕」后重试',
       };
     }
     return {
       name,
       message,
       isCancel: false,
-      description: `浏览器拒绝了屏幕录制：${message || name}。请检查浏览器的屏幕录制权限、企业策略，或在独立标签页中重试。`,
+      description: `浏览器拒绝了屏幕录制：${message || name}，请检查浏览器的屏幕录制权限、企业策略，或在独立标签页中重试`,
     };
   }
 
@@ -109,10 +111,16 @@ export const describeScreenCaptureFailure = (error: unknown): ScreenCaptureFailu
   };
 };
 
-export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initialViewId }) => {
+export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initialViewId, onBusyChange }) => {
   const [isSharing, setIsSharing] = useState(false);
   const [isViewing, setIsViewing] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
+
+  // 共享/观看/建连中切走页面会直接结束画面：这几种状态都禁用侧滑切换。
+  const isBusyForNavigation = isSharing || isViewing || isConnecting;
+  useEffect(() => {
+    onBusyChange?.(isBusyForNavigation);
+  }, [isBusyForNavigation, onBusyChange]);
   const [viewerConnectingStage, setViewerConnectingStage] = useState<ScreenShareViewerConnectingStage>('');
   const [error, setError] = useState<string | null>(null);
   const [peerId, setPeerId] = useState<string | null>(null);
@@ -1062,7 +1070,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       if (!shouldRebuild) return;
 
       if (sharerPeerRebuildsRef.current >= SCREEN_SHARE_MAX_PEER_REBUILDS) {
-        onNotification('信令连接持续失败，请刷新页面后重新开始共享。', 'error');
+        onNotification('信令连接持续失败，请刷新页面后重新开始共享', 'error');
         return;
       }
       sharerPeerRebuildsRef.current += 1;

@@ -141,6 +141,8 @@ interface ReceiverProps {
   initialCode?: string;
   onNotification?: (msg: string, type: 'success' | 'info' | 'error') => void;
   deviceName: string;
+  /** 连接或接收进行中时为 true：页面滑动据此禁用，避免误触切换页面打断传输入口 */
+  onBusyChange?: (busy: boolean) => void;
 }
 
 type RouteAttemptRecord = {
@@ -157,7 +159,7 @@ type MetadataChunkBuffer = {
   chunks: Map<number, string>;
 };
 
-export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification, deviceName }) => {
+export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification, deviceName, onBusyChange }) => {
   const STREAMSAVER_PATH_PREFIX = '/__aerodrop_streamsaver__/';
   const {
     RECEIVER_INITIAL_CONNECT_MS: INITIAL_TIMEOUT_MS,
@@ -226,6 +228,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   const [connectingStage, setConnectingStage] = useState<ReceiverConnectingStage>('');
   const [reconnectAttempt, setReconnectAttempt] = useState(0);
   const [showFileList, setShowFileList] = useState(false);
+
+  // 连上发送方之后切走页面会中断接收：连接/接收阶段都算「进行中」。
+  const isBusyForNavigation = state !== TransferState.IDLE;
+  useEffect(() => {
+    onBusyChange?.(isBusyForNavigation);
+  }, [isBusyForNavigation, onBusyChange]);
 
   const peerRef = useRef<Peer | null>(null);
   const connRef = useRef<DataConnection | null>(null);
@@ -901,7 +909,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       indexedDbBufferedFileIndexRef.current = fileIndex;
     } catch (err) {
       console.error('IndexedDB write error:', err);
-      failTransferPersistence('iOS 大文件缓冲写入失败，请释放存储空间后重试。');
+      failTransferPersistence('iOS 大文件缓冲写入失败，请释放存储空间后重试');
     }
   };
 
@@ -975,7 +983,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     }
 
     isStreamingRef.current = receiveStreamingWriter.isStreaming();
-    failTransferPersistence("写入文件失败，磁盘可能已满或权限不足。");
+    failTransferPersistence("写入文件失败，磁盘可能已满或权限不足");
   };
 
   const abortStreams = async () => {
@@ -1355,7 +1363,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       window.clearInterval(timer);
       const stalledForMs = now - lastDurableProgressAtRef.current;
       if (stalledReconnectAttemptsRef.current >= TRANSFER_CONFIG.MAX_STALL_RECONNECTS) {
-        const message = '连接持续无落盘进度，已停止自动重连。请切换网络后继续传输。';
+        const message = '连接持续无落盘进度，已停止自动重连，请切换网络后继续传输';
         markSessionEvent(connectTelemetryRef.current, 'transfer_stall_retry_exhausted', {
           stalledForMs,
           persistedOverallBytes: lastDurableProgressBytesRef.current,
@@ -1415,13 +1423,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   const applyMetadataPayload = (meta: FileMetadata, conn: DataConnection) => {
       if (!meta || !Array.isArray(meta.files)) {
-        setErrorMsg('收到的文件元数据无效，请重试。');
+        setErrorMsg('收到的文件元数据无效，请重试');
         setState(TransferState.ERROR);
         return;
       }
       const remoteProtocolVersion = typeof meta.protocolVersion === 'number' ? meta.protocolVersion : 1;
       if (remoteProtocolVersion !== P2P_PROTOCOL_VERSION) {
-          setErrorMsg(`发送方协议版本(${remoteProtocolVersion})与当前版本(${P2P_PROTOCOL_VERSION})不兼容，请升级两端后重试。`);
+          setErrorMsg(`发送方协议版本(${remoteProtocolVersion})与当前版本(${P2P_PROTOCOL_VERSION})不兼容，请升级两端后重试`);
           setState(TransferState.ERROR);
           conn.close();
           return;
@@ -1449,7 +1457,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       } catch (error) {
         // 文件路径不合法（.. / 绝对路径 / 控制字符）说明发送端不可信，不能静默停在已连接态。
         logDebug('warn', 'rejected invalid metadata paths:', error);
-        setErrorMsg('收到的文件元数据无效（文件名或路径不合法），请让对方重新发起传输。');
+        setErrorMsg('收到的文件元数据无效（文件名或路径不合法），请让对方重新发起传输');
         setState(TransferState.ERROR);
         conn.close();
         return;
@@ -1487,7 +1495,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
       if (isResumable && onNotification) onNotification("发现上次未完成的传输", 'info');
       if ((isIOS || isSafari) && meta.totalSize >= IOS_MEMORY_WARN_BYTES && onNotification) {
-          onNotification('检测到超大文件：将优先尝试使用 IndexedDB 分块缓冲，减少内存占用。', 'info');
+          onNotification('检测到超大文件：将优先尝试使用 IndexedDB 分块缓冲，减少内存占用', 'info');
       }
       if (shouldAutoResume) {
           if (onNotification) onNotification("连接已恢复，正在继续下载...", 'info');
@@ -1503,8 +1511,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     if (result.status === 'invalid') {
       setErrorMsg(
         result.reason === 'malformed'
-          ? '文件元数据分片格式不正确，请重试。'
-          : '文件元数据分片不完整，请重试。'
+          ? '文件元数据分片格式不正确，请重试'
+          : '文件元数据分片不完整，请重试'
       );
       setState(TransferState.ERROR);
       return;
@@ -1515,7 +1523,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     try {
       parsed = JSON.parse(result.json) as FileMetadata;
     } catch {
-      setErrorMsg('文件元数据解析失败，请重试。');
+      setErrorMsg('文件元数据解析失败，请重试');
       setState(TransferState.ERROR);
       return;
     }
@@ -1585,7 +1593,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
             reason: verdict,
           });
           if (onNotification) {
-            onNotification('已落盘数据校验不一致，将从头重新接收该文件。', 'info');
+            onNotification('已落盘数据校验不一致，将从头重新接收该文件', 'info');
           }
           // 丢掉本地保留的写入状态：否则下一次 FILE_START 会被当成「同一文件续写」，
           // 沿用旧的 committedBytes，坏掉的旧前缀永远不会被覆盖。
@@ -1631,7 +1639,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         });
       } catch (error) {
         logDebug('warn', 'rejected invalid file start:', error);
-        setErrorMsg('收到的文件名不合法，传输已中止。请让对方重新发起传输。');
+        setErrorMsg('收到的文件名不合法，传输已中止，请让对方重新发起传输');
         setState(TransferState.ERROR);
         conn.close();
       }
@@ -1647,13 +1655,13 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     }
     else if (msg.type === 'REJECT_TRANSFER') {
        markConnectionFailure(connectTelemetryRef.current, 'rejected_by_sender', { reason: msg.payload?.reason });
-       setErrorMsg(msg.payload?.reason || "发送方拒绝了请求。");
+       setErrorMsg(msg.payload?.reason || "发送方拒绝了请求");
        setState(TransferState.ERROR);
        markIntentionalConnectionClose(conn);
        conn.close();
     }
     else if (msg.type === 'TRANSFER_CANCELLED') {
-       setErrorMsg("发送方已停止分享。");
+       setErrorMsg("发送方已停止分享");
        setState(TransferState.ERROR);
        markIntentionalConnectionClose(conn);
        conn.close();
@@ -1829,7 +1837,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
                 try {
                   getFileHasher().update(new Uint8Array(chunkData));
                 } catch {
-                  failTransferPersistence("文件校验计算失败，请重试传输。");
+                  failTransferPersistence("文件校验计算失败，请重试传输");
                   return;
                 }
                hashedBytesRef.current += byteLength;
@@ -2488,7 +2496,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     if (!resolvedPeerId) {
       if (receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) {
         // 输错口令不换页：输入行播叉 + 抖动，行内提示，停在本页等重输
-        setErrorMsg('口令不存在或已过期，请确认后重试。');
+        setErrorMsg('口令不存在或已过期，请确认后重试');
         setCodeStatus('error');
       }
       return;
@@ -2619,9 +2627,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       onNotification
     ) {
       if (connectionPlan.initialPolicy === 'relay') {
-        onNotification('检测到移动或高延迟网络，已优先尝试中继连接以提升成功率。', 'info');
+        onNotification('检测到移动或高延迟网络，已优先尝试中继连接以提升成功率', 'info');
       } else {
-        onNotification('检测到当前网络可能受限，将优先尝试直连，并在需要时快速回退到中继。', 'info');
+        onNotification('检测到当前网络可能受限，将优先尝试直连，并在需要时快速回退到中继', 'info');
       }
     } else if (!iceConfig.hasTurn && onNotification) {
       onNotification(NO_TURN_WARNING_MESSAGE, 'info');
@@ -2709,7 +2717,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
         markSessionEvent(connectTelemetryRef.current, 'peer_open', { iceTransportPolicy: policy });
         const senderPeerId = resolvedSenderPeerIdRef.current;
         if (!senderPeerId) {
-          setErrorMsg('口令不存在或已过期，请确认后重试。');
+          setErrorMsg('口令不存在或已过期，请确认后重试');
           setState(TransferState.ERROR);
           return;
         }
@@ -2754,7 +2762,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
               startConnectionAttempt(connectTelemetryRef.current, 'peer_unavailable_retry');
               const senderPeerId = resolvedSenderPeerIdRef.current;
         if (!senderPeerId) {
-          setErrorMsg('口令不存在或已过期，请确认后重试。');
+          setErrorMsg('口令不存在或已过期，请确认后重试');
           setState(TransferState.ERROR);
           return;
         }
@@ -2864,7 +2872,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
     const initialConn = connRef.current;
     if (!initialConn || !initialConn.open) {
-      setErrorMsg("连接已断开，请重新连接发送方。");
+      setErrorMsg("连接已断开，请重新连接发送方");
       setState(TransferState.ERROR);
       if (onNotification) onNotification("连接已断开，请重试", 'error');
       return;
@@ -2883,7 +2891,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
     const abortAcceptedTransfer = () => {
       isTransferActiveRef.current = false;
-      setErrorMsg("连接已断开，请重新连接发送方。");
+      setErrorMsg("连接已断开，请重新连接发送方");
       setState(TransferState.ERROR);
       if (onNotification) onNotification("连接已断开，请重试", 'error');
     };
@@ -2900,7 +2908,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       const directDownloadPolicy = resolveReceiveDirectDownloadPolicy();
       preferBrowserDownloadRef.current = directDownloadPolicy.useDirectDownload;
       if (directDownloadPolicy.fallbackReason === 'too-large' && onNotification) {
-        onNotification('文件较大，请选择保存位置后流式写入（不占用内存）。', 'info');
+        onNotification('文件较大，请选择保存位置后流式写入（不占用内存）', 'info');
       }
       const multiFileResolution = resolveMultiFileSaveMode({
         fileCount,
@@ -2922,7 +2930,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           directorySaveSessionRef.current.attachRootDirectory(rememberedHandle);
           multiFileSaveModeRef.current = 'directory-direct';
           if (onNotification) {
-            onNotification('继续使用当前会话已授权的保存目录。', 'info');
+            onNotification('继续使用当前会话已授权的保存目录', 'info');
           }
         } else {
           try {
@@ -2936,14 +2944,14 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
             directorySaveSessionRef.current.attachRootDirectory(directoryHandle);
             multiFileSaveModeRef.current = 'directory-direct';
             if (onNotification) {
-              onNotification('已选择保存目录，将按原始目录结构直接写入。', 'success');
+              onNotification('已选择保存目录，将按原始目录结构直接写入', 'success');
             }
           } catch {
             multiFileSaveModeRef.current = multiFileResolution.supportsArchiveExport
               ? 'archive-export'
               : 'per-file-save-queue';
             if (onNotification) {
-              onNotification('未授予目录保存权限，将回退到浏览器导出模式。', 'info');
+              onNotification('未授予目录保存权限，将回退到浏览器导出模式', 'info');
             }
           }
 
@@ -2956,7 +2964,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
       if (directDownloadPolicy.useDirectDownload) {
         if (onNotification) {
-          onNotification('正在下载到浏览器默认下载目录，无需选择保存位置。', 'info');
+          onNotification('正在下载到浏览器默认下载目录，无需选择保存位置', 'info');
         }
       } else if (
         !isIOS &&
@@ -2974,12 +2982,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
             startIn: 'downloads',
           });
           if (onNotification) {
-            onNotification("已启用原生流式写入模式。", 'info');
+            onNotification("已启用原生流式写入模式", 'info');
           }
         } catch {
           nativeFileHandleRef.current = null;
           if (onNotification) {
-            onNotification("未授予本地保存权限，将回退到备用保存模式。", 'info');
+            onNotification("未授予本地保存权限，将回退到备用保存模式", 'info');
           }
         }
 
@@ -2992,9 +3000,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           if (onNotification) onNotification("iOS 模式：文件将在传输完成后导出保存", 'info');
       } else if (onNotification) {
           if ((metadataRef.current?.files?.length ?? 0) > 1 && multiFileSaveModeRef.current === 'archive-export') {
-            onNotification("当前浏览器将先稳定接收，再自动打包导出。", 'info');
+            onNotification("当前浏览器将先稳定接收，再自动打包导出", 'info');
           } else {
-            onNotification("当前将优先尝试流式写入备用模式；若不可用则回退到浏览器保存。", 'info');
+            onNotification("当前将优先尝试流式写入备用模式；若不可用则回退到浏览器保存", 'info');
           }
       }
 

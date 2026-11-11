@@ -158,7 +158,7 @@ const ensurePreparedDownloadUi = (doc: Document): PreparedDownloadUi => {
 
   const desc = doc.createElement('p');
   desc.style.cssText = 'margin: 0 0 16px; font-size: 13px; color: #64748b;';
-  desc.textContent = '请逐个点击保存。下载完成后，此面板会自动清空。';
+  desc.textContent = '请逐个点击保存，下载完成后，此面板会自动清空';
 
   const list = doc.createElement('div');
   list.id = 'ios-download-list';
@@ -324,7 +324,7 @@ export const createReceivePersistenceAdapter = (
       const fileIndex = options.getCurrentFileIndex();
       const blobs = await options.readIndexedDbBlobsForFile(fileIndex);
       if (blobs.length === 0 && options.getCurrentFileSize() > 0) {
-        options.failTransferPersistence('iOS 缓冲文件为空，请重试传输。');
+        options.failTransferPersistence('iOS 缓冲文件为空，请重试传输');
         return null;
       }
 
@@ -377,7 +377,7 @@ export const createReceivePersistenceAdapter = (
       triggerBrowserDownload(doc, win, urlApi, current.blob, current.finalName, options.isIOS, options.isSafari);
     } catch (error) {
       console.error('Save failed:', error);
-      options.failTransferPersistence('浏览器保存失败，请检查下载权限后重试。');
+      options.failTransferPersistence('浏览器保存失败，请检查下载权限后重试');
       return false;
     }
 
@@ -413,7 +413,7 @@ export const createReceivePersistenceAdapter = (
       });
     } catch (error) {
       console.error('Stage for archive failed:', error);
-      options.failTransferPersistence('文件暂存失败，请重试传输。');
+      options.failTransferPersistence('文件暂存失败，请重试传输');
       return false;
     }
 

@@ -126,12 +126,9 @@ export const PWAInstallPrompt: React.FC = () => {
           </div>
 
           <div className="flex-1">
-            <h3 className="font-bold text-slate-900 dark:text-white mb-1">
+            <h3 className="font-bold text-slate-900 dark:text-white mb-3">
               安装 AeroDrop
             </h3>
-            <p className="text-xs text-slate-500 dark:text-slate-400 mb-3 leading-relaxed">
-              像原生应用一样使用，支持离线访问和全屏体验。
-            </p>
 
             {isIOS ? (
               <div className="bg-slate-50 dark:bg-slate-900/50 rounded-control p-3 text-xs text-slate-600 dark:text-slate-300 border border-slate-100 dark:border-slate-700/50">

@@ -69,7 +69,7 @@ export const createReceivePersistenceOrchestrator = (
       if (options.isStreaming() && options.finalizeStreamingWriter) {
         const finalized = await options.finalizeStreamingWriter();
         if (!finalized) {
-          options.failTransferPersistence('文件落盘失败，请重试。');
+          options.failTransferPersistence('文件落盘失败，请重试');
           return;
         }
       } else {
@@ -82,7 +82,7 @@ export const createReceivePersistenceOrchestrator = (
           if (options.isStreaming()) {
             const closeOk = await options.closeStreams();
             if (!closeOk) {
-              options.failTransferPersistence('文件落盘失败，请重试。');
+              options.failTransferPersistence('文件落盘失败，请重试');
               return;
             }
           }

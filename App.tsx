@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Sender } from './components/Sender';
 import { Receiver } from './components/Receiver';
 import { ErrorBoundary } from './components/ErrorBoundary';
@@ -16,6 +16,7 @@ import {
 import { shouldEnqueueNotification } from './services/notificationPolicy';
 import { appendNetworkProfileQuery, getBrowserNetworkProfile } from './services/networkProfile';
 import { writeScreenShareViewSession } from './services/screenShareViewerSession';
+import { resolveSwipeTarget, SwipeTracker } from './services/swipeNavigation';
 import { logDebug } from './services/diagnostics';
 
 type IdleCapableWindow = Window & {
@@ -53,6 +54,18 @@ interface NetworkCheckResponse {
 const RISK_BANNER_DISMISS_UNTIL_KEY = 'aerodrop-risk-banner-dismiss-until';
 const NOTIFICATION_DEDUPE_WINDOW_MS = 1500;
 
+// 命中这些元素时不接管手势：按钮/输入/链接自己要用触摸，滚动区与视频控件也一样。
+const SWIPE_IGNORE_SELECTOR = [
+  'input',
+  'textarea',
+  'select',
+  'button',
+  'a[href]',
+  '[contenteditable="true"]',
+  '[role="slider"]',
+  '[data-swipe-ignore]',
+].join(',');
+
 const App: React.FC = () => {
   const [initialRoute] = useState<InitialRouteState>(() => getInitialRouteState());
   const [mode, setMode] = useState<Mode>(initialRoute.mode);
@@ -66,6 +79,69 @@ const App: React.FC = () => {
   const swUpdateReloadTimerRef = useRef<number | null>(null);
   const initialCode = initialRoute.code;
   const initialViewId = initialRoute.viewId;
+  // 每个页面自己报告「是否正忙」：传输、接收、共享进行中不允许侧滑切走。
+  const [busyByMode, setBusyByMode] = useState<Record<Mode, boolean>>({
+    send: false,
+    receive: false,
+    screen: false,
+  });
+  const swipeTrackerRef = useRef<SwipeTracker>(new SwipeTracker());
+  const swipePointerIdRef = useRef<number | null>(null);
+
+  const setSendBusy = useCallback((busy: boolean) => {
+    setBusyByMode((prev) => (prev.send === busy ? prev : { ...prev, send: busy }));
+  }, []);
+  const setReceiveBusy = useCallback((busy: boolean) => {
+    setBusyByMode((prev) => (prev.receive === busy ? prev : { ...prev, receive: busy }));
+  }, []);
+  const setScreenBusy = useCallback((busy: boolean) => {
+    setBusyByMode((prev) => (prev.screen === busy ? prev : { ...prev, screen: busy }));
+  }, []);
+
+  // 移动端横向滑动切换页面。判定交给 SwipeTracker（纯逻辑、有单测），这里只负责
+  // 事件接线：按下时先不抢指针，横向锁定后才 setPointerCapture，避免影响到点击和滚动。
+  const swipeEnabled = !busyByMode[mode];
+
+  const handleSwipePointerDown = (event: React.PointerEvent<HTMLElement>) => {
+    if (!swipeEnabled) return;
+    if ((event.target as Element).closest?.(SWIPE_IGNORE_SELECTOR)) return;
+    swipeTrackerRef.current.begin({
+      pointerType: event.pointerType,
+      clientX: event.clientX,
+      clientY: event.clientY,
+      timeStamp: event.timeStamp,
+      viewportWidth: window.innerWidth,
+    });
+  };
+
+  const handleSwipePointerMove = (event: React.PointerEvent<HTMLElement>) => {
+    const tracker = swipeTrackerRef.current;
+    if (!tracker.isTracking) return;
+    tracker.move(event.clientX, event.clientY);
+    if (tracker.isHorizontal && swipePointerIdRef.current === null) {
+      swipePointerIdRef.current = event.pointerId;
+      event.currentTarget.setPointerCapture?.(event.pointerId);
+    }
+  };
+
+  const finishSwipe = (event: React.PointerEvent<HTMLElement>) => {
+    const tracker = swipeTrackerRef.current;
+    if (!tracker.isTracking) return;
+    const direction = tracker.end(event.clientX, event.timeStamp);
+    if (swipePointerIdRef.current === event.pointerId) {
+      if (event.currentTarget.hasPointerCapture?.(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId);
+      }
+      swipePointerIdRef.current = null;
+    }
+    if (!direction) return;
+    setMode((current) => resolveSwipeTarget(current, direction) ?? current);
+  };
+
+  const handleSwipePointerCancel = (event: React.PointerEvent<HTMLElement>) => {
+    swipeTrackerRef.current.cancel();
+    if (swipePointerIdRef.current === event.pointerId) swipePointerIdRef.current = null;
+  };
 
   const isRiskBannerDismissed = () => {
     try {
@@ -297,7 +373,7 @@ const App: React.FC = () => {
       {swUpdateReady && (
         <div className="fixed top-4 left-4 right-4 md:left-auto md:right-4 z-50 pointer-events-auto">
           <div className="flex items-center justify-between gap-3 rounded-control border border-brand-100 bg-brand-50/95 px-4 py-3 text-brand-900 shadow-lg backdrop-blur dark:border-brand-900 dark:bg-slate-900/95 dark:text-brand-200">
-            <p className="text-sm font-medium">发现新版本，建议刷新以避免新旧版本混用导致连接异常。</p>
+            <p className="text-sm font-medium">发现新版本</p>
             <button
               onClick={applySwUpdate}
               className="shrink-0 rounded-control bg-brand-600 px-3 py-1.5 text-xs font-semibold text-white hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-70"
@@ -340,7 +416,7 @@ const App: React.FC = () => {
                 <div className="hidden sm:flex items-center gap-2 bg-amber-50 dark:bg-amber-900/30 border border-amber-200 dark:border-amber-800 rounded-full px-3 py-1.5 animate-slide-up">
                   <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400" />
                   <span className="text-xs font-medium text-amber-700 dark:text-amber-300">
-                    检测到代理网络,点对点传输和屏幕共享可能失效,建议关闭代理
+                    检测到代理网络，点对点传输和屏幕共享可能失效，建议关闭代理
                   </span>
                   <button
                     onClick={dismissRiskBanner}
@@ -381,7 +457,7 @@ const App: React.FC = () => {
                 网络环境受限
              </p>
               <p className="text-xs text-amber-700/80 dark:text-amber-300/80 leading-relaxed">
-                 检测到当前网络可能限制 P2P 打洞（如代理、移动网络或跨境链路），系统会优先尝试更稳的连接方式。
+                 检测到当前网络可能限制 P2P 打洞，将优先尝试更稳的连接方式
               </p>
            </div>
           <button
@@ -396,7 +472,16 @@ const App: React.FC = () => {
         </div>
       )}
 
-      <main className="flex-1 flex flex-col items-center justify-start pt-4 md:pt-8 pb-8 px-3 md:px-4 w-full max-w-5xl mx-auto overflow-hidden">
+      <main
+        className="flex-1 flex flex-col items-center justify-start pt-4 md:pt-8 pb-8 px-3 md:px-4 w-full max-w-5xl mx-auto overflow-hidden"
+        // 允许纵向滚动与缩放，横向手势留给下面的 pointer 监听（浏览器就不会把横向拖动
+        // 当成自己的手势而发 pointercancel）；视频控件、输入框等见 SWIPE_IGNORE_SELECTOR。
+        style={{ touchAction: 'pan-y pinch-zoom' }}
+        onPointerDown={handleSwipePointerDown}
+        onPointerMove={handleSwipePointerMove}
+        onPointerUp={finishSwipe}
+        onPointerCancel={handleSwipePointerCancel}
+      >
 
         <div className="w-full max-w-xl mb-8 relative z-10">
             <div className="bg-white dark:bg-slate-900 p-1.5 rounded-full grid grid-cols-3 relative shadow-card border border-slate-50 dark:border-slate-800">
@@ -451,17 +536,30 @@ const App: React.FC = () => {
           <ErrorBoundary>
             {mode === 'send' && (
               <div className="block animate-slide-up h-full">
-                <Sender onNotification={addNotification} deviceName={deviceName} />
+                <Sender
+                  onNotification={addNotification}
+                  deviceName={deviceName}
+                  onBusyChange={setSendBusy}
+                />
               </div>
             )}
             {mode === 'receive' && (
               <div className="block animate-slide-up h-full">
-                <Receiver initialCode={initialCode} onNotification={addNotification} deviceName={deviceName} />
+                <Receiver
+                  initialCode={initialCode}
+                  onNotification={addNotification}
+                  deviceName={deviceName}
+                  onBusyChange={setReceiveBusy}
+                />
               </div>
             )}
             {mode === 'screen' && (
               <div className="block animate-slide-up h-full">
-                <ScreenShare initialViewId={initialViewId} onNotification={addNotification} />
+                <ScreenShare
+                  initialViewId={initialViewId}
+                  onNotification={addNotification}
+                  onBusyChange={setScreenBusy}
+                />
               </div>
             )}
           </ErrorBoundary>
@@ -469,7 +567,7 @@ const App: React.FC = () => {
         
         <div className="mt-8 text-center max-w-md mx-auto space-y-2 pb-4 md:pb-0">
           <p className="text-xs text-slate-500 dark:text-slate-400">
-            Powered by WebRTC. 数据直接在设备间点对点传输，不经过云端存储。
+            Powered by WebRTC.
           </p>
         </div>
       </main>

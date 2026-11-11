@@ -1,11 +1,11 @@
 export const NO_TURN_WARNING_MESSAGE =
-  '当前服务未启用 TURN 中继，跨网络或手机流量下可能无法连接。';
+  '当前服务未启用 TURN 中继，跨网络或手机流量下可能无法连接';
 export const RATE_LIMITED_CONNECTION_MESSAGE =
-  '连接请求过多，请稍后再试。';
+  '连接请求过多，请稍后再试';
 export const SIGNALING_UNREACHABLE_MESSAGE =
-  '无法连接信令服务器，请检查网络后重试。';
+  '无法连接信令服务器，请检查网络后重试';
 export const SIGNALING_MESSAGE_TOO_LARGE_MESSAGE =
-  '控制消息超出大小上限，请刷新页面后重试。';
+  '控制消息超出大小上限，请刷新页面后重试';
 
 /**
  * peerRuntime 的 error.type 到用户可懂文案的唯一映射点。未列出的类型保留技术标识，
@@ -20,13 +20,13 @@ export const getPeerRuntimeErrorMessage = (type: string): string => {
     case 'disconnected':
       return SIGNALING_UNREACHABLE_MESSAGE;
     case 'network':
-      return '网络连接中断，请检查网络后重试。';
+      return '网络连接中断，请检查网络后重试';
     case 'unauthorized':
-      return '口令或凭证已失效，请让发送端重新分享。';
+      return '口令或凭证已失效，请让发送端重新分享';
     case 'unavailable-id':
-      return '该口令已被占用，请换一个。';
+      return '该口令已被占用，请换一个';
     case 'invalid-id':
-      return '口令无效，请确认后重试。';
+      return '口令无效，请确认后重试';
     default:
       return `连接错误: ${type}`;
   }
@@ -34,10 +34,10 @@ export const getPeerRuntimeErrorMessage = (type: string): string => {
 
 export const getReceiverPreTransferFailureMessage = (hasTurn: boolean): string => {
   if (hasTurn) {
-    return '连接超时。请检查口令是否正确。';
+    return '连接超时，请检查口令是否正确';
   }
 
-  return `${NO_TURN_WARNING_MESSAGE} 当前更像是中继不可用，而不是口令错误。`;
+  return `${NO_TURN_WARNING_MESSAGE}；当前更像是中继不可用，而不是口令错误`;
 };
 
 export const getReceiverDisconnectedMessage = (
@@ -49,6 +49,6 @@ export const getReceiverDisconnectedMessage = (
   }
 
   return hasTurn
-    ? '连接已断开，请检查口令是否正确后重试。'
-    : `${NO_TURN_WARNING_MESSAGE} 如果发送端在手机流量或不同网络下，这通常会直接导致建连失败。`;
+    ? '连接已断开，请检查口令是否正确后重试'
+    : `${NO_TURN_WARNING_MESSAGE}；如果发送端在手机流量或不同网络下，这通常会直接导致建连失败`;
 };

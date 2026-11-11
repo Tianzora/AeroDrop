@@ -79,6 +79,8 @@ import { SenderUI } from './sender/SenderUI';
 interface SenderProps {
   onNotification: (msg: string, type: 'success' | 'info' | 'error') => void;
   deviceName: string;
+  /** 传输进行中时为 true：页面滑动据此禁用，避免误触切换页面打断连接 */
+  onBusyChange?: (busy: boolean) => void;
 }
 
 type PeerTransferStat = {
@@ -90,7 +92,7 @@ type PeerTransferStat = {
   status: 'waiting' | 'transferring' | 'completed';
 };
 
-export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) => {
+export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBusyChange }) => {
   type PreparingStage = 'fetching_ice' | 'connecting_signaling';
   const [state, setState] = useState<TransferState>(TransferState.IDLE);
   const [fileList, setFileList] = useState<File[]>([]);
@@ -122,6 +124,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
   const [copied, setCopied] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
   const [preparingStage, setPreparingStage] = useState<PreparingStage>('fetching_ice');
+
+  // 分享链接已生效或正在传输时都算「进行中」：此刻切换页面会销毁 Sender 并断开连接。
+  const isBusyForNavigation = state !== TransferState.IDLE;
+  useEffect(() => {
+    onBusyChange?.(isBusyForNavigation);
+  }, [isBusyForNavigation, onBusyChange]);
 
   const peerRef = useRef<Peer | null>(null);
   const activeConnections = useRef<Set<DataConnection>>(new Set());
@@ -677,7 +685,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           if (diff <= 0) {
             setRemainingTime('已过期');
             stopSharing();
-            setErrorMsg('分享时间已结束。');
+            setErrorMsg('分享时间已结束');
             setState(TransferState.ERROR);
             if (timerRef.current) clearInterval(timerRef.current);
           } else {
@@ -903,7 +911,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
       (iceConfig.iceTransportPolicy === 'relay' || iceConfig.relayRecommended) &&
       onNotification
     ) {
-      onNotification('检测到当前网络更适合优先使用中继连接，已自动优化建连策略。', 'info');
+      onNotification('检测到当前网络更适合优先使用中继连接，已自动优化建连策略', 'info');
     } else if (!iceConfig.hasTurn && onNotification) {
       onNotification(NO_TURN_WARNING_MESSAGE, 'info');
     }
@@ -1311,7 +1319,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName }) =>
           }
           if (err.type === 'unavailable-id') {
               markConnectionFailure(shareTelemetryRef.current, 'code_unavailable');
-              setErrorMsg('该口令已被占用，请换一个。');
+              setErrorMsg('该口令已被占用，请换一个');
               setState(TransferState.CONFIGURING);
           } else if (err.type === 'rate-limited' || err.type === 'message-too-large') {
               // 信令层已被服务端明确拒绝（每 IP 会话数超限 / 消息超限），重连不会自愈，

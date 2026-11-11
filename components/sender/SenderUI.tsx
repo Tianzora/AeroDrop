@@ -99,7 +99,6 @@ export const SenderUI: React.FC<SenderUIProps> = ({
     <div className="w-full max-w-xl mx-auto p-4 md:p-6 bg-white dark:bg-slate-800 rounded-card shadow-card border border-slate-100 dark:border-slate-700 transition-colors">
       <div className="text-center mb-6">
         <h2 className="text-xl font-bold text-slate-800 dark:text-white">发送文件</h2>
-        <p className="text-slate-500 dark:text-slate-400">点对点加密传输 (支持文件夹/多文件)</p>
       </div>
 
       {state === TransferState.IDLE && (
