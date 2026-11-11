@@ -52,8 +52,8 @@ const baseProps = {
   transferredBytes: 0,
   overallEta: '--',
   activeConnectionsCount: 0,
-  currentSpeed: '0 KB/s',
-  avgSpeed: '0 KB/s',
+  currentSpeedBytes: 0,
+  avgSpeedBytes: 0,
 };
 
 test('shows the selected single file summary with icon, name, and size', () => {

@@ -480,7 +480,7 @@ test('stalled persisted progress reconnects through relay and resumes from the c
 
   await expect(page.getByRole('button', { name: '确认并下载' })).toBeVisible();
   await page.getByRole('button', { name: '确认并下载' }).click();
-  await expect(page.getByText('当前文件进度')).toBeVisible();
+  await expect(page.getByRole('progressbar', { name: '传输进度' })).toBeVisible();
 
   const committedBytes = 1024 * 1024;
   await sendCommittedChunk(page, '444444', committedBytes);

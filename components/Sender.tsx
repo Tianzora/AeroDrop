@@ -103,8 +103,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
   
   const [currentFileIndex, setCurrentFileIndex] = useState(0);
   const [totalProgress, setTotalProgress] = useState(0);
-  const [currentSpeed, setCurrentSpeed] = useState<string>('0 KB/s');
-  const [avgSpeed, setAvgSpeed] = useState<string>('0 KB/s');
   const [currentSpeedBytes, setCurrentSpeedBytes] = useState(0);
   const [avgSpeedBytes, setAvgSpeedBytes] = useState(0);
   
@@ -363,8 +361,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
             setIndividualStats(stats);
 
             if (state === TransferState.TRANSFERRING) {
-                setCurrentSpeed(formatFileSize(totalSpeed) + '/s');
-                setAvgSpeed(formatFileSize(totalAvgSpeed) + '/s');
                 setCurrentSpeedBytes(totalSpeed);
                 setAvgSpeedBytes(totalAvgSpeed);
                 const activeProgressCount = stats.filter((s) => s.status !== 'waiting').length;
@@ -1947,8 +1943,6 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
     setTransferCode('');
     setCustomCodeInput('');
     setTotalProgress(0);
-    setCurrentSpeed('0 KB/s');
-    setAvgSpeed('0 KB/s');
     setCurrentSpeedBytes(0);
     setAvgSpeedBytes(0);
     fileListRef.current = [];
@@ -2056,8 +2050,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
       transferredBytes={transferredBytes}
       overallEta={overallEta}
       activeConnectionsCount={getVisibleConnections().length}
-      currentSpeed={currentSpeed}
-      avgSpeed={avgSpeed}
+      currentSpeedBytes={currentSpeedBytes}
+      avgSpeedBytes={avgSpeedBytes}
     />
   );
 };

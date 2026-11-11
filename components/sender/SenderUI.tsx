@@ -2,8 +2,41 @@ import React from 'react';
 import { TransferState, FileMetadata } from '../../types';
 import { formatFileSize } from '../../services/fileUtils';
 import type { FileType } from '../../services/fileType';
-import { Upload, AlertCircle, X, Check, Loader2, Link as LinkIcon, Folder, ChevronDown, ChevronUp, Monitor, StopCircle } from 'lucide-react';
+import { Upload, AlertCircle, X, Check, Copy, Loader2, Folder, ChevronDown, ChevronUp, Monitor, StopCircle } from 'lucide-react';
+import { motion, useReducedMotion } from 'motion/react';
 import { FileTypeIcon } from '../FileTypeIcon';
+import { ProgressTrack, TransferProgressCard } from '../TransferProgress';
+
+const EASE_UI: [number, number, number, number] = [0.23, 1, 0.32, 1];
+
+const StatusDot: React.FC<{ tone: 'live' | 'waiting' | 'done' }> = ({ tone }) => {
+  const reduceMotion = useReducedMotion();
+  const color =
+    tone === 'done'
+      ? 'bg-emerald-500'
+      : tone === 'live'
+        ? 'bg-brand-500'
+        : 'bg-slate-400 dark:bg-night-400';
+
+  return (
+    <span className="relative flex h-1.5 w-1.5 shrink-0 items-center justify-center" aria-hidden="true">
+      {tone === 'live' && !reduceMotion && (
+        <motion.span
+          className={`absolute inset-0 rounded-full ${color}`}
+          animate={{ scale: [1, 2.6], opacity: [0.45, 0] }}
+          transition={{ duration: 1.6, repeat: Infinity, ease: 'easeOut' }}
+        />
+      )}
+      <motion.span
+        className={`absolute inset-0 rounded-full ${color}`}
+        animate={tone === 'waiting' && !reduceMotion ? { opacity: [1, 0.4, 1] } : { opacity: 1 }}
+        transition={
+          tone === 'waiting' && !reduceMotion ? { duration: 2.4, repeat: Infinity, ease: 'easeInOut' } : { duration: 0.15 }
+        }
+      />
+    </span>
+  );
+};
 
 export type SenderPeerTransferStat = {
   peerId: string;
@@ -54,8 +87,8 @@ interface SenderUIProps {
   transferredBytes: number;
   overallEta: string;
   activeConnectionsCount: number;
-  currentSpeed: string;
-  avgSpeed: string;
+  currentSpeedBytes: number;
+  avgSpeedBytes: number;
 }
 
 export const SenderUI: React.FC<SenderUIProps> = ({
@@ -92,9 +125,12 @@ export const SenderUI: React.FC<SenderUIProps> = ({
   transferredBytes,
   overallEta,
   activeConnectionsCount,
-  currentSpeed,
-  avgSpeed,
+  currentSpeedBytes,
+  avgSpeedBytes,
 }) => {
+  const reduceMotion = useReducedMotion();
+  const hasSingleDevice = individualStats.length === 1;
+
   return (
     <div className="w-full max-w-xl mx-auto p-4 md:p-6 bg-white dark:bg-night-850 rounded-card shadow-card border border-slate-100 dark:border-night-750 transition-colors">
       <div className="text-center mb-6">
@@ -213,111 +249,163 @@ export const SenderUI: React.FC<SenderUIProps> = ({
       )}
 
       {(state === TransferState.WAITING_FOR_PEER || state === TransferState.PEER_CONNECTED || state === TransferState.TRANSFERRING) && (
-        <div className="text-center space-y-6 animate-pop-in">
-          <div className="relative inline-block" onClick={handleCopyCode}>
-            <div className={`text-4xl font-mono font-bold tracking-widest px-8 py-4 rounded-card border-2 cursor-pointer transition-ui motion-fast ${copied ? 'bg-green-100 border-green-300 text-green-700' : 'bg-brand-50 border-brand-100 text-brand-600 dark:bg-night-900 dark:border-night-750 dark:text-brand-400'}`}>
-              {transferCode}
+        <div className="animate-pop-in">
+          <section>
+            <h3 className="text-xs font-medium text-slate-500 dark:text-night-400">分享口令</h3>
+            <div className="mt-2 flex items-center justify-between gap-3">
+              <span className="flex items-baseline gap-[0.08em] font-mono text-[2.25rem] font-bold leading-none text-brand-600 sm:text-[2.5rem] dark:text-brand-400">
+                {transferCode.split('').map((digit, index) => (
+                  <motion.span
+                    key={`${index}-${digit}`}
+                    initial={reduceMotion ? false : { opacity: 0, y: 6 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ delay: 0.025 * index, duration: 0.22, ease: EASE_UI }}
+                  >
+                    {digit}
+                  </motion.span>
+                ))}
+              </span>
+              <button
+                type="button"
+                onClick={handleCopyCode}
+                aria-label={copied ? '已复制分享口令' : '复制分享口令'}
+                className={`flex h-9 shrink-0 items-center gap-1.5 rounded-full border px-3 text-xs font-medium transition-colors ${
+                  copied
+                    ? 'border-emerald-300 bg-emerald-50 text-emerald-700 dark:border-emerald-500/40 dark:bg-emerald-500/10 dark:text-emerald-300'
+                    : 'border-slate-200 text-slate-600 hover:border-brand-400 hover:bg-brand-50 hover:text-brand-700 dark:border-night-700 dark:text-night-300 dark:hover:border-brand-500/40 dark:hover:bg-brand-500/10 dark:hover:text-brand-400'
+                }`}
+              >
+                {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
+                {copied ? '已复制' : '复制'}
+              </button>
             </div>
-          </div>
+          </section>
 
-          <div className={`max-w-xs mx-auto bg-slate-50 dark:bg-night-900 p-3 rounded-control border flex items-center gap-2 ${linkCopied ? 'border-green-200 bg-green-50' : 'border-slate-200 dark:border-night-750'}`}>
-            <div className="flex-1 min-w-0 text-left">
-              <div className="text-xs text-slate-500 dark:text-night-400">分享链接</div>
-              <div className="text-sm font-mono text-slate-600 dark:text-night-300 truncate select-all">{shareLink}</div>
+          <div className="my-5 -mx-5 border-t border-dashed border-slate-200 dark:border-night-700 md:-mx-6" />
+
+          <div>
+            <button
+              type="button"
+              onClick={handleCopyLink}
+              aria-label="复制分享链接"
+              className="group flex w-full items-center gap-3 py-2 text-left"
+            >
+              <span className="w-16 shrink-0 text-xs font-medium text-slate-500 dark:text-night-400">分享链接</span>
+              <span className="min-w-0 flex-1 truncate font-mono text-xs text-slate-600 dark:text-night-300">{shareLink}</span>
+              <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-slate-400 transition-colors group-hover:bg-slate-100 group-hover:text-slate-700 dark:group-hover:bg-night-800 dark:group-hover:text-night-200">
+                {linkCopied ? (
+                  <Check size={14} className="text-emerald-500" aria-hidden="true" />
+                ) : (
+                  <Copy size={13} aria-hidden="true" />
+                )}
+              </span>
+            </button>
+            <div className="flex items-center gap-3 py-2">
+              <span className="w-16 shrink-0 text-xs font-medium text-slate-500 dark:text-night-400">有效期</span>
+              <span className="text-sm tabular-nums text-slate-700 dark:text-night-200">{remainingTime || '--'}</span>
             </div>
-            <button onClick={handleCopyLink} aria-label="复制分享链接" className="inline-flex min-w-11 min-h-11 items-center justify-center rounded-control hover:bg-slate-200/60 dark:hover:bg-night-750/60 transition-colors"><LinkIcon size={18} /></button>
-          </div>
-
-          <div className="flex justify-center gap-6 text-sm text-slate-600 dark:text-night-300 bg-slate-50 dark:bg-night-900 py-3 rounded-control">
-            <span>有效期: {remainingTime}</span>
-            <span>状态: <span className="font-bold text-brand-600 dark:text-brand-400">{connectionStatus || (state === TransferState.TRANSFERRING ? '传输中' : '等待连接')}</span></span>
+            <div className="flex items-center gap-3 py-2">
+              <span className="w-16 shrink-0 text-xs font-medium text-slate-500 dark:text-night-400">状态</span>
+              <span className="text-sm font-medium text-brand-600 dark:text-brand-400">
+                {connectionStatus || (state === TransferState.TRANSFERRING ? '传输中' : '等待连接')}
+              </span>
+            </div>
           </div>
 
           {individualStats.length > 0 && (
-            <div className="bg-slate-50 dark:bg-night-900 rounded-control border border-slate-100 dark:border-night-750 overflow-hidden mt-2 animate-slide-up text-left">
-              <div className="px-4 py-2 bg-slate-100 dark:bg-night-850 border-b border-slate-200 dark:border-night-750 text-xs font-bold text-slate-600 dark:text-night-300 flex justify-between items-center">
-                <span>设备传输列表 ({individualStats.length})</span>
-                <Monitor size={16} />
-              </div>
-              <div className="divide-y divide-slate-100 dark:divide-night-750 max-h-52 overflow-y-auto">
-                {individualStats.map((stat) => (
-                  <div key={stat.peerId} className="px-4 py-2.5">
-                    <div className="flex items-center justify-between text-xs">
-                      <div className="flex items-center gap-2 min-w-0">
-                        <div className={`w-2 h-2 rounded-full ${stat.status === 'completed' ? 'bg-green-500' : stat.status === 'transferring' ? 'bg-brand-500 animate-pulse' : 'bg-slate-400'}`}></div>
-                        <span className="min-w-0 flex-1 truncate text-slate-700 dark:text-night-200" title={stat.peerId}>{stat.deviceName}</span>
-                        <span className="inline-block max-w-[6rem] shrink-0 truncate rounded-full bg-slate-100 px-2 py-0.5 text-xs text-slate-600 dark:bg-night-800 dark:text-night-200">
+            <section className="mt-5">
+              <h3 className="flex items-center gap-1.5 text-xs font-medium text-slate-500 dark:text-night-400">
+                <Monitor size={13} aria-hidden="true" />
+                设备传输列表 ({individualStats.length})
+              </h3>
+              <div className="mt-1 divide-y divide-slate-100 dark:divide-night-750/70">
+                {individualStats.map((stat) => {
+                  const statTone =
+                    stat.status === 'completed' ? 'done' : stat.status === 'transferring' ? 'live' : 'waiting';
+                  const statText =
+                    stat.status === 'completed'
+                      ? '已完成'
+                      : stat.status === 'transferring'
+                        ? hasSingleDevice
+                          ? '传输中'
+                          : `${stat.progress}%`
+                        : state === TransferState.TRANSFERRING
+                          ? '准备中'
+                          : '等待接收';
+                  const isRelay = stat.connectionType.includes('中继');
+
+                  return (
+                    <div key={stat.peerId} className="py-2.5">
+                      <div className="flex items-center gap-2.5">
+                        <StatusDot tone={statTone} />
+                        <span
+                          className="min-w-0 flex-1 truncate text-sm font-medium text-slate-800 dark:text-night-100"
+                          title={stat.peerId}
+                        >
+                          {stat.deviceName}
+                        </span>
+                        <span
+                          className={`shrink-0 text-[11px] ${
+                            isRelay ? 'text-amber-600 dark:text-amber-400' : 'text-slate-500 dark:text-night-400'
+                          }`}
+                        >
                           {stat.connectionType}
                         </span>
-                      </div>
-                      <div className="flex min-w-0 items-center gap-3">
-                        <span className={`font-medium ${stat.status === 'completed' ? 'text-green-700 dark:text-green-400' : stat.status === 'transferring' ? 'text-brand-600 dark:text-brand-400' : 'text-slate-600 dark:text-night-300'}`}>
-                          {stat.status === 'completed' ? '已完成' : stat.status === 'transferring' ? `${stat.progress}%` : state === TransferState.TRANSFERRING ? '准备中' : '等待接收'}
+                        <span
+                          className={`w-14 shrink-0 text-right text-xs font-medium tabular-nums ${
+                            statTone === 'done'
+                              ? 'text-emerald-700 dark:text-emerald-400'
+                              : statTone === 'live'
+                                ? 'text-brand-600 dark:text-brand-400'
+                                : 'text-slate-500 dark:text-night-400'
+                          }`}
+                        >
+                          {statText}
                         </span>
-                        <span className="text-slate-700 dark:text-night-300 font-mono w-16 text-right tabular-nums">{stat.speed}</span>
                       </div>
+                      {!hasSingleDevice && (
+                        <div className="mt-2 flex items-center gap-3 pl-[16px]">
+                          <div className="min-w-0 flex-1">
+                            <ProgressTrack
+                              value={stat.progress}
+                              tone={stat.status === 'completed' ? 'success' : 'brand'}
+                              label={`${stat.deviceName} 传输进度`}
+                            />
+                          </div>
+                          <span className="w-16 shrink-0 text-right font-mono text-[11px] tabular-nums text-slate-500 dark:text-night-400">
+                            {stat.speed}
+                          </span>
+                        </div>
+                      )}
                     </div>
-                    <div className="mt-2 w-full bg-slate-200 dark:bg-night-800 rounded-full h-1.5 overflow-hidden">
-                      <div className={`h-full origin-left transition-transform motion-base ${stat.status === 'completed' ? 'bg-green-500' : 'bg-brand-500'}`} style={{ transform: `scaleX(${Math.max(0, Math.min(100, stat.progress)) / 100})` }} />
-                    </div>
-                  </div>
-                ))}
+                  );
+                })}
               </div>
-            </div>
+            </section>
           )}
 
           {state === TransferState.TRANSFERRING && (
-            <div className="w-full space-y-5">
-              <div className="flex flex-col items-center gap-2">
-                {totalProgress === 100 && activeTransfersCount === 0 ? (
-                  <Check size={32} className="text-green-500" />
-                ) : (
-                  <Loader2 size={32} className="animate-spin text-brand-500" />
-                )}
-                <div className="text-center w-full min-w-0">
-                  <p className="text-base font-bold text-slate-700 dark:text-night-200">
-                    {totalProgress === 100 && activeTransfersCount === 0 ? '传输完成' : '正在发送...'}
-                  </p>
-                  <p className="text-sm text-slate-500 dark:text-night-400 font-medium mt-1 w-full truncate">
-                    {currentFileIndex + 1}/{metadata?.files.length}: {fileList[currentFileIndex]?.name}
-                  </p>
-                </div>
-              </div>
-
-              <div className="space-y-2">
-                <div className="flex justify-between text-xs text-slate-500 dark:text-night-400 px-1">
-                  <span>{activeConnectionsCount > 1 ? '所有设备总进度 (平均)' : '总进度'}</span>
-                  <span>{totalProgress}%</span>
-                </div>
-                <div className="w-full bg-slate-100 dark:bg-night-800 rounded-full h-3 overflow-hidden">
-                  <div className={`h-full origin-left transition-transform motion-base relative ${totalProgress === 100 ? 'bg-green-500' : 'bg-brand-500'}`} style={{ transform: `scaleX(${totalProgress / 100})` }}>
-                  </div>
-                </div>
-                <div className="flex justify-between text-xs text-slate-500 dark:text-night-400 px-1 tabular-nums">
-                  <span>总任务字节: {formatFileSize(totalBytes)}</span>
-                  <span>已完成字节: {formatFileSize(transferredBytes)}</span>
-                </div>
-                <div className="flex justify-end text-xs text-slate-500 dark:text-night-400 px-1 tabular-nums">
-                  <span>预计剩余 {overallEta}</span>
-                </div>
-              </div>
-
-              <div className="grid grid-cols-2 gap-3">
-                <div className="bg-slate-50 dark:bg-night-900 p-3 rounded-control border border-slate-100 dark:border-night-750 text-center">
-                  <p className="text-xs text-slate-500 dark:text-night-400 uppercase tracking-wider mb-0.5">{activeConnectionsCount > 1 ? '所有设备总实时速度' : '实时速度'}</p>
-                  <p className="text-brand-600 dark:text-brand-400 font-bold font-mono tabular-nums">{currentSpeed}</p>
-                </div>
-                <div className="bg-slate-50 dark:bg-night-900 p-3 rounded-control border border-slate-100 dark:border-night-750 text-center">
-                  <p className="text-xs text-slate-500 dark:text-night-400 uppercase tracking-wider mb-0.5">{activeConnectionsCount > 1 ? '所有设备总平均速度' : '平均速度'}</p>
-                  <p className="text-brand-600 dark:text-brand-400 font-bold font-mono tabular-nums">{avgSpeed}</p>
-                </div>
-              </div>
-            </div>
+            <TransferProgressCard
+              progress={totalProgress}
+              transferredBytes={transferredBytes}
+              totalBytes={totalBytes}
+              fileName={fileList[currentFileIndex]?.name ?? metadata?.files[currentFileIndex]?.name}
+              filePosition={
+                (metadata?.files.length ?? 0) > 1
+                  ? `第 ${currentFileIndex + 1} / ${metadata?.files.length} 个文件`
+                  : undefined
+              }
+              currentSpeedBytes={currentSpeedBytes}
+              averageSpeedBytes={avgSpeedBytes}
+              eta={overallEta}
+            />
           )}
 
-          <button onClick={stopSharing} className="w-full h-12 bg-red-600 text-white text-sm font-bold rounded-full shadow-md shadow-red-600/20 hover:bg-red-700 active:scale-[0.99] transition-colors flex items-center justify-center gap-2">
-            <StopCircle size={18} /> 停止分享
-          </button>
+          <div className="pt-4">
+            <button onClick={stopSharing} className="w-full h-12 bg-red-600 text-white text-sm font-bold rounded-full shadow-md shadow-red-600/20 hover:bg-red-700 active:scale-[0.99] transition-colors flex items-center justify-center gap-2">
+              <StopCircle size={18} /> 停止分享
+            </button>
+          </div>
         </div>
       )}
 

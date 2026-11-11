@@ -4,6 +4,7 @@ import { formatFileSize } from '../../services/fileUtils';
 import { Download, HardDriveDownload, Loader2, AlertCircle, Delete, ClipboardPaste, Layers, PlayCircle, ChevronDown, ChevronUp } from 'lucide-react';
 import type { FileType } from '../../services/fileType';
 import { FileTypeIcon } from '../FileTypeIcon';
+import { TransferProgressCard } from '../TransferProgress';
 import CodeSlots, { type CodeSlotsStatus } from '../CodeSlots';
 import {
   getReceiverWaitingStatusCopy,
@@ -43,7 +44,7 @@ interface ReceiverUIProps {
   onResumeTransfer: () => void;
   onAcceptTransfer: () => void;
   progress: number;
-  downloadSpeed: string;
+  downloadSpeedBytes: number;
   eta: string;
   overallTransferredBytes: number;
   totalBytes: number;
@@ -102,7 +103,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
   onResumeTransfer,
   onAcceptTransfer,
   progress,
-  downloadSpeed,
+  downloadSpeedBytes,
   eta,
   codeStatus,
   overallTransferredBytes,
@@ -205,49 +206,62 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
       )}
 
       {codeStatus !== 'success' && (state === TransferState.PEER_CONNECTED || state === TransferState.TRANSFERRING) && metadata && (
-        <div className="bg-slate-50 dark:bg-night-900 border border-slate-200 dark:border-night-750 rounded-control p-6 animate-slide-up">
-          {senderDeviceName && (
-            <div className="mb-4 text-sm text-slate-600 dark:text-night-300">
-              发送方设备: <span className="font-semibold text-slate-800 dark:text-night-100">{senderDeviceName}</span>
+        <div className="animate-slide-up">
+          <div className="space-y-3 text-sm">
+            {senderDeviceName && (
+              <div className="flex items-baseline gap-4">
+                <span className="w-16 shrink-0 text-slate-500 dark:text-night-400">发送方</span>
+                <span className="min-w-0 truncate font-semibold text-slate-800 dark:text-night-100">{senderDeviceName}</span>
+              </div>
+            )}
+            <div className="flex items-baseline gap-4">
+              <span className="w-16 shrink-0 text-slate-500 dark:text-night-400">{isMultiFile ? '文件' : '文件名'}</span>
+              <span className="flex min-w-0 flex-1 items-center gap-2 font-semibold text-slate-800 dark:text-night-100">
+                {isMultiFile ? (
+                  <>
+                    <Layers size={16} className="shrink-0 text-brand-500" />
+                    <span className="truncate">{metadata.files.length} 个文件</span>
+                  </>
+                ) : (
+                  <>
+                    <FileTypeIcon
+                      type={primaryFileType ?? 'unknown'}
+                      size={16}
+                      className="shrink-0 text-slate-500 dark:text-night-300"
+                    />
+                    <span className="truncate">{primaryFileName}</span>
+                  </>
+                )}
+              </span>
             </div>
-          )}
-          <div className="flex items-start gap-4 mb-6">
-            <div className="w-12 h-12 bg-white dark:bg-night-850 rounded-control shadow-sm border border-slate-100 dark:border-night-750 flex items-center justify-center text-slate-500 shrink-0">
-              {isMultiFile ? (
-                <Layers size={20} className="text-brand-500" />
-              ) : (
-                <FileTypeIcon
-                  type={primaryFileType ?? 'unknown'}
-                  size={20}
-                  className="text-slate-500 dark:text-night-300"
-                />
-              )}
-            </div>
-            <div className="flex-1 min-w-0">
-              <h4 className="font-bold text-slate-800 dark:text-night-100 text-base leading-tight mb-1 truncate">{isMultiFile ? `${metadata.files.length} 个文件` : primaryFileName}</h4>
-              <p className="text-sm text-slate-500 dark:text-night-400">{formatFileSize(metadata.totalSize)}</p>
+            <div className="flex items-baseline gap-4">
+              <span className="w-16 shrink-0 text-slate-500 dark:text-night-400">大小</span>
+              <span className="text-slate-700 dark:text-night-200">{formatFileSize(metadata.totalSize)}</span>
             </div>
           </div>
 
           {isMultiFile && selectedFiles.length > 0 && (
-            <div className="border border-slate-200 dark:border-night-750 rounded-control overflow-hidden mb-6 animate-slide-up">
-              <button onClick={onToggleFileList} className="w-full px-4 py-2 bg-slate-50 dark:bg-night-900 flex justify-between text-sm hover:bg-slate-100 dark:hover:bg-night-800 transition-colors text-slate-700 dark:text-night-300">
+            <div className="mt-3">
+              <button
+                onClick={onToggleFileList}
+                className="flex w-full items-center justify-between gap-2 py-2 text-sm text-slate-600 transition-colors hover:text-slate-900 dark:text-night-300 dark:hover:text-night-100"
+              >
                 <span>文件列表 ({selectedFiles.length})</span>
                 {showFileList ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
               </button>
               {showFileList && (
-                <div className="max-h-48 overflow-y-auto bg-white dark:bg-night-850 border-t border-slate-100 dark:border-night-750 p-1">
+                <div className="max-h-48 overflow-y-auto pb-1">
                   {selectedFiles.map((file, i) => (
-                    <div key={`${file.name}-${i}`} className="flex justify-between items-center text-xs py-1.5 px-3 hover:bg-slate-50 dark:hover:bg-night-750 rounded">
-                      <div className="flex items-center gap-2 truncate flex-1 mr-4 min-w-0">
+                    <div key={`${file.name}-${i}`} className="flex items-center justify-between gap-4 px-1 py-1.5 text-xs">
+                      <div className="mr-4 flex min-w-0 flex-1 items-center gap-2 truncate">
                         <FileTypeIcon
                           type={file.fileType}
                           size={16}
-                          className="text-slate-400 dark:text-night-300 shrink-0"
+                          className="shrink-0 text-slate-400 dark:text-night-300"
                         />
                         <span className="truncate text-slate-600 dark:text-night-300">{file.name}</span>
                       </div>
-                      <span className="text-slate-500 dark:text-night-400 font-mono">{formatFileSize(file.size)}</span>
+                      <span className="font-mono text-slate-500 dark:text-night-400">{formatFileSize(file.size)}</span>
                     </div>
                   ))}
                 </div>
@@ -256,7 +270,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
           )}
 
           {state === TransferState.PEER_CONNECTED && (
-            <div className="space-y-3">
+            <div className="mt-5 space-y-3">
               {canResume && (
                 <button onClick={onResumeTransfer} className="w-full bg-brand-600 text-white font-bold py-3 rounded-full hover:bg-brand-700 transition-ui motion-fast flex items-center justify-center gap-2 shadow-md">
                   <PlayCircle size={18} /> {isStreaming ? '重新开始' : '继续下载'}
@@ -269,26 +283,22 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
           )}
 
           {state === TransferState.TRANSFERRING && (
-            <div className="space-y-3">
-              <div className="flex justify-between text-xs font-semibold text-slate-500 dark:text-night-400 uppercase">
-                <span>当前文件进度</span>
-                <span className="tabular-nums">{progress}%</span>
-              </div>
-              <div className="w-full bg-slate-200 dark:bg-night-800 rounded-full h-3 overflow-hidden">
-                <div className="bg-brand-500 h-full origin-left transition-transform motion-base relative" style={{ transform: `scaleX(${progress / 100})` }}></div>
-              </div>
-              <div className="flex justify-between items-center text-xs text-slate-600 dark:text-night-400 tabular-nums pt-1">
-                <span>{downloadSpeed}</span>
-                <span>{eta}</span>
-              </div>
-              <div className="flex justify-between items-center text-xs text-slate-600 dark:text-night-400 tabular-nums pt-1">
-                <span>{formatFileSize(overallTransferredBytes)} / {formatFileSize(totalBytes)}</span>
-                <span>预计剩余 {overallEta}</span>
-              </div>
-              <button onClick={onReset} className="w-full h-11 mt-2 rounded-full bg-red-50 text-sm font-medium text-red-700 transition-colors hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20">
+            <>
+              <TransferProgressCard
+                progress={progress}
+                transferredBytes={overallTransferredBytes}
+                totalBytes={totalBytes}
+                fileName={primaryFileName}
+                currentSpeedBytes={downloadSpeedBytes}
+                eta={overallEta}
+              />
+              <button
+                onClick={onReset}
+                className="w-full h-11 mt-5 rounded-full bg-red-50 text-sm font-medium text-red-700 transition-colors hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20"
+              >
                 取消
               </button>
-            </div>
+            </>
           )}
         </div>
       )}

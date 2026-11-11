@@ -38,7 +38,7 @@ const baseProps: React.ComponentProps<typeof ReceiverUI> = {
   onResumeTransfer: () => {},
   onAcceptTransfer: () => {},
   progress: 0,
-  downloadSpeed: '0 KB/s',
+  downloadSpeedBytes: 0,
   eta: '--',
   overallTransferredBytes: 0,
   totalBytes: 1024,
