@@ -12,6 +12,7 @@ import {
   normalizeShareCode,
   randomInt,
   resolveShareCodeRegistration,
+  shouldRejectShareCodeRebind,
   validateShareCodeCreatePayload,
   verifyShareCodeRevoke,
   type ShareCodeRecord,
@@ -412,4 +413,50 @@ test('rejects credentialless registration for a peer id that is bound to a share
     findShareCodeByPeerId: () => binding,
   });
   assert.deepEqual(withCredentials, { allowed: true });
+});
+
+test('only the original secret may rebind a peer id, even after revoke', () => {
+  const secretHash = 'a'.repeat(64);
+  const otherHash = 'b'.repeat(64);
+
+  assert.equal(
+    shouldRejectShareCodeRebind({
+      activeSecretHash: null,
+      tombstoneSecretHash: null,
+      requestSecretHash: secretHash,
+    }),
+    false
+  );
+  assert.equal(
+    shouldRejectShareCodeRebind({
+      activeSecretHash: secretHash,
+      tombstoneSecretHash: null,
+      requestSecretHash: secretHash,
+    }),
+    false
+  );
+  assert.equal(
+    shouldRejectShareCodeRebind({
+      activeSecretHash: otherHash,
+      tombstoneSecretHash: null,
+      requestSecretHash: secretHash,
+    }),
+    true
+  );
+  assert.equal(
+    shouldRejectShareCodeRebind({
+      activeSecretHash: null,
+      tombstoneSecretHash: secretHash.toUpperCase(),
+      requestSecretHash: secretHash,
+    }),
+    false
+  );
+  assert.equal(
+    shouldRejectShareCodeRebind({
+      activeSecretHash: null,
+      tombstoneSecretHash: otherHash,
+      requestSecretHash: secretHash,
+    }),
+    true
+  );
 });

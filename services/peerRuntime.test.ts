@@ -39,6 +39,8 @@ class FakeRTCPeerConnection {
   public iceConnectionState: RTCIceConnectionState = 'new';
   public iceGatheringState: RTCIceGatheringState = 'new';
   public signalingState: RTCSignalingState = 'stable';
+  public restartIceCalls = 0;
+  public createOfferOptions: Array<RTCOfferOptions | undefined> = [];
 
   constructor() {
     FakeRTCPeerConnection.instances.push(this);
@@ -48,8 +50,13 @@ class FakeRTCPeerConnection {
     return new FakeDataChannel();
   }
 
-  createOffer(): Promise<RTCSessionDescriptionInit> {
+  createOffer(options?: RTCOfferOptions): Promise<RTCSessionDescriptionInit> {
+    this.createOfferOptions.push(options);
     return Promise.resolve({ type: 'offer', sdp: 'fake-offer' });
+  }
+
+  restartIce(): void {
+    this.restartIceCalls += 1;
   }
 
   setLocalDescription(): Promise<void> {
@@ -75,6 +82,7 @@ class FakeWebSocket {
   public static CONNECTING = 0;
   public static CLOSED = 3;
   public readyState = FakeWebSocket.CONNECTING;
+  public sent: string[] = [];
   public onopen: (() => void) | null = null;
   public onclose: ((event: { code: number; reason: string }) => void) | null = null;
   public onerror: (() => void) | null = null;
@@ -84,7 +92,9 @@ class FakeWebSocket {
     FakeWebSocket.instances.push(this);
   }
 
-  send(): void {}
+  send(data: string): void {
+    this.sent.push(data);
+  }
 
   close(code = 1000, reason = ''): void {
     this.readyState = FakeWebSocket.CLOSED;
@@ -525,6 +535,125 @@ test('自动恢复用的 retrySignaling 受信令重连预算约束，不像显�
     assert.ok(socketsAtExhaustion <= maxAttempts + 2);
 
     peer.destroy();
+  } finally {
+    restore();
+  }
+});
+
+test('queues offers while signaling is down and flushes them after reconnect', async () => {
+  FakeWebSocket.instances.length = 0;
+  FakeRTCPeerConnection.instances.length = 0;
+
+  const { scheduledTimeouts, restore } = installFakeTimers();
+
+  try {
+    const { default: WorkerSignaledPeer } = await import('./peerRuntime.ts');
+    const peer = new WorkerSignaledPeer({ debug: 0 });
+    const restored: string[] = [];
+    peer.on('signaling:restored', (peerId) => restored.push(peerId));
+
+    const first = FakeWebSocket.instances[0];
+    first.readyState = FakeWebSocket.OPEN;
+    first.onopen?.();
+    first.onmessage?.({ data: JSON.stringify({ type: 'registered', peerId: 'peer-a' }) });
+
+    first.close(1006, 'network dropped');
+    const reconnectTimer = scheduledTimeouts.find((entry) => entry.delayMs === 1_000);
+    assert.ok(reconnectTimer);
+    reconnectTimer.fn();
+
+    // 断线期间发起的新连接只能先把 offer 放进队列。
+    peer.connect('target-b');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const second = FakeWebSocket.instances[1];
+    assert.deepEqual(second.sent, []);
+
+    second.readyState = FakeWebSocket.OPEN;
+    second.onopen?.();
+    second.onmessage?.({ data: JSON.stringify({ type: 'registered', peerId: 'peer-a' }) });
+
+    const sentTypes = second.sent.map((raw) => (JSON.parse(raw) as { type: string }).type);
+    assert.ok(sentTypes.includes('offer'));
+    assert.deepEqual(restored, ['peer-a']);
+
+    peer.destroy();
+  } finally {
+    restore();
+  }
+});
+
+test('ICE restart re-offers with restartIce and extends the close deadline', async () => {
+  FakeWebSocket.instances.length = 0;
+  FakeRTCPeerConnection.instances.length = 0;
+
+  const { scheduledTimeouts, restore } = installFakeTimers();
+
+  try {
+    const { default: WorkerSignaledPeer } = await import('./peerRuntime.ts');
+    const peer = new WorkerSignaledPeer({ debug: 0 });
+
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.onopen?.();
+    socket.onmessage?.({ data: JSON.stringify({ type: 'registered', peerId: 'peer-a' }) });
+
+    peer.connect('target-peer');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    const peerConnection = FakeRTCPeerConnection.instances[0];
+    peerConnection.connectionState = 'disconnected';
+    peerConnection.onconnectionstatechange?.();
+
+    const restartTimer = scheduledTimeouts.find(
+      (entry) => entry.delayMs === CONNECTION_TIMINGS.TRANSPORT_ICE_RESTART_DELAY_MS
+    );
+    assert.ok(restartTimer);
+
+    restartTimer.fn();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.equal(peerConnection.restartIceCalls, 1);
+    assert.deepEqual(peerConnection.createOfferOptions.at(-1), { iceRestart: true });
+    assert.ok(
+      socket.sent.some((raw) => (JSON.parse(raw) as { type: string }).type === 'offer'),
+      'restart offer should be forwarded over signaling'
+    );
+    assert.ok(
+      scheduledTimeouts.some(
+        (entry) => entry.delayMs === CONNECTION_TIMINGS.TRANSPORT_ICE_RESTART_GRACE_MS
+      ),
+      'restart should get a fresh close deadline'
+    );
+
+    peer.destroy();
+  } finally {
+    restore();
+  }
+});
+
+test('signalingRecoveryState separates reconnectable states from terminal ones', async () => {
+  FakeWebSocket.instances.length = 0;
+
+  const { restore } = installFakeTimers();
+
+  try {
+    const { default: WorkerSignaledPeer } = await import('./peerRuntime.ts');
+    const peer = new WorkerSignaledPeer({ debug: 0 });
+
+    assert.equal(peer.signalingRecoveryState(), 'connecting');
+
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.onopen?.();
+    assert.equal(peer.signalingRecoveryState(), 'connected');
+
+    socket.close(4029, 'Too many sessions');
+    assert.equal(peer.signalingRecoveryState(), 'rejected');
+
+    peer.destroy();
+    assert.equal(peer.signalingRecoveryState(), 'destroyed');
   } finally {
     restore();
   }

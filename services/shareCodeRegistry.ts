@@ -308,3 +308,19 @@ export const verifyShareCodeRevoke = (input: {
     allowed: constantTimeEqual(input.record.secretHash.toLowerCase(), input.secretHash.toLowerCase()),
   };
 };
+
+/**
+ * 改绑 peerId 时的归属校验：活跃行与 24h 墓碑都只认原 secretHash。
+ * 只看活跃行会留下「先 revoke 再抢绑」的窗口；只看墓碑则会让仍在持码的发送端
+ * 在续期时被自己的旧墓碑挡住。两者都匹配才允许覆盖。
+ */
+export const shouldRejectShareCodeRebind = (input: {
+  activeSecretHash: string | null;
+  tombstoneSecretHash: string | null;
+  requestSecretHash: string;
+}): boolean => {
+  const request = input.requestSecretHash.toLowerCase();
+  if (input.activeSecretHash && input.activeSecretHash.toLowerCase() !== request) return true;
+  if (input.tombstoneSecretHash && input.tombstoneSecretHash.toLowerCase() !== request) return true;
+  return false;
+};

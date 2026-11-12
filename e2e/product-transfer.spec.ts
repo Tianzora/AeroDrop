@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises';
+import { createHmac, randomUUID } from 'node:crypto';
 
 import { expect, test } from '@playwright/test';
 
@@ -171,4 +172,60 @@ test('production Sender and Receiver transfer and download a 2 MiB file', async 
   } finally {
     await Promise.all([senderContext.close(), receiverContext.close()]);
   }
+});
+
+test('defers a share-code revoke and resumes it within the grace window', async ({ request }) => {
+  // Worker 的分享接口只接受同源请求；Playwright 的 request 上下文默认不带 Origin。
+  const origin = process.env.AERODROP_BASE_URL ?? 'http://127.0.0.1:8787';
+  const headers = { Origin: origin };
+  const peerId = randomUUID();
+  const secret = `secret-${randomUUID()}`;
+  const secretHash = createHmac('sha256', secret).update(peerId).digest('hex');
+
+  const create = await request.post('/api/share-code', {
+    headers,
+    data: { peerId, secretHash, ttlSeconds: 3600 },
+  });
+  expect(create.status()).toBe(200);
+  const { code } = (await create.json()) as { code: string };
+
+  expect((await request.get(`/api/share-code?code=${code}`, { headers })).status()).toBe(200);
+
+  const deferred = await request.post(`/api/share-code/${code}/revoke`, {
+    headers,
+    data: { peerId, secretHash, graceMs: 5_000 },
+  });
+  expect(deferred.status()).toBe(200);
+  const deferredBody = (await deferred.json()) as { revoked: boolean; deferredUntil: number };
+  expect(deferredBody.revoked).toBe(false);
+  expect(deferredBody.deferredUntil).toBeGreaterThan(Date.now());
+
+  // 宽限期内页面只是切后台：码必须仍然可兑换，否则返回时 resume 已无从谈起。
+  expect((await request.get(`/api/share-code?code=${code}`, { headers })).status()).toBe(200);
+
+  const wrongHash = createHmac('sha256', `${secret}-wrong`).update(peerId).digest('hex');
+  expect(
+    (
+      await request.post(`/api/share-code/${code}/resume`, {
+        headers,
+        data: { peerId, secretHash: wrongHash },
+      })
+    ).status()
+  ).toBe(403);
+
+  const resumed = await request.post(`/api/share-code/${code}/resume`, {
+    headers,
+    data: { peerId, secretHash },
+  });
+  expect(resumed.status()).toBe(200);
+  expect(((await resumed.json()) as { resumed: boolean }).resumed).toBe(true);
+  expect((await request.get(`/api/share-code?code=${code}`, { headers })).status()).toBe(200);
+
+  const finalRevoke = await request.post(`/api/share-code/${code}/revoke`, {
+    headers,
+    data: { peerId, secretHash },
+  });
+  expect(finalRevoke.status()).toBe(200);
+  expect(((await finalRevoke.json()) as { revoked: boolean }).revoked).toBe(true);
+  expect((await request.get(`/api/share-code?code=${code}`, { headers })).status()).toBe(404);
 });

@@ -10,6 +10,7 @@ import {
   isValidShareCodeSecretHash,
   normalizeShareCode,
   resolveShareCodeRegistration,
+  shouldRejectShareCodeRebind,
   validateShareCodeCreatePayload,
   verifyShareCodeRevoke,
   type ShareCodeAllocationResult,
@@ -1384,13 +1385,16 @@ export class SignalingHub extends DurableObject {
 
     // 改绑必须先证明自己就是原来的持有者：否则任何知道口令的人都能用「码 -> peerId」
     // 查到发送方 id，再用自己的 HMAC 覆盖这行记录，把仍在进行的分享劫走。
+    // 活跃行与 24h 墓碑都算归属证明，覆盖「先 revoke 再抢绑」的窗口。
     const existingBinding = this.findActiveShareCodeByPeerId(peerId, now);
-    if (existingBinding && existingBinding.secretHash !== secretHash) {
-      return { status: 'rebind-rejected' };
-    }
-    // 已注销的 id 在墓碑窗口内仍属于原持有者：否则「先 revoke 再抢绑」可以绕过上面的检查。
     const tombstone = this.findRecentTombstoneByPeerId(peerId, now);
-    if (tombstone && tombstone.secretHash !== secretHash) {
+    if (
+      shouldRejectShareCodeRebind({
+        activeSecretHash: existingBinding?.secretHash ?? null,
+        tombstoneSecretHash: tombstone?.secretHash ?? null,
+        requestSecretHash: secretHash,
+      })
+    ) {
       return { status: 'rebind-rejected' };
     }
 
