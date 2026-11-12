@@ -471,7 +471,7 @@ test('receiver auto-recovers after a disconnect and returns to resumable state',
   await expect.poll(async () => getConnectionCount(page, '111111')).toBe(2);
 });
 
-test('stalled persisted progress reconnects through relay and resumes from the committed offset', async ({ page }) => {
+test('stalled persisted progress reconnects without forcing relay, then falls back to relay on the second stall', async ({ page }) => {
   await page.clock.install();
   await page.goto('/');
   await setScenario(page, '444444');
@@ -489,7 +489,8 @@ test('stalled persisted progress reconnects through relay and resumes from the c
   await page.clock.fastForward(14_000);
 
   await expect.poll(async () => getConnectionCount(page, '444444')).toBe(2);
-  await expect.poll(async () => getConnectionPolicies(page, '444444')).toEqual(['all', 'relay']);
+  // 第一次停滞先按原路径（all）重试，避免一次抖动就把整场传输锁死在中继上。
+  await expect.poll(async () => getConnectionPolicies(page, '444444')).toEqual(['all', 'all']);
   await expect.poll(async () => getResumeRequests(page, '444444')).toEqual([
     {
       type: 'RESUME_REQUEST',
@@ -501,6 +502,10 @@ test('stalled persisted progress reconnects through relay and resumes from the c
       },
     },
   ]);
+
+  await page.clock.fastForward(14_000);
+  await expect.poll(async () => getConnectionCount(page, '444444')).toBe(3);
+  await expect.poll(async () => getConnectionPolicies(page, '444444')).toEqual(['all', 'all', 'relay']);
 });
 
 test('cancel during reconnect clears stale timers and allows a clean reconnect', async ({ page }) => {

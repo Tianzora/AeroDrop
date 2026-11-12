@@ -1,4 +1,5 @@
 // /api/share-code 的浏览器端封装：把 409 / 429 映射成可分支的结果，不抛异常。
+import { CONNECTION_TIMINGS } from '../constants/transfer.ts';
 import { computeShareCodeSecretHash, normalizeShareCode } from './shareCodeRegistry.ts';
 
 export type ShareCodeClientOptions = {
@@ -28,9 +29,24 @@ export type RevokeShareCodeInput = {
   code: string;
   peerId: string;
   secretHash: string;
+  /** >0 时服务端只登记待注销时间，窗口内可用同一凭证 resume。 */
+  graceMs?: number;
 };
 
 export type RevokeShareCodeResult =
+  | { status: 'ok'; code: string; deferredUntil?: number }
+  | { status: 'forbidden' }
+  | { status: 'not-found' }
+  | { status: 'rate-limited'; retryAfterMs: number }
+  | { status: 'failed'; error: string };
+
+export type ResumeShareCodeInput = {
+  code: string;
+  peerId: string;
+  secretHash: string;
+};
+
+export type ResumeShareCodeResult =
   | { status: 'ok'; code: string }
   | { status: 'forbidden' }
   | { status: 'not-found' }
@@ -123,9 +139,13 @@ export const lookupShareCode = async (
   }
 };
 
-export const revokeShareCode = async (
-  input: RevokeShareCodeInput,
-  options: ShareCodeClientOptions = {}
+type ShareCodeCredentialAction = 'revoke' | 'resume';
+
+const changeShareCodeState = async (
+  input: { code: string; peerId: string; secretHash: string },
+  action: ShareCodeCredentialAction,
+  options: ShareCodeClientOptions,
+  extra: { graceMs?: number } = {}
 ): Promise<RevokeShareCodeResult> => {
   const normalized = normalizeShareCode(input.code);
   if (!normalized) return { status: 'failed', error: 'code must be six digits' };
@@ -133,14 +153,24 @@ export const revokeShareCode = async (
     return { status: 'failed', error: 'peerId and secretHash are required' };
   }
 
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    CONNECTION_TIMINGS.SHARE_CODE_LOOKUP_TIMEOUT_MS
+  );
   try {
     const response = await resolveFetch(options)(
-      resolveApiUrl(options, '/api/share-code/' + encodeURIComponent(normalized) + '/revoke'),
+      resolveApiUrl(options, '/api/share-code/' + encodeURIComponent(normalized) + '/' + action),
       {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         cache: 'no-store',
-        body: JSON.stringify({ peerId: input.peerId, secretHash: input.secretHash }),
+        signal: controller.signal,
+        body: JSON.stringify({
+          peerId: input.peerId,
+          secretHash: input.secretHash,
+          ...(extra.graceMs && extra.graceMs > 0 ? { graceMs: extra.graceMs } : {}),
+        }),
       }
     );
 
@@ -149,11 +179,28 @@ export const revokeShareCode = async (
     if (response.status === 404) return { status: 'not-found' };
     if (response.status === 429) return { status: 'rate-limited', retryAfterMs: readRetryAfterMs(response) };
     if (!response.ok) return { status: 'failed', error: await readErrorMessage(response) };
-    return { status: 'ok', code: normalized };
+    const payload = (await response.json().catch(() => ({}))) as { deferredUntil?: unknown };
+    return {
+      status: 'ok',
+      code: normalized,
+      ...(typeof payload.deferredUntil === 'number' ? { deferredUntil: payload.deferredUntil } : {}),
+    };
   } catch (error) {
     return { status: 'failed', error: error instanceof Error ? error.message : 'Share code request failed' };
+  } finally {
+    clearTimeout(timeout);
   }
 };
+
+export const revokeShareCode = (
+  input: RevokeShareCodeInput,
+  options: ShareCodeClientOptions = {}
+): Promise<RevokeShareCodeResult> => changeShareCodeState(input, 'revoke', options, { graceMs: input.graceMs });
+
+export const resumeShareCode = (
+  input: ResumeShareCodeInput,
+  options: ShareCodeClientOptions = {}
+): Promise<ResumeShareCodeResult> => changeShareCodeState(input, 'resume', options);
 
 // 与 shareCodeSession 的契约：secret 用 32 字节随机 hex，绑定哈希走 registry 的同一实现。
 export const SHARE_CODE_SECRET_BYTES = 32;

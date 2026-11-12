@@ -33,8 +33,10 @@ export const getReceiverWaitingStatusCopy = (
         cancelLabel: '取消',
       };
     case 'connecting_peer':
+      // 此时只发起了候选收集，走直连还是中继要等 ICE 选对；别提前宣称已经是点对点。
       return {
-        title: '正在建立点对点通道...',
+        title: '正在建立连接...',
+        detail: '同时尝试直连与中继，连上后显示实际路径',
         cancelLabel: '取消',
       };
     case 'waiting_response':

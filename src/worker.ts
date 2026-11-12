@@ -7,7 +7,6 @@ import {
   SHARE_CODE_REBIND_REJECTED_BODY,
   SHARE_CODE_TAKEN_BODY,
   allocateShareCode,
-  isShareCodeRecordExpired,
   isValidShareCodeSecretHash,
   normalizeShareCode,
   resolveShareCodeRegistration,
@@ -35,6 +34,11 @@ import {
   hasTurnIceServers,
   selectReliableIceServers,
 } from '../services/turnCredentials';
+
+// 注销后保留 peerId 归属的时间窗。与口令 TTL 上限对齐，覆盖「同一个分享反复启停」。
+const SHARE_CODE_TOMBSTONE_MS = 24 * 60 * 60 * 1000;
+// pagehide 可能只是切后台/被系统挂起，不能立刻永久注销；延迟窗口内允许原凭证恢复。
+const SHARE_CODE_REVOKE_MAX_GRACE_MS = 120_000;
 
 interface AssetBinding {
   fetch(input: Request | string | URL, init?: RequestInit): Promise<Response>;
@@ -157,6 +161,7 @@ type ShareCodeRow = {
   peer_id: string;
   secret_hash: string;
   expires_at: number;
+  revoke_after: number | null;
 };
 
 type ShareCodeBodyResult =
@@ -833,7 +838,12 @@ const handleShareCodeLookup = async (request: Request, env: Env): Promise<Respon
   return shareCodeJson(await storeResponse.json());
 };
 
-const handleShareCodeRevoke = async (request: Request, env: Env, rawCode: string): Promise<Response> => {
+const handleShareCodeCredentialAction = async (
+  request: Request,
+  env: Env,
+  rawCode: string,
+  op: 'revoke' | 'resume'
+): Promise<Response> => {
   if (!isAllowedSameOriginRequest(request)) {
     return shareCodeJson({ error: 'Forbidden' }, 403);
   }
@@ -862,7 +872,7 @@ const handleShareCodeRevoke = async (request: Request, env: Env, rawCode: string
     return shareCodeJson({ error: 'Invalid JSON body' }, 400);
   }
 
-  const payload = body.value as { peerId?: unknown; secretHash?: unknown };
+  const payload = body.value as { peerId?: unknown; secretHash?: unknown; graceMs?: unknown };
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) {
     return shareCodeJson({ error: 'Body must be a JSON object' }, 400);
   }
@@ -873,7 +883,16 @@ const handleShareCodeRevoke = async (request: Request, env: Env, rawCode: string
     return shareCodeJson({ error: 'peerId and secretHash are required' }, 400);
   }
 
-  const storeResponse = await callShareCodeStore(env, { op: 'revoke', code, peerId, secretHash });
+  const graceMs = op === 'revoke' && typeof payload.graceMs === 'number' && Number.isFinite(payload.graceMs)
+    ? Math.min(Math.max(0, Math.floor(payload.graceMs)), SHARE_CODE_REVOKE_MAX_GRACE_MS)
+    : 0;
+  const storeResponse = await callShareCodeStore(env, {
+    op,
+    code,
+    peerId,
+    secretHash,
+    ...(graceMs > 0 ? { graceMs } : {}),
+  });
   if (storeResponse.status === 403) {
     return shareCodeJson(SHARE_CODE_FORBIDDEN_BODY, 403);
   }
@@ -881,11 +900,17 @@ const handleShareCodeRevoke = async (request: Request, env: Env, rawCode: string
     return shareCodeJson({ error: 'Share code not found' }, 404);
   }
   if (!storeResponse.ok) {
-    return shareCodeJson({ error: 'Share code revoke failed' }, 503);
+    return shareCodeJson({ error: `Share code ${op} failed` }, 503);
   }
 
   return shareCodeJson(await storeResponse.json());
 };
+
+const handleShareCodeRevoke = (request: Request, env: Env, rawCode: string): Promise<Response> =>
+  handleShareCodeCredentialAction(request, env, rawCode, 'revoke');
+
+const handleShareCodeResume = (request: Request, env: Env, rawCode: string): Promise<Response> =>
+  handleShareCodeCredentialAction(request, env, rawCode, 'resume');
 
 const handleApiRequest = async (request: Request, env: Env, pathname: string): Promise<Response> => {
   switch (pathname) {
@@ -925,6 +950,14 @@ export default {
       return applyResponsePolicies(
         request,
         await handleShareCodeRevoke(request, env, shareCodeRevokeMatch[1])
+      );
+    }
+
+    const shareCodeResumeMatch = /^\/api\/share-code\/([^/]+)\/resume$/.exec(pathname);
+    if (shareCodeResumeMatch) {
+      return applyResponsePolicies(
+        request,
+        await handleShareCodeResume(request, env, shareCodeResumeMatch[1])
       );
     }
 
@@ -1230,24 +1263,69 @@ export class SignalingHub extends DurableObject {
         'peer_id TEXT NOT NULL, ' +
         'secret_hash TEXT NOT NULL, ' +
         'expires_at INTEGER NOT NULL, ' +
-        'created_at INTEGER NOT NULL)'
+        'created_at INTEGER NOT NULL, ' +
+        'revoke_after INTEGER)'
+    );
+    // 旧库补列：pagehide 的延迟注销需要记录待生效时间。
+    const columns = this.ctx.storage.sql
+      .exec<{ name: string }>('PRAGMA table_info(share_codes)')
+      .toArray();
+    if (!columns.some((column) => column.name === 'revoke_after')) {
+      this.ctx.storage.sql.exec('ALTER TABLE share_codes ADD COLUMN revoke_after INTEGER');
+    }
+    // 注销后保留一段时间的「墓碑」：只 DELETE 活跃行会让 peerId 的归属信息消失，
+    // 任何拿到过发送方 peerId 的人都能抢先用自己的 secretHash 重新绑定这个 id，
+    // 之后发送方续期会一直 409 并被静默吞掉。墓碑让 24h 内的重绑定仍需原凭证。
+    this.ctx.storage.sql.exec(
+      'CREATE TABLE IF NOT EXISTS share_code_tombstones (' +
+        'peer_id TEXT PRIMARY KEY, ' +
+        'code TEXT NOT NULL, ' +
+        'secret_hash TEXT NOT NULL, ' +
+        'revoked_at INTEGER NOT NULL)'
+    );
+    this.ctx.storage.sql.exec(
+      'CREATE INDEX IF NOT EXISTS idx_share_code_tombstones_revoked ' +
+        'ON share_code_tombstones(revoked_at)'
     );
   }
 
   private deleteExpiredShareCodes(now: number): void {
-    this.ctx.storage.sql.exec('DELETE FROM share_codes WHERE expires_at <= ?', now);
+    // 口令 TTL 与分享有效期相等，自然到期时活跃行已经不存在，而 revoke 对过期记录
+    // 一律 403：不在这里补写墓碑，最常用的到期路径就完全没有归属记录。
+    this.ctx.storage.sql.exec(
+      'INSERT INTO share_code_tombstones (peer_id, code, secret_hash, revoked_at) ' +
+        'SELECT peer_id, code, secret_hash, ? FROM share_codes ' +
+        'WHERE expires_at <= ? OR (revoke_after IS NOT NULL AND revoke_after <= ?) ' +
+        'ON CONFLICT(peer_id) DO UPDATE SET code = excluded.code, ' +
+        'secret_hash = excluded.secret_hash, revoked_at = excluded.revoked_at',
+      now,
+      now,
+      now
+    );
+    this.ctx.storage.sql.exec(
+      'DELETE FROM share_codes WHERE expires_at <= ? OR (revoke_after IS NOT NULL AND revoke_after <= ?)',
+      now,
+      now
+    );
+    this.ctx.storage.sql.exec(
+      'DELETE FROM share_code_tombstones WHERE revoked_at <= ?',
+      now - SHARE_CODE_TOMBSTONE_MS
+    );
   }
 
   private findActiveShareCode(code: string, now: number): ShareCodeRecord | null {
     this.deleteExpiredShareCodes(now);
     const rows = this.ctx.storage.sql
       .exec<ShareCodeRow>(
-        'SELECT code, peer_id, secret_hash, expires_at FROM share_codes WHERE code = ?',
+        'SELECT code, peer_id, secret_hash, expires_at, revoke_after FROM share_codes WHERE code = ?',
         code
       )
       .toArray();
     const row = rows[0];
     if (!row) return null;
+    if (row.expires_at <= now || (row.revoke_after !== null && row.revoke_after <= now)) {
+      return null;
+    }
 
     const record: ShareCodeRecord = {
       code: row.code,
@@ -1255,25 +1333,43 @@ export class SignalingHub extends DurableObject {
       secretHash: row.secret_hash,
       expiresAt: row.expires_at,
     };
-    return isShareCodeRecordExpired(record, now) ? null : record;
+    return record;
   }
 
   private findActiveShareCodeByPeerId(peerId: string, now: number): ShareCodeRecord | null {
     const rows = this.ctx.storage.sql
       .exec<ShareCodeRow>(
-        'SELECT code, peer_id, secret_hash, expires_at FROM share_codes WHERE peer_id = ?',
+        'SELECT code, peer_id, secret_hash, expires_at, revoke_after FROM share_codes WHERE peer_id = ?',
         peerId
       )
       .toArray();
     const row = rows[0];
     if (!row) return null;
+    if (row.expires_at <= now || (row.revoke_after !== null && row.revoke_after <= now)) {
+      return null;
+    }
     const record: ShareCodeRecord = {
       code: row.code,
       peerId: row.peer_id,
       secretHash: row.secret_hash,
       expiresAt: row.expires_at,
     };
-    return isShareCodeRecordExpired(record, now) ? null : record;
+    return record;
+  }
+
+  private findRecentTombstoneByPeerId(
+    peerId: string,
+    now: number
+  ): { secretHash: string } | null {
+    const rows = this.ctx.storage.sql
+      .exec<{ secret_hash: string }>(
+        'SELECT secret_hash FROM share_code_tombstones WHERE peer_id = ? ' +
+          'AND revoked_at > ? ORDER BY revoked_at DESC LIMIT 1',
+        peerId,
+        now - SHARE_CODE_TOMBSTONE_MS
+      )
+      .toArray();
+    return rows[0] ? { secretHash: rows[0].secret_hash } : null;
   }
 
   private registerShareCode(
@@ -1290,6 +1386,11 @@ export class SignalingHub extends DurableObject {
     // 查到发送方 id，再用自己的 HMAC 覆盖这行记录，把仍在进行的分享劫走。
     const existingBinding = this.findActiveShareCodeByPeerId(peerId, now);
     if (existingBinding && existingBinding.secretHash !== secretHash) {
+      return { status: 'rebind-rejected' };
+    }
+    // 已注销的 id 在墓碑窗口内仍属于原持有者：否则「先 revoke 再抢绑」可以绕过上面的检查。
+    const tombstone = this.findRecentTombstoneByPeerId(peerId, now);
+    if (tombstone && tombstone.secretHash !== secretHash) {
       return { status: 'rebind-rejected' };
     }
 
@@ -1343,9 +1444,46 @@ export class SignalingHub extends DurableObject {
     return Response.json(decision);
   }
 
-  private revokeShareCode(code: string): boolean {
+  private deferShareCodeRevoke(record: ShareCodeRecord, revokeAfter: number): boolean {
+    const updated = this.ctx.storage.sql
+      .exec<{ code: string }>(
+        'UPDATE share_codes SET revoke_after = ? ' +
+          'WHERE code = ? AND peer_id = ? AND secret_hash = ? RETURNING code',
+        revokeAfter,
+        record.code,
+        record.peerId,
+        record.secretHash
+      )
+      .toArray();
+    return updated.length > 0;
+  }
+
+  private resumeShareCode(record: ShareCodeRecord): boolean {
+    const updated = this.ctx.storage.sql
+      .exec<{ code: string }>(
+        'UPDATE share_codes SET revoke_after = NULL ' +
+          'WHERE code = ? AND peer_id = ? AND secret_hash = ? RETURNING code',
+        record.code,
+        record.peerId,
+        record.secretHash
+      )
+      .toArray();
+    return updated.length > 0;
+  }
+
+  private revokeShareCode(record: ShareCodeRecord, now: number): boolean {
+    // 先写墓碑再删活跃行：即使 DELETE 失败，归属信息也不会丢。
+    this.ctx.storage.sql.exec(
+      'INSERT INTO share_code_tombstones (peer_id, code, secret_hash, revoked_at) ' +
+        'VALUES (?, ?, ?, ?) ON CONFLICT(peer_id) DO UPDATE SET ' +
+        'code = excluded.code, secret_hash = excluded.secret_hash, revoked_at = excluded.revoked_at',
+      record.peerId,
+      record.code,
+      record.secretHash,
+      now
+    );
     const deleted = this.ctx.storage.sql
-      .exec<{ code: string }>('DELETE FROM share_codes WHERE code = ? RETURNING code', code)
+      .exec<{ code: string }>('DELETE FROM share_codes WHERE code = ? RETURNING code', record.code)
       .toArray();
     return deleted.length > 0;
   }
@@ -1357,6 +1495,7 @@ export class SignalingHub extends DurableObject {
       secretHash?: unknown;
       code?: unknown;
       ttlMs?: unknown;
+      graceMs?: unknown;
     };
     try {
       payload = (await request.json()) as typeof payload;
@@ -1402,6 +1541,24 @@ export class SignalingHub extends DurableObject {
       return Response.json({ peerId: record.peerId, expiresAt: record.expiresAt });
     }
 
+    if (payload.op === 'resume') {
+      if (!code) return new Response('Bad Request', { status: 400 });
+
+      const peerId = typeof payload.peerId === 'string' ? payload.peerId : '';
+      const secretHash = typeof payload.secretHash === 'string' ? payload.secretHash : '';
+      if (!peerId || !secretHash) return new Response('Bad Request', { status: 400 });
+
+      // 与 revoke 同一套凭证校验：只允许原持有者取消待注销。
+      const record = this.findActiveShareCode(code, now);
+      if (!record || !verifyShareCodeRevoke({ record, peerId, secretHash }).allowed) {
+        return Response.json(SHARE_CODE_FORBIDDEN_BODY, { status: 403 });
+      }
+      if (!this.resumeShareCode(record)) {
+        return Response.json(SHARE_CODE_FORBIDDEN_BODY, { status: 403 });
+      }
+      return Response.json({ resumed: true, code });
+    }
+
     if (payload.op === 'revoke') {
       if (!code) return new Response('Bad Request', { status: 400 });
 
@@ -1411,10 +1568,19 @@ export class SignalingHub extends DurableObject {
 
       // 码不存在与凭证不匹配都回 403：不让调用方把 revoke 当「这个码是否已占用」的探测口。
       const record = this.findActiveShareCode(code, now);
-      if (!verifyShareCodeRevoke({ record, peerId, secretHash }).allowed) {
+      if (!record || !verifyShareCodeRevoke({ record, peerId, secretHash }).allowed) {
         return Response.json(SHARE_CODE_FORBIDDEN_BODY, { status: 403 });
       }
-      if (!this.revokeShareCode(code)) {
+      const graceMs = typeof payload.graceMs === 'number' && Number.isFinite(payload.graceMs)
+        ? Math.min(Math.max(0, Math.floor(payload.graceMs)), SHARE_CODE_REVOKE_MAX_GRACE_MS)
+        : 0;
+      if (graceMs > 0) {
+        if (!this.deferShareCodeRevoke(record, now + graceMs)) {
+          return Response.json(SHARE_CODE_FORBIDDEN_BODY, { status: 403 });
+        }
+        return Response.json({ revoked: false, deferredUntil: now + graceMs, code });
+      }
+      if (!this.revokeShareCode(record, now)) {
         return Response.json(SHARE_CODE_FORBIDDEN_BODY, { status: 403 });
       }
 

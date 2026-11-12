@@ -48,6 +48,20 @@ test('credit gate rejects pending wait when connection closes', async () => {
   await assert.rejects(gate.waitForAvailable(1024), /connection closed/);
 });
 
+test('credit gate times out a stalled wait and releases the connection', async () => {
+  const gate = new ReceiveCreditGate(4096, 0, 1024);
+  gate.recordSent(1024);
+
+  await assert.rejects(
+    gate.waitForAvailable(1024, 80),
+    /Timed out after 80ms waiting for receive credit/,
+  );
+
+  // 超时后必须把自己从等待队列里移除，后续信用更新不能复活已 reject 的 Promise。
+  gate.update(1024, 1024, 4096);
+  assert.equal(await gate.waitForAvailable(1024), 1024);
+});
+
 test('late close from an old connection cannot release replacement peer state', () => {
   assert.equal(shouldReleasePeerState('conn-old', 'conn-new', true), false);
   assert.equal(shouldReleasePeerState('conn-old', 'conn-old', true), false);

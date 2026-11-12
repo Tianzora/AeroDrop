@@ -12,9 +12,9 @@ export type IceConfigRateLimitOptions = {
 
 export type IceConfigRateLimitDecision = FixedWindowRateLimitDecision;
 
-export const MAX_ICE_CONFIG_ATTEMPTS_PER_WINDOW = 30;
+export const MAX_ICE_CONFIG_ATTEMPTS_PER_WINDOW = 120;
 export const ICE_CONFIG_RATE_LIMIT_WINDOW_MS = 60 * 1000;
-export const MAX_TRACKED_ICE_CONFIG_CLIENTS = 4096;
+export const MAX_TRACKED_ICE_CONFIG_CLIENTS = 8192;
 
 const DEFAULT_OPTIONS: IceConfigRateLimitOptions = {
   maxAttemptsPerWindow: MAX_ICE_CONFIG_ATTEMPTS_PER_WINDOW,

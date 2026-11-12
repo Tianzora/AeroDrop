@@ -91,7 +91,7 @@ import {
 import { createSerialAsyncProcessor } from '../services/receive/serialAsyncProcessor';
 import {
   isValidShareCode,
-  lookupSharePeerId,
+  lookupSharePeerIdResult,
   normalizeShareCodeInput,
   parseShareCodeFromClipboard,
 } from '../services/shareCodeSession';
@@ -398,7 +398,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
 
   /**
    * 快速重连预算耗尽、且没有其它在途尝试时要收口成错误态。只停手不置错的话，界面会永远
-   * 停在「正在建立点对点通道...」，用户既看不到失败也拿不到可操作的重试入口。
+   * 停在「正在建立连接...」，用户既看不到失败也拿不到可操作的重试入口。
    */
   const reportExhaustedFastReconnect = (attemptId: string | null) => {
     const hasOtherRouteAttempt = Array.from(routeAttemptsRef.current.keys()).some(
@@ -1348,6 +1348,12 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }
 
       const conn = connRef.current;
+      // 传输层正在 ICE restart / 断链宽限时，没有新的落盘进度是预期的；
+      // 这段窗口交给 peerRuntime 的宽限计时器裁决，避免 12s 看门狗抢先关连接，
+      // 把 12-16s 就能自愈的抖动变成整条重拨。
+      if (conn?.peerConnection && conn.peerConnection.connectionState !== 'connected') {
+        return;
+      }
       const now = Date.now();
       if (!shouldReconnectStalledCommittedTransfer({
         currentState: stateRef.current,
@@ -1384,7 +1390,8 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       }
       stalledReconnectAttemptsRef.current += 1;
       pendingCommittedReconnectResumeRef.current = true;
-      forceRelayOnCommittedReconnectRef.current = true;
+      // 首次停滞先按原路径重试：一次弱网抖动就永久切 relay 会让后续整场传输都劣化。
+      forceRelayOnCommittedReconnectRef.current = stalledReconnectAttemptsRef.current >= 2;
       markSessionEvent(connectTelemetryRef.current, 'transfer_stall_reconnect', {
         attempt: stalledReconnectAttemptsRef.current,
         stalledForMs,
@@ -2473,9 +2480,9 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
   }
   const receiveSessionCoordinator = receiveSessionCoordinatorRef.current!;
 
-  const resolveSenderPeerId = async (targetCode: string): Promise<string | null> => {
-    if (!isValidShareCode(targetCode)) return null;
-    return lookupSharePeerId(targetCode);
+  const resolveSenderPeerId = async (targetCode: string) => {
+    if (!isValidShareCode(targetCode)) return { status: 'not-found' as const };
+    return lookupSharePeerIdResult(targetCode);
   };
 
   const handleConnect = async (options?: {
@@ -2491,12 +2498,38 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
       committedReconnectAttemptsRef.current = 0;
       pendingCommittedReconnectResumeRef.current = false;
       setReconnectAttempt(0);
+      // 改码重连时旧 peerId 必须失效，否则新的 preserve 重连会带着旧值连到上一个发送端。
+      resolvedSenderPeerIdRef.current = '';
     }
-    const resolvedPeerId = await resolveSenderPeerId(code);
+    // 已建连后的内部重连不需要再查登记表：发送方 peerId 在首次解析时已经确定，
+    // 而 /api/share-code 的 GET 有 30 次/10s 限流且失败一律返回 null——重连时再查
+    // 会把限流/断网误报成「口令不存在或已过期」，明明发送方还在线。
+    const cachedPeerId = resolvedSenderPeerIdRef.current;
+    let resolvedPeerId: string | null = null;
+    let lookupFailure: 'not-found' | 'timeout' | 'rate-limited' | 'failed' = 'not-found';
+    if (options?.preserveCommittedReconnectAttempts && cachedPeerId) {
+      resolvedPeerId = cachedPeerId;
+    } else {
+      const lookup = await resolveSenderPeerId(code);
+      if (lookup.status === 'ok') {
+        resolvedPeerId = lookup.peerId;
+      } else {
+        lookupFailure = lookup.status;
+      }
+    }
     if (!resolvedPeerId) {
       if (receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) {
-        // 输错口令不换页：输入行播叉 + 抖动，行内提示，停在本页等重输
-        setErrorMsg('口令不存在或已过期，请确认后重试');
+        // 输错口令不换页：输入行播叉 + 抖动，行内提示，停在本页等重输。
+        // 超时/限流是查询失败，不是码失效，不能误导用户去重新要码。
+        setErrorMsg(
+          lookupFailure === 'timeout'
+            ? '查询口令超时，请检查网络后重试'
+            : lookupFailure === 'rate-limited'
+              ? '查询过于频繁，请稍后再试'
+              : lookupFailure === 'failed'
+                ? '网络异常，请稍后重试'
+                : '口令不存在或已过期，请确认后重试',
+        );
         setCodeStatus('error');
       }
       return;
@@ -2741,7 +2774,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
           setErrorMsg(RATE_LIMITED_CONNECTION_MESSAGE);
           setState(TransferState.ERROR);
         } else if (
-          err.type === 'peer-unavailable' &&
+          (err.type === 'peer-unavailable' || err.type === 'socket-error') &&
           canAttemptFastReconnect(retryCountRef.current, MAX_CONNECT_RETRY)
         ) {
           // Skip peer-unavailable retries for the background relay attempt
@@ -2754,7 +2787,10 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
             baseMs: FAST_RETRY_BASE_MS,
             maxMs: FAST_RETRY_MAX_MS,
           });
-          markConnectionRetry(connectTelemetryRef.current, 'peer_unavailable');
+          markConnectionRetry(
+            connectTelemetryRef.current,
+            err.type === 'socket-error' ? 'socket_error' : 'peer_unavailable'
+          );
           backgroundTimeoutGroupRef.current.schedule(() => {
             if (!receiverActivityTrackerRef.current.isCurrent(receiverActivityToken)) return;
             if (happyEyeballsWonRef.current) return;

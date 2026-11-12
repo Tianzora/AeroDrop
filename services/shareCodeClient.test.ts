@@ -7,6 +7,7 @@ import {
   createShareSecret,
   lookupShareCode,
   registerShareCode,
+  resumeShareCode,
   revokeShareCode,
 } from './shareCodeClient.ts';
 
@@ -176,4 +177,41 @@ test('rejects a revoke without credentials before calling the API', async () => 
 
   assert.deepEqual(result, { status: 'failed', error: 'peerId and secretHash are required' });
   assert.equal(calls.length, 0);
+});
+
+test('defers a revoke with a grace window', async () => {
+  const { impl, calls } = captureFetch(() => jsonResponse({ revoked: false, deferredUntil: 1_234 }));
+
+  const result = await revokeShareCode(
+    { code: '123456', peerId: PEER_ID, secretHash: SECRET_HASH, graceMs: 60_000 },
+    { fetchImpl: impl }
+  );
+
+  assert.deepEqual(result, { status: 'ok', code: '123456', deferredUntil: 1_234 });
+  assert.equal(calls[0].url, '/api/share-code/123456/revoke');
+  assert.equal(readBody(calls[0]).graceMs, 60_000);
+});
+
+test('resumes a deferred revoke with the original credentials', async () => {
+  const { impl, calls } = captureFetch(() => jsonResponse({ resumed: true, code: '123456' }));
+
+  const result = await resumeShareCode(
+    { code: '123456', peerId: PEER_ID, secretHash: SECRET_HASH },
+    { fetchImpl: impl }
+  );
+
+  assert.deepEqual(result, { status: 'ok', code: '123456' });
+  assert.equal(calls[0].url, '/api/share-code/123456/resume');
+  assert.deepEqual(readBody(calls[0]), { peerId: PEER_ID, secretHash: SECRET_HASH });
+});
+
+test('maps an expired resume window to forbidden', async () => {
+  const { impl } = captureFetch(() => jsonResponse({ error: 'forbidden' }, 403));
+
+  const result = await resumeShareCode(
+    { code: '123456', peerId: PEER_ID, secretHash: SECRET_HASH },
+    { fetchImpl: impl }
+  );
+
+  assert.deepEqual(result, { status: 'forbidden' });
 });

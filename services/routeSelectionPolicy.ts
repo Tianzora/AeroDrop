@@ -69,7 +69,8 @@ export const getRouteSelectionDecision = (context: RouteSelectionContext): Route
     policyClass: 'desktop_normal',
     startAllImmediately: true,
     startRelayDelayMs: null,
-    primaryProbeWindowMs: 1200,
+    // 与 p2pGraceWindow 对齐：先让直连走完自己的窗口，再决定是否额外起中继探测。
+    primaryProbeWindowMs: 1800,
     p2pGraceWindowMs: 1800,
     reasons,
     inputs: context,

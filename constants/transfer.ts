@@ -4,6 +4,8 @@ export const TRANSFER_CONFIG = {
   CHUNK_SIZE_RELAY: 64 * 1024,
 
   READ_BUFFER_SIZE: 32 * 1024 * 1024,
+  // 协商上限异常偏小时逐次减半的兜底下限；继续减会让每片开销压过吞吐收益。
+  MIN_CHUNK_SIZE: 16 * 1024,
 
   WRITE_BUFFER_FLUSH_THRESHOLD: 1 * 1024 * 1024,
 
@@ -22,12 +24,19 @@ export const FLOW_CONTROL = {
   LOW_WATER_MARK_WAN: 256 * 1024,
   HIGH_WATER_MARK_RELAY: 1 * 1024 * 1024,
   LOW_WATER_MARK_RELAY: 256 * 1024,
+  // 多个接收端同时拉取时，各连接独立排队会让总在途数据随人数线性增长。
+  // 这里给发送端一个共享在途预算，按活跃连接数均分。
+  TOTAL_UPLINK_BUFFER_BYTES: 4 * 1024 * 1024,
 } as const;
 
 // 连接、重试、心跳与屏幕共享时序。组件只允许引用这里，不要在组件体内再写字面量。
 export const CONNECTION_TIMINGS = {
   /** 「永久」分享的口令续期间隔（服务端 TTL 上限 24h）。 */
   SHARE_CODE_RENEWAL_INTERVAL_MS: 30 * 60 * 1000,
+  /** 接收端兑换口令的超时：断网/Worker 卡住时不能无限停在等待页。 */
+  SHARE_CODE_LOOKUP_TIMEOUT_MS: 4_000,
+  /** pagehide 时延后注销口令的窗口：期间原凭证可 resume，避免切后台被误杀。 */
+  SHARE_CODE_REVOKE_GRACE_MS: 60_000,
   /** 续传检查点的最小写入间隔/增量，避免每收到一块就写 localStorage。 */
   RESUME_CHECKPOINT_MIN_INTERVAL_MS: 2_000,
   RESUME_CHECKPOINT_MIN_BYTES: 1024 * 1024,
@@ -41,7 +50,11 @@ export const CONNECTION_TIMINGS = {
   RECEIVER_RECONNECT_BUDGET_STABLE_MS: 15_000,
   RECEIVER_MAX_AUTO_REPAIR_RETRIES_PER_FILE: 2,
   /** 传输层 'disconnected' 的宽限期：期间 ICE 有机会自行恢复，超时才按断链处理。 */
-  TRANSPORT_DISCONNECTED_GRACE_MS: 5_000,
+  TRANSPORT_DISCONNECTED_GRACE_MS: 12_000,
+  /** initiator 在宽限期内发起 ICE restart 的延迟：先给 ICE 自愈的时间，再主动换候选。 */
+  TRANSPORT_ICE_RESTART_DELAY_MS: 6_000,
+  /** ICE restart 发出后等待新路径连通的额外时间。 */
+  TRANSPORT_ICE_RESTART_GRACE_MS: 10_000,
   SENDER_SIGNALING_OPEN_TIMEOUT_MS: 10_000,
   SENDER_MAX_SIGNALING_OPEN_RETRY: 1,
   /** 信令连接稳定存活这么久才清零重连退避计数，否则「握手成功即被关」会让退避永远从 1s 起。 */
@@ -65,6 +78,15 @@ export const CONNECTION_TIMINGS = {
   SCREEN_SHARE_HEARTBEAT_INTERVAL_MS: 3_000,
   SCREEN_SHARE_BANDWIDTH_MONITOR_INTERVAL_MS: 2_000,
   SCREEN_SHARE_BANDWARMUP_MS: 8_000,
+  // 观看端冻帧检测的采样间隔：5 秒内累计 2 次以上冻帧就认为画面已经卡死。
+  SCREEN_SHARE_VIEWER_STATS_INTERVAL_MS: 5_000,
+} as const;
+
+// 屏幕共享走 P2P mesh：每个 viewer 一条独立 PC 和独立编码，发送端上行是 N 份。
+// 这里不引入 SFU，只做纯客户端的上行预算与人数上限，避免住宅/移动网络被瞬间打满。
+export const SCREEN_SHARE_LIMITS = {
+  // 同时观看人数上限。超过后由分享端直接关闭新 call，而不是让信令 12 会话/IP 的隐式上限兜底。
+  MAX_VIEWERS: 6,
 } as const;
 
 // 接收端存储阈值与归档内存上限。

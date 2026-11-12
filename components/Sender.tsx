@@ -11,7 +11,7 @@ import {
 import { formatFileSize, generateFileFingerprint } from '../services/fileUtils';
 import { createCrc32Hasher } from '../services/crc32WorkerClient';
 import { DEFAULT_MAX_PREFIX_CRC_BYTES, computePrefixCrc32 } from '../services/send/prefixCrc';
-import { isValidShareCode, requestShareCode, revokeShareSession } from '../services/shareCodeSession';
+import { isValidShareCode, requestShareCode, resumeShareSession, revokeShareSession } from '../services/shareCodeSession';
 import { loadPeerRuntime, type Peer, type DataConnection } from '../services/peerRuntime';
 import {
   getPeerRuntimeErrorMessage,
@@ -46,8 +46,10 @@ import {
   type ConnectionRoute,
 } from '../services/transfer/adaptiveFlow';
 import {
+  DataChannelDrainTimeoutError,
   isDataChannelMessageTooLargeError,
   resolveDataChannelChunkSize,
+  resolveSharedBufferLimits,
   waitForDataChannelDrain,
 } from '../services/transfer/DataChannelTransmitter';
 import { StreamingFileChunkReader } from '../services/transfer/StreamingFileChunkReader';
@@ -70,6 +72,7 @@ import { createSenderRouteHandshakeHandler } from '../services/send/routeHandsha
 import {
   isSendSequenceCurrent,
   ReceiveCreditGate,
+  ReceiveCreditTimeoutError,
   shouldReleasePeerState,
 } from '../services/send/receiveCredit';
 import { classifyCandidatePair } from '../services/networkAddress';
@@ -115,8 +118,14 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
 
   const [expiryOption, setExpiryOption] = useState<string>('1h');
   // 当前分享的口令登记（结束分享时用它带凭证注销，避免码在 TTL 内继续可被抢占）。
-  const shareRegistrationRef = useRef<{ code: string; peerId: string; secret: string } | null>(null);
+  const shareRegistrationRef = useRef<{ code: string; peerId: string; secret: string; secretHash: string } | null>(null);
+  // pagehide 只登记延迟注销；页面真的回到前台时用同一凭证 resume，避免移动端切后台误杀。
+  const sharePausedRef = useRef(false);
+  const stopSharingRef = useRef<() => void>(() => {});
   const shareRenewalTimerRef = useRef<number | null>(null);
+  // TURN 短期凭证默认 1h 过期，与分享口令的有效期档位无关；所有分享都按固定节奏
+  // 换一份新的 iceServers，否则 10m/1h 档在 1h 之后新接入的接收端没有 relay 候选。
+  const iceRefreshTimerRef = useRef<number | null>(null);
   const [remainingTime, setRemainingTime] = useState<string>('');
 
   const [copied, setCopied] = useState(false);
@@ -151,6 +160,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
   const peerTransferEpochRef = useRef<Map<string, number>>(new Map());
   const pendingSendPeersRef = useRef<Set<string>>(new Set());
   const peerReceiveCreditRef = useRef<Map<string, ReceiveCreditGate>>(new Map());
+  // 个别浏览器/中间设备会把 SCTP 上限报得比实际可发送值大。首次被拒后记住这条
+  // 连接真正能发的最大分片，后续直接按该尺寸读，避免每个 chunk 都重试一次。
+  const peerNegotiatedChunkCapRef = useRef<Map<string, number>>(new Map());
   // 最近一次创建的信用门闸，即使 map 里已被清理也保留引用：续传时必须取消它，
   // 否则上一条发送序列会永久卡在 waitForAvailable 上，把新序列堵在活动集合外。
   const lastReceiveCreditRef = useRef<Map<string, ReceiveCreditGate>>(new Map());
@@ -163,6 +175,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
   const peerAverageSpeed = useRef<Map<string, number>>(new Map());
 
   const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  // 分享有效期到点只处理一次：有在途传输时保留连接、注销口令并放行当前传输完成。
+  const shareExpiryHandledRef = useRef(false);
+  const releaseInFlightRef = useRef<Promise<void> | null>(null);
   const fileListRef = useRef<File[]>([]);
   const lastConnectionStatsPollRef = useRef<number>(0);
   const peerDebugLevel = import.meta.env.DEV ? 1 : 0;
@@ -237,6 +252,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
       previousCredit.cancel('Connection replaced');
       peerReceiveCreditRef.current.delete(fromPeerId);
       peerReceiveCreditOwnerRef.current.delete(fromPeerId);
+    }
+    const previousChunkCap = peerNegotiatedChunkCapRef.current.get(fromPeerId);
+    if (previousChunkCap !== undefined) {
+      const nextPeerCap = peerNegotiatedChunkCapRef.current.get(toPeerId);
+      peerNegotiatedChunkCapRef.current.set(
+        toPeerId,
+        Math.min(nextPeerCap ?? previousChunkCap, previousChunkCap),
+      );
+      peerNegotiatedChunkCapRef.current.delete(fromPeerId);
     }
 
     if (peerHasProgressSyncRef.current.delete(fromPeerId)) {
@@ -640,6 +664,62 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
   }, [state]);
 
   useEffect(() => {
+    // pagehide 可能只是切后台/被系统挂起，立刻永久注销会把分享误杀。
+    // 这里只登记一个 60s 的延迟注销窗口；页面回到前台用同一凭证 resume。
+    const handlePageHide = (event: PageTransitionEvent) => {
+      if (event.persisted) return;
+      const registration = shareRegistrationRef.current;
+      if (!registration) return;
+      sharePausedRef.current = true;
+      const url = `/api/share-code/${encodeURIComponent(registration.code)}/revoke`;
+      const body = JSON.stringify({
+        peerId: registration.peerId,
+        secretHash: registration.secretHash,
+        graceMs: CONNECTION_TIMINGS.SHARE_CODE_REVOKE_GRACE_MS,
+      });
+      const beacon = new Blob([body], { type: 'application/json' });
+      if (navigator.sendBeacon?.(url, beacon)) return;
+      void fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body,
+        keepalive: true,
+        cache: 'no-store',
+      }).catch(() => {});
+    };
+
+    const resumePausedShare = async () => {
+      if (!sharePausedRef.current) return;
+      sharePausedRef.current = false;
+      const registration = shareRegistrationRef.current;
+      if (!registration) return;
+
+      const resumed = await resumeShareSession(registration);
+      if (resumed) return;
+      // 窗口已过或码已被回收：不要再让 UI 展示一个连不上的分享。
+      if (shareRegistrationRef.current !== registration) return;
+      onNotification('分享已失效，请重新创建', 'error');
+      stopSharingRef.current();
+    };
+
+    const handlePageShow = (event: PageTransitionEvent) => {
+      if (!event.persisted) void resumePausedShare();
+    };
+    const handleVisibilityChange = () => {
+      if (document.visibilityState === 'visible') void resumePausedShare();
+    };
+
+    window.addEventListener('pagehide', handlePageHide);
+    window.addEventListener('pageshow', handlePageShow);
+    document.addEventListener('visibilitychange', handleVisibilityChange);
+    return () => {
+      window.removeEventListener('pagehide', handlePageHide);
+      window.removeEventListener('pageshow', handlePageShow);
+      document.removeEventListener('visibilitychange', handleVisibilityChange);
+    };
+  }, [onNotification]);
+
+  useEffect(() => {
     isMountedRef.current = true;
     return () => {
       isMountedRef.current = false;
@@ -679,11 +759,26 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
           const end = metadata.constraints!.expiresAt!;
           const diff = end - now;
           if (diff <= 0) {
+            if (timerRef.current) {
+              clearInterval(timerRef.current);
+              timerRef.current = null;
+            }
+            if (shareExpiryHandledRef.current) return;
+            shareExpiryHandledRef.current = true;
             setRemainingTime('已过期');
-            stopSharing();
-            setErrorMsg('分享时间已结束');
-            setState(TransferState.ERROR);
-            if (timerRef.current) clearInterval(timerRef.current);
+            // TTL 的语义是「不再接受新接收者」，不是掐断已经在传的数据。新连接在
+            // peer.on('connection') 里已按 expiresAt 拒绝；这里只注销口令、停止续期。
+            if (activeTransfersCount.current > 0) {
+              void releaseShareRegistration();
+              markSessionEvent(shareTelemetryRef.current, 'share_expired_transfer_continues', {
+                activeTransfers: activeTransfersCount.current,
+              });
+              onNotification?.('分享已过期，当前传输将继续完成', 'info');
+            } else {
+              stopSharing();
+              setErrorMsg('分享时间已结束');
+              setState(TransferState.ERROR);
+            }
           } else {
             const h = Math.floor(diff / (1000 * 60 * 60));
             const m = Math.floor((diff % (1000 * 60 * 60)) / (1000 * 60));
@@ -845,6 +940,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
 
   const startSharing = async () => {
     if (!fileList.length || !metadata) return;
+    // 上一次停止分享的 DELETE 可能还在路上：先等它落地，否则用同一个自定义码重新开始
+    // 时新 POST 会先到服务端并拿到 409（「该口令已被占用」）。
+    const pendingRelease = releaseInFlightRef.current;
+    if (pendingRelease) await pendingRelease;
     const shareActivityToken = shareActivityTrackerRef.current.begin();
     shareTelemetryRef.current = createConnectionSession('sender', {
       fileCount: fileList.length,
@@ -868,10 +967,12 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
       peerReceiveCreditRef.current.forEach((credit) => credit.cancel('Share restarted'));
       peerReceiveCreditRef.current.clear();
       peerReceiveCreditOwnerRef.current.clear();
+      peerNegotiatedChunkCapRef.current.clear();
       resetCommittedRouteState();
     setIndividualStats([]);
 
     setState(TransferState.GENERATING_CODE);
+    shareExpiryHandledRef.current = false;
     setPreparingStage('fetching_ice');
     setConnectionStatus('');
     const expiryDuration = EXPIRY_DURATIONS[expiryOption as ExpiryOption];
@@ -907,7 +1008,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
       (iceConfig.iceTransportPolicy === 'relay' || iceConfig.relayRecommended) &&
       onNotification
     ) {
-      onNotification('检测到当前网络更适合优先使用中继连接，已自动优化建连策略', 'info');
+      onNotification('当前网络可能需要中继，将同时尝试直连与中继，最终路径以实际连通结果为准', 'info');
     } else if (!iceConfig.hasTurn && onNotification) {
       onNotification(NO_TURN_WARNING_MESSAGE, 'info');
     }
@@ -959,13 +1060,44 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
           return;
         }
 
+        // 登记是网络往返：返回时组件可能已卸载/分享已停止。此时不能把码写回状态，
+        // 否则没人会再注销它，码会一直占着到 TTL。
+        if (
+          !shareActivityTrackerRef.current.isCurrent(shareActivityToken) ||
+          isDestroyingRef.current ||
+          !isMountedRef.current
+        ) {
+          void revokeShareSession({
+            code: registration.code,
+            peerId: senderPeerId,
+            secret: registration.secret,
+          }).catch(() => {});
+          return;
+        }
+
         displayCode = registration.code;
         signalingToken = registration.secret;
         shareRegistrationRef.current = {
           code: registration.code,
           peerId: senderPeerId,
           secret: registration.secret,
+          secretHash: registration.secretHash,
         };
+
+        if (iceRefreshTimerRef.current !== null) {
+          window.clearInterval(iceRefreshTimerRef.current);
+        }
+        iceRefreshTimerRef.current = window.setInterval(() => {
+          if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken)) return;
+          void getIceConfig()
+            .then((fresh) => {
+              // /api/ice-config 失败时会返回 STUN-only 回退配置；把它写回去等于
+              // 主动丢掉中继能力，必须只在确实拿到 TURN 时才更新。
+              if (!fresh.hasTurn) return;
+              peerRef.current?.updateIceServers(fresh.iceServers);
+            })
+            .catch(() => {});
+        }, CONNECTION_TIMINGS.SHARE_CODE_RENEWAL_INTERVAL_MS);
 
         if (expiryOption === 'never') {
           if (shareRenewalTimerRef.current !== null) {
@@ -981,7 +1113,22 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
               requestedCode: current.code,
               ttlSeconds: 86_400,
               secret: current.secret,
-            }).catch(() => {});
+            })
+              .then((result) => {
+                // 409/429 都是正常返回而不是 reject；只看 catch 会把最常见的失败全部吞掉。
+                if (result.status !== 'ok') {
+                  markSessionEvent(shareTelemetryRef.current, 'share_code_renewal_failed', {
+                    code: current.code,
+                    status: result.status,
+                  });
+                }
+              })
+              .catch(() => {
+                markSessionEvent(shareTelemetryRef.current, 'share_code_renewal_failed', {
+                  code: current.code,
+                  status: 'network',
+                });
+              });
           }, CONNECTION_TIMINGS.SHARE_CODE_RENEWAL_INTERVAL_MS);
         }
       }
@@ -1006,6 +1153,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
         if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken)) {
           return;
         }
+        await releaseShareRegistration();
         setErrorMsg('加载连接模块失败，请重试');
         setState(TransferState.ERROR);
         return;
@@ -1021,16 +1169,21 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
       }
 
       clearSignalingOpenTimeout();
-      signalingOpenTimeoutRef.current = window.setTimeout(() => {
+      signalingOpenTimeoutRef.current = window.setTimeout(async () => {
         if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken) || isDestroyingRef.current) return;
         if (peerRef.current !== customPeer) return;
         markSessionEvent(shareTelemetryRef.current, 'signaling_open_timeout', { attempt });
         try { customPeer.destroy(); } catch {}
+        // 重试复用已登记的口令（同一 peerId/secret），不需要先 DELETE 再 POST：
+        // 那会多烧一次分享码预算（POST 10 次/10s），弱网抖动时可能把自己限流。
         if (attempt < CONNECTION_TIMINGS.SENDER_MAX_SIGNALING_OPEN_RETRY) {
           setPreparingStage('connecting_signaling');
           void createSharePeer(attempt + 1);
           return;
         }
+        // 最终失败：注销口令，否则它会占码到 TTL（接收端表现为「连接超时」）。
+        await releaseShareRegistration();
+        if (!shareActivityTrackerRef.current.isCurrent(shareActivityToken) || isDestroyingRef.current) return;
         setErrorMsg('准备传输节点超时，请重试');
         setState(TransferState.ERROR);
       }, CONNECTION_TIMINGS.SENDER_SIGNALING_OPEN_TIMEOUT_MS);
@@ -1053,6 +1206,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
         peerReceiveCreditRef.current.get(conn.peer)?.cancel('Connection closed');
         peerReceiveCreditRef.current.delete(conn.peer);
         peerReceiveCreditOwnerRef.current.delete(conn.peer);
+        peerNegotiatedChunkCapRef.current.delete(conn.peer);
       }
       if (closingConnectionId) {
           receiverSessionRegistryRef.current.releaseConnection(closingConnectionId);
@@ -1108,6 +1262,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
       peerConnectionTypeRef.current.delete(conn.peer);
       peerHeartbeatAtRef.current.delete(conn.peer);
       peerAdaptiveFlowRef.current.delete(conn.peer);
+      peerNegotiatedChunkCapRef.current.delete(conn.peer);
       peerRouteLogSignatureRef.current.delete(conn.peer);
       removePeerName(conn.peer);
 
@@ -1321,6 +1476,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
               // 信令层已被服务端明确拒绝（每 IP 会话数超限 / 消息超限），重连不会自愈，
               // 给用户一个可操作的提示，不要在后台继续重连。
               markConnectionFailure(shareTelemetryRef.current, err.type === 'rate-limited' ? 'rate_limited' : 'message_too_large');
+              void releaseShareRegistration();
               setErrorMsg(getPeerRuntimeErrorMessage(err.type));
               setState(TransferState.ERROR);
           } else {
@@ -1334,8 +1490,13 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
               }
               markConnectionFailure(shareTelemetryRef.current, `peer_error:${err.type}`);
               if (activeConnections.current.size === 0) {
+                 void releaseShareRegistration();
                  setErrorMsg(getPeerRuntimeErrorMessage(err.type));
                  setState(TransferState.ERROR);
+              } else if (err.type === 'unauthorized' && !shareRegistrationRef.current) {
+                 // 分享到期后口令已注销：信令重连会失败，但已有连接上的传输不受影响。
+                 // 不提示的话用户会以为网络恢复后还能续传。
+                 onNotification?.('分享已过期，网络中断后将无法自动续传；当前传输不受影响', 'info');
               }
           }
       });
@@ -1354,6 +1515,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
           
           conn.on('open', () => {
               markSessionEvent(shareTelemetryRef.current, 'receiver_connected', { peerId: conn.peer });
+              // 换到新连接后重新协商分片大小，避免中继期的 16KiB 上限被直连继承。
+              peerNegotiatedChunkCapRef.current.delete(conn.peer);
               activeConnections.current.add(conn);
               peerHeartbeatAtRef.current.set(conn.peer, Date.now());
               peerProgress.current.set(conn.peer, peerProgress.current.get(conn.peer) || 0);
@@ -1737,51 +1900,107 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
             await fileHasher.reset();
             if (!isCurrentSequence()) return;
             let hashedBytes = 0;
-            const chunkReader = new StreamingFileChunkReader(file, READ_BUFFER_SIZE, fileOffset);
+            let chunkReader = new StreamingFileChunkReader(file, READ_BUFFER_SIZE, fileOffset);
 
             while (fileOffset < file.size) {
                 if (transferSessionId.current !== currentSessionId || peerTransferEpochRef.current.get(peerId) !== peerEpoch) return;
                 if (!conn.open) throw new Error("Connection closed during transfer");
 
                 const flow = peerAdaptiveFlowRef.current.get(peerId) || defaultFlow;
-                const maxChunkSize = resolveDataChannelChunkSize(
-                  flow.chunkSize,
-                  conn.peerConnection.sctp?.maxMessageSize,
+                const negotiatedCap = peerNegotiatedChunkCapRef.current.get(peerId);
+                const maxChunkSize = Math.min(
+                  resolveDataChannelChunkSize(
+                    flow.chunkSize,
+                    conn.peerConnection.sctp?.maxMessageSize,
+                  ),
+                  negotiatedCap ?? Number.POSITIVE_INFINITY,
                 );
                 if (dataChannel) {
-                    await waitForDataChannelDrain(conn, dataChannel, {
-                        highWaterMark: flow.highWaterMark,
-                        lowWaterMark: flow.lowWaterMark,
-                    });
+                    // 多个接收端并发时共享一份在途预算，避免 N 条连接各自
+                    // 按满 HWM 排队把发送端上行缓冲推高到 N 倍。只统计真正在
+                    // 发数据的连接：竞速失败侧与空闲连接不应稀释预算。
+                    const bufferLimits = resolveSharedBufferLimits(
+                        flow,
+                        activeSendingPeersRef.current.size,
+                    );
+                    await waitForDataChannelDrain(conn, dataChannel, bufferLimits);
                     if (!isCurrentSequence()) return;
                 }
 
-                const availableCredit = await receiveCredit.waitForAvailable(
-                  Math.min(maxChunkSize, file.size - fileOffset),
-                );
+                let availableCredit: number;
+                for (;;) {
+                  try {
+                    availableCredit = await receiveCredit.waitForAvailable(
+                      Math.min(maxChunkSize, file.size - fileOffset),
+                      TRANSFER_CONFIG.PROGRESS_STALL_TIMEOUT_MS,
+                    );
+                    break;
+                  } catch (error) {
+                    if (!isCurrentSequence()) return;
+                    // ICE restart / 宽限期间接收端没有新信用是预期的：此时关连接会把
+                    // 一次可自愈的抖动报成“12 秒无响应”。连接已关闭或已恢复 connected
+                    // 时才说明真的停滞，交给外层处理。
+                    if (
+                      error instanceof ReceiveCreditTimeoutError &&
+                      conn.open &&
+                      conn.peerConnection.connectionState !== 'connected'
+                    ) {
+                      continue;
+                    }
+                    throw error;
+                  }
+                }
                 if (!isCurrentSequence()) return;
-                const nextChunk = await chunkReader.readNextChunk(availableCredit);
+                let nextChunk = await chunkReader.readNextChunk(Math.min(availableCredit, maxChunkSize));
                 if (!isCurrentSequence()) return;
-                const chunkView = nextChunk.chunk;
+                let chunkView = nextChunk.chunk;
                 if (!chunkView) {
                     break;
                 }
 
-                try {
-                    if (!isCurrentSequence()) return;
-                    conn.send(chunkView);
-                } catch (e) {
-                    if (!conn.open) throw new Error("Connection closed during send");
-                    if (isDataChannelMessageTooLargeError(e)) {
-                      throw new Error(
-                        `Negotiated data-channel message limit rejected ${chunkView.byteLength} bytes`,
-                        { cause: e },
-                      );
+                // 个别浏览器/中间设备会把协商上限报高。发送被拒时从同一偏移
+                // 换小片重读，而不是把整条连接判死再走一遍注定失败的重连。
+                let tooLargeRetries = 0;
+                for (;;) {
+                    try {
+                        if (!isCurrentSequence()) return;
+                        conn.send(chunkView);
+                        break;
+                    } catch (e) {
+                        if (!conn.open) throw new Error("Connection closed during send");
+                        if (!isDataChannelMessageTooLargeError(e)) throw e;
+                        if (tooLargeRetries >= 3 || chunkView.byteLength <= TRANSFER_CONFIG.MIN_CHUNK_SIZE) {
+                            throw new Error(
+                              `Negotiated data-channel message limit rejected ${chunkView.byteLength} bytes at the 16 KiB fallback`,
+                              { cause: e },
+                            );
+                        }
+                        tooLargeRetries += 1;
+                        const retrySize = Math.max(
+                            TRANSFER_CONFIG.MIN_CHUNK_SIZE,
+                            Math.floor(chunkView.byteLength / 2),
+                        );
+                        chunkReader = new StreamingFileChunkReader(
+                            file,
+                            Math.min(READ_BUFFER_SIZE, Math.max(retrySize * 2, TRANSFER_CONFIG.MIN_CHUNK_SIZE * 2)),
+                            nextChunk.fileOffset,
+                        );
+                        nextChunk = await chunkReader.readNextChunk(Math.min(retrySize, availableCredit));
+                        chunkView = nextChunk.chunk;
+                        if (!chunkView) break;
                     }
-                    throw e;
                 }
+                if (!chunkView) break;
 
                 const currentChunkSize = chunkView.byteLength;
+                if (tooLargeRetries > 0) {
+                  // 记住这条连接实际接受的尺寸，后续 chunk 直接从该上限开始读。
+                  const knownCap = peerNegotiatedChunkCapRef.current.get(peerId);
+                  peerNegotiatedChunkCapRef.current.set(
+                    peerId,
+                    Math.min(knownCap ?? currentChunkSize, currentChunkSize),
+                  );
+                }
                 receiveCredit.recordSent(currentChunkSize);
                 fileHasher.update(chunkView);
                 hashedBytes += currentChunkSize;
@@ -1846,7 +2065,18 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
         ) {
             console.warn(`Transfer to ${peerId} interrupted/failed:`, err);
             const remoteName = peerNamesRef.current[conn.peer] || `设备 ...${conn.peer.slice(-4)}`;
-            onNotification(`${remoteName} 传输中断，等待重连后可继续`, 'error');
+            if (err instanceof ReceiveCreditTimeoutError || err instanceof DataChannelDrainTimeoutError) {
+              // 接收端可能已冻结/被杀：它自己的重连计时器也停了，不能承诺“等待重连”。
+              // 断开这条连接让发送端回到可重试状态，由用户决定重试或取消。
+              markSessionEvent(shareTelemetryRef.current, 'send_stalled_timeout', {
+                peerId,
+                timeoutMs: err.timeoutMs,
+                stage: err instanceof ReceiveCreditTimeoutError ? 'credit' : 'drain',
+              });
+              onNotification(`${remoteName} 超过 ${Math.round(err.timeoutMs / 1000)} 秒没有响应，已断开连接，可重试或取消`, 'error');
+            } else {
+              onNotification(`${remoteName} 传输中断，等待重连后可继续`, 'error');
+            }
 
             if (conn.open) {
                 conn.close();
@@ -1871,17 +2101,40 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
     }
   };
 
-  const stopSharing = () => {
+  // 注销口令并停止续期，但不触碰已建立的 Peer/DataChannel：过期与信令失败都要用它，
+  // 前者要放行在途传输，后者要避免留下占码到 TTL 的幽灵口令。
+  const releaseShareRegistration = async (): Promise<void> => {
     if (shareRenewalTimerRef.current !== null) {
       window.clearInterval(shareRenewalTimerRef.current);
       shareRenewalTimerRef.current = null;
     }
+    if (iceRefreshTimerRef.current !== null) {
+      window.clearInterval(iceRefreshTimerRef.current);
+      iceRefreshTimerRef.current = null;
+    }
     const registration = shareRegistrationRef.current;
     shareRegistrationRef.current = null;
+    sharePausedRef.current = false;
     if (registration) {
       // 注销失败不影响本地停止分享（码会在 TTL 后自然过期）。
-      void revokeShareSession(registration).catch(() => {});
+      // 返回 Promise 是为了让「注销后立刻重登记同一个自定义码」的路径能等 DELETE 生效，
+      // 否则新请求可能先到服务端并拿到 409。stopSharing 本身是同步函数，会把这里的
+      // Promise 记进 releaseInFlightRef，startSharing 开头再等一次。
+      const pending = revokeShareSession(registration).then(
+        () => {},
+        () => {},
+      );
+      releaseInFlightRef.current = pending;
+      try {
+        await pending;
+      } finally {
+        if (releaseInFlightRef.current === pending) releaseInFlightRef.current = null;
+      }
     }
+  };
+
+  const stopSharing = () => {
+    void releaseShareRegistration();
     isDestroyingRef.current = true;
     shareActivityTrackerRef.current.begin();
     if (signalingOpenTimeoutRef.current !== null) {
@@ -1892,6 +2145,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
     peerReceiveCreditRef.current.forEach((credit) => credit.cancel('Transfer cancelled'));
     peerReceiveCreditRef.current.clear();
     peerReceiveCreditOwnerRef.current.clear();
+    peerNegotiatedChunkCapRef.current.clear();
     
     activeConnections.current.forEach(conn => {
         if (conn.open) {
@@ -1949,6 +2203,11 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
     if (timerRef.current) clearInterval(timerRef.current);
   };
 
+  // 让 pagehide 的 resume 失败时能走当前最新的 stopSharing（含最新状态闭包）。
+  useEffect(() => {
+    stopSharingRef.current = stopSharing;
+  });
+
   const handleCopyCode = async () => {
       if (!transferCode) return;
       try {
@@ -2004,6 +2263,10 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
   const overallEta = etaSpeedBytes > 0 ? formatEta(remainingBytes / etaSpeedBytes) : '--';
 
   const handleCopyLink = async () => {
+      if (!transferCode) {
+          onNotification('分享链接尚未生成，请稍候', 'info');
+          return;
+      }
       try {
           await navigator.clipboard.writeText(shareLink);
           setLinkCopied(true);

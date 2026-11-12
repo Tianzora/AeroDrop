@@ -5,6 +5,7 @@ import type { DataConnection } from '../peerRuntime.ts';
 import {
   isDataChannelMessageTooLargeError,
   resolveDataChannelChunkSize,
+  resolveSharedBufferLimits,
   waitForDataChannelDrain,
 } from './DataChannelTransmitter.ts';
 
@@ -30,6 +31,24 @@ test('resolves chunk size from route cap and negotiated SCTP maximum', () => {
   assert.equal(resolveDataChannelChunkSize(128 * 1024, 16 * 1024), 16 * 1024);
   assert.equal(resolveDataChannelChunkSize(128 * 1024, 64 * 1024), 64 * 1024);
   assert.equal(resolveDataChannelChunkSize(128 * 1024, 256 * 1024), 128 * 1024);
+});
+
+test('shares the in-flight buffer budget across concurrent receivers', () => {
+  const lanFlow = { highWaterMark: 2 * 1024 * 1024, lowWaterMark: 512 * 1024 };
+
+  assert.deepEqual(resolveSharedBufferLimits(lanFlow, 1), lanFlow);
+
+  const eight = resolveSharedBufferLimits(lanFlow, 8);
+  assert.equal(eight.highWaterMark, 512 * 1024);
+  assert.equal(eight.lowWaterMark, 256 * 1024);
+
+  const sixteen = resolveSharedBufferLimits(lanFlow, 16);
+  assert.equal(sixteen.highWaterMark, 256 * 1024);
+  assert.equal(sixteen.lowWaterMark, 128 * 1024);
+
+  const crowded = resolveSharedBufferLimits(lanFlow, 10_000);
+  assert.ok(crowded.highWaterMark >= 1);
+  assert.ok(crowded.highWaterMark > crowded.lowWaterMark);
 });
 
 test('waits for bufferedamountlow and rejects when the channel closes', async () => {

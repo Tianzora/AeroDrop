@@ -130,6 +130,8 @@ export const SenderUI: React.FC<SenderUIProps> = ({
 }) => {
   const reduceMotion = useReducedMotion();
   const hasSingleDevice = individualStats.length === 1;
+  // 分享到期后新接收者已被拒绝，但已有传输可能仍在继续：此时不能再让人复制旧口令/链接。
+  const shareExpired = remainingTime === '已过期';
 
   return (
     <div className="w-full max-w-xl mx-auto p-4 md:p-6 bg-white dark:bg-night-850 rounded-card shadow-card border border-slate-100 dark:border-night-750 transition-colors">
@@ -254,7 +256,9 @@ export const SenderUI: React.FC<SenderUIProps> = ({
             <h3 className="text-xs font-medium text-slate-500 dark:text-night-400">分享口令</h3>
             <div className="mt-2 flex items-center justify-between gap-3">
               <span className="flex items-baseline gap-[0.08em] font-mono text-[2.25rem] font-bold leading-none text-brand-600 sm:text-[2.5rem] dark:text-brand-400">
-                {transferCode.split('').map((digit, index) => (
+                {shareExpired ? (
+                  <span className="font-sans text-lg font-medium text-slate-400 dark:text-night-400">已失效</span>
+                ) : transferCode.split('').map((digit, index) => (
                   <motion.span
                     key={`${index}-${digit}`}
                     initial={reduceMotion ? false : { opacity: 0, y: 6 }}
@@ -265,7 +269,7 @@ export const SenderUI: React.FC<SenderUIProps> = ({
                   </motion.span>
                 ))}
               </span>
-              <button
+              {!shareExpired && <button
                 type="button"
                 onClick={handleCopyCode}
                 aria-label={copied ? '已复制分享口令' : '复制分享口令'}
@@ -277,7 +281,7 @@ export const SenderUI: React.FC<SenderUIProps> = ({
               >
                 {copied ? <Check size={14} aria-hidden="true" /> : <Copy size={14} aria-hidden="true" />}
                 {copied ? '已复制' : '复制'}
-              </button>
+              </button>}
             </div>
           </section>
 
@@ -287,11 +291,14 @@ export const SenderUI: React.FC<SenderUIProps> = ({
             <button
               type="button"
               onClick={handleCopyLink}
+              disabled={shareExpired}
               aria-label="复制分享链接"
-              className="group flex w-full items-center gap-3 py-2 text-left"
+              className="group flex w-full items-center gap-3 py-2 text-left disabled:cursor-not-allowed"
             >
               <span className="w-16 shrink-0 text-xs font-medium text-slate-500 dark:text-night-400">分享链接</span>
-              <span className="min-w-0 flex-1 truncate font-mono text-xs text-slate-600 dark:text-night-300">{shareLink}</span>
+              <span className={`min-w-0 flex-1 truncate font-mono text-xs ${
+                shareExpired ? 'text-slate-400 line-through dark:text-night-500' : 'text-slate-600 dark:text-night-300'
+              }`}>{shareExpired ? '链接已失效' : shareLink}</span>
               <span className="flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-slate-400 transition-colors group-hover:bg-slate-100 group-hover:text-slate-700 dark:group-hover:bg-night-800 dark:group-hover:text-night-200">
                 {linkCopied ? (
                   <Check size={14} className="text-emerald-500" aria-hidden="true" />

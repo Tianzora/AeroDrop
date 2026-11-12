@@ -14,6 +14,17 @@ test('reconnecting stage surfaces recovery-specific title and detail', () => {
   assert.equal(copy.cancelLabel, '停止重连');
 });
 
+test('connecting peer copy does not claim a point-to-point path before ICE selects one', () => {
+  const copy = getReceiverWaitingStatusCopy({
+    stage: 'connecting_peer',
+    reconnectAttempt: 0,
+  });
+
+  assert.equal(copy.title, '正在建立连接...');
+  assert.equal(copy.detail, '同时尝试直连与中继，连上后显示实际路径');
+  assert.equal(copy.cancelLabel, '取消');
+});
+
 test('connecting signaling copy reflects AeroDrop signaling instead of legacy peerjs wording', () => {
   const copy = getReceiverWaitingStatusCopy({
     stage: 'connecting_signaling',

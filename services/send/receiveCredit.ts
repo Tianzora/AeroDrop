@@ -15,10 +15,22 @@ export const isSendSequenceCurrent = (
   connectionOpen: boolean,
 ) => connectionOpen && currentSessionId === expectedSessionId && currentEpoch === expectedEpoch;
 
+/** 发送端停滞看门狗：接收端长时间没有释放信用窗口（冻结/进程被杀/主线程阻塞）。 */
+export class ReceiveCreditTimeoutError extends Error {
+  readonly timeoutMs: number;
+
+  constructor(timeoutMs: number) {
+    super(`Timed out after ${timeoutMs}ms waiting for receive credit`);
+    this.name = 'ReceiveCreditTimeoutError';
+    this.timeoutMs = timeoutMs;
+  }
+}
+
 type CreditWaiter = {
   maxBytes: number;
   resolve: (availableBytes: number) => void;
   reject: (error: Error) => void;
+  timer?: ReturnType<typeof setTimeout>;
 };
 
 const assertOffset = (name: string, value: number, max: number) => {
@@ -77,9 +89,18 @@ export class ReceiveCreditGate {
     this.releaseNextWaiter();
   }
 
-  waitForAvailable(maxBytes: number): Promise<number> {
+  /**
+   * 等待接收端落盘进度释放信用窗口。
+   *
+   * `timeoutMs` 是发送端的停滞看门狗：接收端被冻结/进程被杀时 DataChannel 可能仍是
+   * open，信用窗口会永久不释放。没有超时的话发送循环会静默卡死，双方都不报错。
+   */
+  waitForAvailable(maxBytes: number, timeoutMs?: number): Promise<number> {
     if (!Number.isSafeInteger(maxBytes) || maxBytes <= 0) {
       return Promise.reject(new Error('maxBytes must be a positive integer'));
+    }
+    if (timeoutMs !== undefined && (!Number.isFinite(timeoutMs) || timeoutMs <= 0)) {
+      return Promise.reject(new Error('timeoutMs must be a positive number'));
     }
     if (this.cancelledError) {
       return Promise.reject(this.cancelledError);
@@ -91,7 +112,28 @@ export class ReceiveCreditGate {
     }
 
     return new Promise<number>((resolve, reject) => {
-      this.waiters.push({ maxBytes, resolve, reject });
+      const waiter: CreditWaiter = {
+        maxBytes,
+        resolve: (bytes) => {
+          if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+          resolve(bytes);
+        },
+        reject: (error) => {
+          if (waiter.timer !== undefined) clearTimeout(waiter.timer);
+          reject(error);
+        },
+      };
+
+      if (timeoutMs !== undefined) {
+        waiter.timer = setTimeout(() => {
+          const index = this.waiters.indexOf(waiter);
+          if (index < 0) return;
+          this.waiters.splice(index, 1);
+          waiter.reject(new ReceiveCreditTimeoutError(timeoutMs));
+        }, timeoutMs);
+      }
+
+      this.waiters.push(waiter);
     });
   }
 

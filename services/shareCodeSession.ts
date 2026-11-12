@@ -6,8 +6,9 @@
  * - 注册成功后发送方用 secret 作为信令 token，服务端用 HMAC(secret, peerId) 校验
  */
 
+import { CONNECTION_TIMINGS } from '../constants/transfer.ts';
 import { getAeroDropE2EHooks } from './e2eHooks';
-import { revokeShareCode } from './shareCodeClient';
+import { resumeShareCode, revokeShareCode } from './shareCodeClient';
 
 const toHex = (buffer: ArrayBuffer): string =>
   Array.from(new Uint8Array(buffer))
@@ -42,7 +43,7 @@ export const normalizeShareCodeInput = (value: string): string =>
 export type ShareCodeFailureReason = 'taken' | 'rate-limited' | 'invalid' | 'failed';
 
 export type ShareCodeRequestResult =
-  | { status: 'ok'; code: string; expiresAt: number; peerId: string; secret: string }
+  | { status: 'ok'; code: string; expiresAt: number; peerId: string; secret: string; secretHash: string }
   | { status: Exclude<ShareCodeFailureReason, 'invalid'>; retryAfterMs?: number };
 
 const isSixDigits = (value: unknown): value is string =>
@@ -82,6 +83,7 @@ export const requestShareCode = async (input: {
       expiresAt: override.expiresAt,
       peerId: input.peerId,
       secret,
+      secretHash,
     };
   }
 
@@ -123,6 +125,7 @@ export const requestShareCode = async (input: {
       expiresAt: typeof payload.expiresAt === 'number' ? payload.expiresAt : Date.now() + 3_600_000,
       peerId: input.peerId,
       secret,
+      secretHash,
     };
   } catch {
     return { status: 'failed' };
@@ -139,14 +142,36 @@ export const revokeShareSession = async (input: {
   code: string;
   peerId: string;
   secret: string;
+  /** >0 时服务端只登记待注销时间，窗口内可 resume（pagehide 用）。 */
+  graceMs?: number;
 }): Promise<boolean> => {
   if (!isSixDigits(input.code) || !input.peerId || !input.secret) {
     return false;
   }
 
   const secretHash = await computeShareSecretHash(input.secret, input.peerId);
-  const result = await revokeShareCode({ code: input.code, peerId: input.peerId, secretHash });
+  const result = await revokeShareCode({
+    code: input.code,
+    peerId: input.peerId,
+    secretHash,
+    ...(input.graceMs && input.graceMs > 0 ? { graceMs: input.graceMs } : {}),
+  });
   return result.status === 'ok' || result.status === 'not-found' || result.status === 'forbidden';
+};
+
+/** 取消 pagehide 登记的待注销；返回 false 表示窗口已过或码已不属于当前凭证。 */
+export const resumeShareSession = async (input: {
+  code: string;
+  peerId: string;
+  secret: string;
+}): Promise<boolean> => {
+  if (!isSixDigits(input.code) || !input.peerId || !input.secret) {
+    return false;
+  }
+
+  const secretHash = await computeShareSecretHash(input.secret, input.peerId);
+  const result = await resumeShareCode({ code: input.code, peerId: input.peerId, secretHash });
+  return result.status === 'ok';
 };
 
 /**
@@ -163,26 +188,59 @@ export const parseShareCodeFromClipboard = (text: string | null | undefined): st
   return match ? match[1] : null;
 };
 
-export const lookupSharePeerId = async (code: string): Promise<string | null> => {
+export type ShareCodeLookupResult =
+  | { status: 'ok'; peerId: string }
+  | { status: 'not-found' | 'timeout' | 'rate-limited' | 'failed' };
+
+/**
+ * 接收方：查询口令对应的发送方 peerId。
+ *
+ * 必须区分「码不存在」和「查询本身失败（超时/限流/断网）」：调用方原来把两者都显示成
+ * 「口令不存在或已过期」，弱网下用户会误以为码错了去重新要码。
+ */
+export const lookupSharePeerIdResult = async (code: string): Promise<ShareCodeLookupResult> => {
   if (!isSixDigits(code)) {
-    return null;
+    return { status: 'not-found' };
   }
 
   const hooks = getAeroDropE2EHooks();
   if (hooks?.resolveShareCodeOverride) {
-    return hooks.resolveShareCodeOverride(code)?.peerId ?? null;
+    const peerId = hooks.resolveShareCodeOverride(code)?.peerId;
+    return peerId ? { status: 'ok', peerId } : { status: 'not-found' };
   }
 
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    CONNECTION_TIMINGS.SHARE_CODE_LOOKUP_TIMEOUT_MS,
+  );
   try {
     const response = await fetch(`/api/share-code?code=${encodeURIComponent(code)}`, {
       cache: 'no-store',
+      signal: controller.signal,
     });
+    if (response.status === 404) {
+      return { status: 'not-found' };
+    }
+    if (response.status === 429) {
+      return { status: 'rate-limited' };
+    }
     if (!response.ok) {
-      return null;
+      return { status: 'failed' };
     }
     const payload = (await response.json()) as { peerId?: unknown };
-    return typeof payload.peerId === 'string' && payload.peerId.length > 0 ? payload.peerId : null;
+    return typeof payload.peerId === 'string' && payload.peerId.length > 0
+      ? { status: 'ok', peerId: payload.peerId }
+      : { status: 'not-found' };
   } catch {
-    return null;
+    return { status: controller.signal.aborted ? 'timeout' : 'failed' };
+  } finally {
+    clearTimeout(timeout);
   }
+};
+
+/** 兼容旧调用方：查询失败（含超时/限流）一律返回 null。 */
+export const lookupSharePeerId = async (code: string): Promise<string | null> => {
+  const result = await lookupSharePeerIdResult(code);
+  return result.status === 'ok' ? result.peerId : null;
 };

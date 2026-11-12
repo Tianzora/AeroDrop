@@ -42,6 +42,7 @@ type PeerRuntimeModule = {
 
 type PeerEvents = {
   open: (peerId: string) => void;
+  'signaling:restored': (peerId: string) => void;
   connection: (connection: DataConnection) => void;
   call: (call: MediaConnection) => void;
   error: (error: PeerRuntimeError) => void;
@@ -239,6 +240,12 @@ const parseCandidateDetails = (candidate: RTCIceCandidateInit) => {
   };
 };
 
+/** 从 SDP 取 ice-ufrag：重协商的 offer 一定带新 ufrag，重复投递的旧 offer 则相同。 */
+const extractIceUfrag = (description?: RTCSessionDescriptionInit): string | null => {
+  const match = /a=ice-ufrag:(\S+)/.exec(description?.sdp ?? '');
+  return match?.[1] ?? null;
+};
+
 const summarizeDescription = (description?: RTCSessionDescriptionInit) => ({
   type: description?.type,
   sdpLength: description?.sdp?.length ?? 0,
@@ -295,21 +302,26 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
   public open = false;
   protected remoteDescriptionReady = false;
   protected closed = false;
+  private readonly isInitiator: boolean;
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private transportGraceTimer: number | null = null;
+  private iceRestartTimer: number | null = null;
+  private iceRestartAttempted = false;
   private closeEmitted = false;
 
   constructor(
     provider: WorkerSignaledPeer,
     peerId: string,
     connectionId: string,
-    peerConnection: RTCPeerConnection
+    peerConnection: RTCPeerConnection,
+    isInitiator = false
   ) {
     super();
     this.provider = provider;
     this.peer = peerId;
     this.connectionId = connectionId;
     this.peerConnection = peerConnection;
+    this.isInitiator = isInitiator;
     this.peerConnection.onicecandidate = (event) => {
       if (!event.candidate) return;
       this.provider.logConnectionEvent(this, 'ice_candidate_local', parseCandidateDetails(event.candidate.toJSON()));
@@ -338,6 +350,9 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
   }
 
   async applyRemoteDescription(description: RTCSessionDescriptionInit): Promise<void> {
+    // 重协商（ICE restart）时新 generation 的候选可能先于 SDP 到达：先把就绪标记放下，
+    // 让这些候选重新进队列，等新的 remote description 应用完再一起 flush。
+    this.remoteDescriptionReady = false;
     await this.peerConnection.setRemoteDescription(description);
     this.remoteDescriptionReady = true;
     await this.flushPendingCandidates();
@@ -350,7 +365,11 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
       return;
     }
     void this.peerConnection.addIceCandidate(candidate).catch((error) => {
-      this.handleError(createRuntimeError('webrtc-error', 'Failed to add ICE candidate', error));
+      // ICE restart 后旧 generation 的候选会被拒绝，属于预期内的竞态；把它升级成
+      // 连接级 error 会让上层误判整条连接失败并停止自愈。
+      this.provider.logConnectionEvent(this, 'ice_candidate_dropped', {
+        message: error instanceof Error ? error.message : String(error),
+      });
     });
   }
 
@@ -364,7 +383,9 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
       try {
         await this.peerConnection.addIceCandidate(candidate);
       } catch (error) {
-        this.handleError(createRuntimeError('webrtc-error', 'Failed to flush ICE candidate', error));
+        this.provider.logConnectionEvent(this, 'ice_candidate_dropped', {
+          message: error instanceof Error ? error.message : String(error),
+        });
       }
     }
   }
@@ -386,24 +407,85 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
    */
   protected handleConnectionStateChange(state: RTCPeerConnectionState): void {
     if (state === 'connected') {
-      this.clearTransportGraceTimer();
+      this.clearTransportTimers();
+      this.iceRestartAttempted = false;
       return;
     }
     if (state === 'failed' || state === 'closed') {
       this.handleTransportClosed();
       return;
     }
-    if (state !== 'disconnected' || this.closed || this.transportGraceTimer !== null) {
+    if (state !== 'disconnected' || this.closed) return;
+
+    if (this.transportGraceTimer === null) {
+      this.transportGraceTimer = window.setTimeout(() => {
+        this.transportGraceTimer = null;
+        if (this.closed) return;
+        this.provider.logConnectionEvent(this, 'pc_disconnected_grace_expired', {
+          state: this.peerConnection.connectionState,
+        });
+        this.handleTransportClosed();
+      }, CONNECTION_TIMINGS.TRANSPORT_DISCONNECTED_GRACE_MS);
+    }
+
+    // 只有发起 offer 的一侧能 restart（answerer 主动换候选需要重协商，代价更高）；
+    // 先给 ICE 自愈窗口，再由 initiator 主动换路径。
+    if (this.isInitiator && !this.iceRestartAttempted && this.iceRestartTimer === null) {
+      this.iceRestartTimer = window.setTimeout(() => {
+        this.iceRestartTimer = null;
+        void this.attemptIceRestart();
+      }, CONNECTION_TIMINGS.TRANSPORT_ICE_RESTART_DELAY_MS);
+    }
+  }
+
+  private async attemptIceRestart(): Promise<void> {
+    if (this.closed || this.peerConnection.connectionState !== 'disconnected') return;
+    this.iceRestartAttempted = true;
+    this.provider.logConnectionEvent(this, 'pc_ice_restart_started', {
+      state: this.peerConnection.connectionState,
+    });
+    try {
+      this.peerConnection.restartIce();
+      const offer = await this.peerConnection.createOffer({ iceRestart: true });
+      await this.peerConnection.setLocalDescription(offer);
+      this.provider.forwardOffer(this, offer);
+    } catch (error) {
+      this.provider.logConnectionEvent(this, 'pc_ice_restart_failed', {
+        message: error instanceof Error ? error.message : String(error),
+      });
+      this.handleTransportClosed();
       return;
     }
+    if (this.closed || this.isTransportConnected()) return;
+    // restart 后新路径还要重新 gather/连通，顺延关闭期限，避免刚发出就被宽限计时器掐掉。
+    this.clearTransportGraceTimer();
     this.transportGraceTimer = window.setTimeout(() => {
       this.transportGraceTimer = null;
       if (this.closed) return;
-      this.provider.logConnectionEvent(this, 'pc_disconnected_grace_expired', {
-        state: this.peerConnection.connectionState,
-      });
       this.handleTransportClosed();
-    }, CONNECTION_TIMINGS.TRANSPORT_DISCONNECTED_GRACE_MS);
+    }, CONNECTION_TIMINGS.TRANSPORT_ICE_RESTART_GRACE_MS);
+  }
+
+  /** answerer 收到同一 connectionId 的重协商 offer（ICE restart）时，原地应答而不新建连接。 */
+  async answerRenegotiation(description: RTCSessionDescriptionInit): Promise<void> {
+    if (this.closed) return;
+    await this.applyRemoteDescription(description);
+    const answer = await this.peerConnection.createAnswer();
+    await this.peerConnection.setLocalDescription(answer);
+    this.provider.forwardAnswer(this, answer);
+    if (this.closed || this.isTransportConnected()) return;
+    // answerer 不能主动 restart，但仍需给新候选留出连通窗口；否则纯中继下只剩
+    // initiator 侧 6s 的重启延迟，答案刚发出就被宽限计时器关掉。
+    this.clearTransportGraceTimer();
+    this.transportGraceTimer = window.setTimeout(() => {
+      this.transportGraceTimer = null;
+      if (this.closed) return;
+      this.handleTransportClosed();
+    }, CONNECTION_TIMINGS.TRANSPORT_ICE_RESTART_GRACE_MS);
+  }
+
+  private isTransportConnected(): boolean {
+    return this.peerConnection.connectionState === 'connected';
   }
 
   private clearTransportGraceTimer(): void {
@@ -413,9 +495,17 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
     }
   }
 
+  private clearTransportTimers(): void {
+    this.clearTransportGraceTimer();
+    if (this.iceRestartTimer !== null) {
+      window.clearTimeout(this.iceRestartTimer);
+      this.iceRestartTimer = null;
+    }
+  }
+
   protected handleTransportClosed(): void {
     if (this.closed) return;
-    this.clearTransportGraceTimer();
+    this.clearTransportTimers();
     this.closed = true;
     this.open = false;
     this.provider.removeConnection(this);
@@ -443,6 +533,16 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
 
 export class DataConnection extends BaseConnection<DataConnectionEvents> {
   public dataChannel: RTCDataChannel | null = null;
+
+  constructor(
+    provider: WorkerSignaledPeer,
+    peerId: string,
+    connectionId: string,
+    peerConnection: RTCPeerConnection,
+    isInitiator = false
+  ) {
+    super(provider, peerId, connectionId, peerConnection, isInitiator);
+  }
 
   bindDataChannel(channel: RTCDataChannel): void {
     this.dataChannel = channel;
@@ -546,9 +646,10 @@ export class MediaConnection extends BaseConnection<MediaConnectionEvents> {
     provider: WorkerSignaledPeer,
     peerId: string,
     connectionId: string,
-    peerConnection: RTCPeerConnection
+    peerConnection: RTCPeerConnection,
+    isInitiator = false
   ) {
-    super(provider, peerId, connectionId, peerConnection);
+    super(provider, peerId, connectionId, peerConnection, isInitiator);
     this.peerConnection.ontrack = (event) => {
       event.streams.forEach((stream) => {
         stream.getTracks().forEach((track) => {
@@ -606,7 +707,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
   public disconnected = false;
   public readonly connections: Record<string, Array<DataConnection | MediaConnection>> = {};
 
-  private readonly config: RTCConfiguration;
+  private config: RTCConfiguration;
   private readonly options: PeerOptions;
   private readonly createdAt = performance.now();
   private connectionIndex = new Map<string, DataConnection | MediaConnection>();
@@ -623,6 +724,13 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
   private signalingOpenedAt: number | null = null;
   private awaitingPong = false;
   private registrationRejected = false;
+  /**
+   * 信令 WS 短暂断开时，answer 与 trickle ICE 候选会无处可发。直接丢弃会让纯中继
+   * 路径彻底失败（relay 候选恰好是在断开窗口里 gather 出来的），这里先排队，
+   * 同一条信令会话重连成功后再补发；超过上限则丢最旧的，避免内存无限增长。
+   */
+  private pendingSignaling: SignalingEnvelope[] = [];
+  private static readonly MAX_PENDING_SIGNALING = 256;
 
   constructor(id?: string, options?: PeerOptions);
   constructor(options?: PeerOptions);
@@ -633,6 +741,28 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     this.config = this.options.config ?? {};
     this.readyPromise = this.createReadyPromise();
     this.connectSignaling();
+  }
+
+  /**
+   * TURN 短期凭证默认 1 小时过期。PeerRuntime 在构造时把 iceServers 冻结进
+   * RTCConfiguration，长会话中新接入的连接会拿着过期凭证去 gather relay 候选。
+   * 已建立的 RTCPeerConnection 也要同步：传输层在断链后会 restartIce，若仍握着
+   * 1 小时前的 TURN 凭证，relay-only 网络下重启会直接失败。
+   */
+  updateIceServers(iceServers: RTCIceServer[]): void {
+    if (this.destroyed || !Array.isArray(iceServers) || iceServers.length === 0) return;
+    this.config = { ...this.config, iceServers };
+    for (const bucket of Object.values(this.connections)) {
+      for (const connection of bucket) {
+        try {
+          connection.peerConnection.setConfiguration({ ...this.config, iceServers });
+        } catch (error) {
+          this.logConnectionEvent(connection, 'ice_servers_update_failed', {
+            message: error instanceof Error ? error.message : String(error),
+          });
+        }
+      }
+    }
   }
 
   private log(level: 'info' | 'warn' | 'error', event: string, data?: Record<string, unknown>): void {
@@ -889,6 +1019,11 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
         this.readyPromiseResolve = null;
         this.readyPromiseReject = null;
         this.emit('open', this.id);
+      } else {
+        // 自动重连成功：'open' 只会在首次注册时发一次，上层需要单独的事件把
+        // 「正在连接服务器 / 已掉线」恢复成就绪，否则 UI 会永远停在连接中。
+        this.flushPendingSignaling();
+        this.emit('signaling:restored', this.id);
       }
       return;
     }
@@ -985,6 +1120,23 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
 
   private async handleIncomingOffer(payload: OfferEnvelope): Promise<void> {
     if (this.destroyed) return;
+    const existing = this.connectionIndex.get(payload.connectionId);
+    if (existing) {
+      // 同一 connectionId 的 offer 只可能是重协商（ICE restart）；重复投递的初始 offer
+      // 用 ufrag 区分，直接忽略，避免把健康连接重建或关掉。
+      const currentUfrag = extractIceUfrag(existing.peerConnection.remoteDescription ?? undefined);
+      const nextUfrag = extractIceUfrag(payload.description);
+      if (currentUfrag !== null && currentUfrag === nextUfrag) return;
+      if (existing.peerConnection.signalingState !== 'stable') return;
+      void existing.answerRenegotiation(payload.description).catch((error) => {
+        this.emitConnectionError(
+          existing,
+          createRuntimeError('webrtc-error', 'Failed to answer renegotiation offer', error)
+        );
+        existing.close();
+      });
+      return;
+    }
     if (payload.kind === 'data') {
       const peerConnection = new RTCPeerConnection(this.config);
       const connection = new DataConnection(this, payload.sourcePeerId, payload.connectionId, peerConnection);
@@ -1051,6 +1203,10 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
 
   removeConnection(connection: BaseConnection<any>): void {
     this.connectionIndex.delete(connection.connectionId);
+    // 连接已关，排队的 restart offer/answer 再发出去只会在对端建一条没人认领的僵尸 PC。
+    this.pendingSignaling = this.pendingSignaling.filter(
+      (pending) => !('connectionId' in pending) || pending.connectionId !== connection.connectionId
+    );
     const bucket = this.connections[connection.peer];
     if (!bucket) return;
     this.connections[connection.peer] = bucket.filter((item) => item !== connection);
@@ -1068,6 +1224,19 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
 
   private sendSignaling(message: SignalingEnvelope): void {
     if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) {
+      // offer/answer/候选都可以等 WS 重连后补发（对端通常还在同一个连接尝试里等）；
+      // ping 这类依赖即时往返的报文必须立即成功，否则按原逻辑报错。
+      if (message.type === 'offer' || message.type === 'answer' || message.type === 'ice-candidate') {
+        if (this.pendingSignaling.length >= WorkerSignaledPeer.MAX_PENDING_SIGNALING) {
+          // 先丢候选：offer/answer 丢了整次协商就白费，候选后续还能重新收集。
+          const candidateIndex = this.pendingSignaling.findIndex(
+            (pending) => pending.type === 'ice-candidate',
+          );
+          this.pendingSignaling.splice(candidateIndex >= 0 ? candidateIndex : 0, 1);
+        }
+        this.pendingSignaling.push(message);
+        return;
+      }
       throw createRuntimeError('socket-error', 'Signaling WebSocket is not open');
     }
     const baseData: Record<string, unknown> = {
@@ -1086,6 +1255,33 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     }
     this.log('info', `signaling_${message.type}_sent`, baseData);
     this.websocket.send(JSON.stringify(message));
+  }
+
+  private flushPendingSignaling(): void {
+    if (this.pendingSignaling.length === 0) return;
+    if (!this.websocket || this.websocket.readyState !== WebSocket.OPEN) return;
+    const pending = this.pendingSignaling.splice(0);
+    for (const message of pending) {
+      if (
+        'connectionId' in message &&
+        message.connectionId &&
+        !this.connectionIndex.has(message.connectionId)
+      ) {
+        continue;
+      }
+      this.sendSignaling(message);
+    }
+  }
+
+  forwardOffer(connection: BaseConnection<any>, description: RTCSessionDescriptionInit): void {
+    this.sendSignaling({
+      type: 'offer',
+      connectionId: connection.connectionId,
+      kind: connection instanceof DataConnection ? 'data' : 'media',
+      sourcePeerId: this.id,
+      targetPeerId: connection.peer,
+      description,
+    });
   }
 
   forwardAnswer(connection: BaseConnection<any>, description: RTCSessionDescriptionInit): void {
@@ -1112,7 +1308,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
 
   connect(targetPeerId: string, _options?: DataConnectionOptions): DataConnection {
     const peerConnection = new RTCPeerConnection(this.config);
-    const connection = new DataConnection(this, targetPeerId, createId('data'), peerConnection);
+    const connection = new DataConnection(this, targetPeerId, createId('data'), peerConnection, true);
     const channel = peerConnection.createDataChannel('data', { ordered: true });
     connection.bindDataChannel(channel);
     this.addConnection(connection);
@@ -1122,7 +1318,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
 
   call(targetPeerId: string, stream?: MediaStream): MediaConnection {
     const peerConnection = new RTCPeerConnection(this.config);
-    const call = new MediaConnection(this, targetPeerId, createId('media'), peerConnection);
+    const call = new MediaConnection(this, targetPeerId, createId('media'), peerConnection, true);
     if (stream) {
       stream.getTracks().forEach((track) => {
         peerConnection.addTrack(track, stream);
@@ -1209,10 +1405,35 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     return true;
   }
 
+  /**
+   * retrySignaling() 返回 false 可能是因为「本来就好/正在重连」，也可能是「救不回来」。
+   * 调用方不能把前者当成失败并重建 peer——那会在 WS 正常的 CONNECTING 窗口里换掉
+   * peerId 并关掉所有媒体连接。这里把状态显式分开。
+   */
+  signalingRecoveryState():
+    | 'connected'
+    | 'connecting'
+    | 'idle'
+    | 'rejected'
+    | 'exhausted'
+    | 'destroyed' {
+    if (this.destroyed) return 'destroyed';
+    if (this.registrationRejected) return 'rejected';
+    if (this.websocket?.readyState === WebSocket.OPEN) return 'connected';
+    if (this.websocket?.readyState === WebSocket.CONNECTING || this.reconnectTimer !== null) {
+      return 'connecting';
+    }
+    if (this.reconnectAttempts >= CONNECTION_TIMINGS.MAX_SIGNALING_RECONNECT_ATTEMPTS) {
+      return 'exhausted';
+    }
+    return 'idle';
+  }
+
   destroy(): void {
     if (this.destroyed) return;
     this.destroyed = true;
     this.isManualClose = true;
+    this.pendingSignaling = [];
     this.log('info', 'peer_destroy');
     this.stopHeartbeat();
     if (this.reconnectTimer !== null) {
