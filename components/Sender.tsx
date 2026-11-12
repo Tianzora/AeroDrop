@@ -1093,10 +1093,15 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
             .then((fresh) => {
               // /api/ice-config 失败时会返回 STUN-only 回退配置；把它写回去等于
               // 主动丢掉中继能力，必须只在确实拿到 TURN 时才更新。
-              if (!fresh.hasTurn) return;
+              if (!fresh.hasTurn) {
+                markSessionEvent(shareTelemetryRef.current, 'ice_refresh_no_turn');
+                return;
+              }
               peerRef.current?.updateIceServers(fresh.iceServers);
             })
-            .catch(() => {});
+            .catch(() => {
+              markSessionEvent(shareTelemetryRef.current, 'ice_refresh_failed');
+            });
         }, CONNECTION_TIMINGS.SHARE_CODE_RENEWAL_INTERVAL_MS);
 
         if (expiryOption === 'never') {
