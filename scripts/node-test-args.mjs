@@ -7,6 +7,12 @@ const tsxLoaderPath = pathToFileURL(resolve(scriptDir, '../node_modules/tsx/dist
 const testStubRegisterPath = pathToFileURL(resolve(scriptDir, 'test-stubs/register.mjs')).href;
 
 // Pure helpers only: importing this module must never start a test run.
+const readCoverageThreshold = (name, fallback) => {
+  const raw = process.env[name];
+  const parsed = raw === undefined ? Number.NaN : Number(raw);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
+};
+
 export const buildNodeTestArgs = (files) => [
   // tsx 负责 TS/JSX 转译；test-stubs 把只在浏览器里做视觉效果的大 barrel 依赖
   // （motion/react、@hugeicons/*）换成本地极简实现，避免每个测试子进程重复转译。
@@ -14,6 +20,18 @@ export const buildNodeTestArgs = (files) => [
   tsxLoaderPath,
   '--import',
   testStubRegisterPath,
+  // services/signaling/sessionStore.sqlite.test.ts 用 node:sqlite 跑真实 SQL。
+  // Node 22.12（.nvmrc 与 CI）仍需要这个开关；Node 24 接受但不再必需。
+  '--experimental-sqlite',
+  // CI 用 NODE_TEST_COVERAGE=1 打开覆盖率并卡阈值；本地默认关闭，保持测试快。
+  ...(process.env.NODE_TEST_COVERAGE === '1'
+    ? [
+        '--experimental-test-coverage',
+        `--test-coverage-lines=${readCoverageThreshold('NODE_TEST_COVERAGE_MIN_LINES', 85)}`,
+        `--test-coverage-branches=${readCoverageThreshold('NODE_TEST_COVERAGE_MIN_BRANCHES', 78)}`,
+        `--test-coverage-functions=${readCoverageThreshold('NODE_TEST_COVERAGE_MIN_FUNCTIONS', 75)}`,
+      ]
+    : []),
   '--test',
   ...files,
 ];
