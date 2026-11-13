@@ -22,6 +22,10 @@ import {
   getShareCodeRetryAfterSeconds,
 } from '../services/shareCodeRateLimitPolicy.ts';
 import {
+  createSignalingHandshakeBudget,
+  getSignalingHandshakeRetryAfterSeconds,
+} from '../services/signaling/handshakeBudget';
+import {
   createSignalingRateLimiter,
   createSignalingSessionLimiter,
   isSignalingMessageTooLarge,
@@ -176,6 +180,9 @@ const iceConfigRateLimiter = createIceConfigRateLimiter();
 
 // /api/share-code 的固定窗口预算（POST 10/10s、GET 30/10s）。
 const shareCodeRateLimiters = createShareCodeRateLimiters();
+
+// 分片模式下 WS 握手的跨 DO 回源预算（per-isolate，只削弱放大，不是硬配额）。
+const signalingHandshakeBudget = createSignalingHandshakeBudget();
 
 const SHARE_CODE_DO_PATH = '/internal/share-codes';
 const SHARE_CODE_DO_URL = 'https://signaling-hub.internal' + SHARE_CODE_DO_PATH;
@@ -1132,6 +1139,19 @@ export class SignalingHub extends DurableObject<Env> {
       return new Response('Invalid sessionProof', { status: 400 });
     }
     const clientKey = getSignalingClientKey(request);
+    const remoteLookup = this.shouldUseRemoteShareCodeLookup();
+    // 分片模式下每次注册要跨 DO 回源查口令，且发生在会话名额与消息节流之前；
+    // 先消耗 per-isolate 握手预算，别让未认证的握手放大成 DO 调用风暴。
+    // 预算只在分片模式生效，单例部署不经过这里。
+    if (remoteLookup) {
+      const budget = signalingHandshakeBudget.consume(clientKey, Date.now());
+      if (!budget.allowed) {
+        return new Response('Too Many Requests', {
+          status: 429,
+          headers: { 'Retry-After': String(getSignalingHandshakeRetryAfterSeconds(budget.retryAfterMs)) },
+        });
+      }
+    }
 
     const pair = new WebSocketPair();
     const client = pair[0];
@@ -1148,7 +1168,6 @@ export class SignalingHub extends DurableObject<Env> {
     const tokenParam = url.searchParams.get('token');
     // share_codes 仍只住在 shard 0：本片不是 shard 0 时先回源取一次记录，再交给同步的
     // resolveShareCodeRegistration 判定。失败按「查不到」处理（fail closed），不放宽校验。
-    const remoteLookup = this.shouldUseRemoteShareCodeLookup();
     const prefetchedCode = remoteLookup && codeParam ? await this.lookupShareCodeRemotely('code', codeParam) : null;
     const prefetchedByPeerId =
       remoteLookup && !codeParam ? await this.lookupShareCodeRemotely('peerId', peerId) : null;
