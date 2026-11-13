@@ -347,3 +347,29 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 - proof 仍走 WS URL query（改首帧需要同时改客户端与服务端的注册协议，属于破坏性升级，单独排期）。
 - DO 级集成测试仍未引入：`ws` 不是声明依赖、Node 全局 `WebSocket` 不能自定义 `Origin`，而 CSRF 同源门要求 Origin 匹配；继续靠 `%TEMP%` 探针 + 编排纯函数测试覆盖。
 - 千行组件只拆了 `Sender`：`Receiver.tsx`（约 3366 行）与 `ScreenShare.tsx`（约 2350 行）仍是单体，属于可维护性债务而非正确性问题。
+
+### 8.5 第三轮复评后的补齐（2026-11-13，复评基线 93 / 92 / 90）
+
+这一轮的三个必修项都不是「再抽一层」，而是「让已经正确的规则无法被悄悄改坏」：
+
+| 缺口（复评） | 修法 | 回归测试 |
+| --- | --- | --- |
+| 迟到 commit 覆盖在位 proof：A 的落库在途、B 接管并 commit P_B、A 迟到写回 P_A，P_B 只剩 10 分钟宽限，之后 B 永久 4010 | 轮换落库改成 CAS：`planSessionAdmission` 带 `expectedProofHash`，`commitSessionBindingRotation` 读快照比对，不一致返回 `superseded: true` 且不写库；worker 记 `signal_session_binding_commit_superseded` 后放弃（不重试，避免再次覆盖赢家） | `sessionStore.sqlite.test.ts` 的 CAS 回归（首次 null → 接管 a→b → 迟到写 a 被判 superseded、库中仍是 b、c 不进历史） |
+| Worker 执行循环（名额失败 4029、503、`rollbackQuota`、驱逐异常、attachment 合并）零测试 | 抽 `services/signaling/registrationExecutor.ts`：动作顺序与端口副作用分离，worker 只提供端口并执行 | `registrationExecutor.test.ts` 7 条（happy path 调用序、名额满不回滚也不驱逐、席位失败先回滚、raced 不驱逐赢家、transfer 不领席位、身份拒绝只走 rejectConflict、commit-binding 无副作用） |
+| 生产单例无握手预算：未认证 `/ws` 垃圾握手可直打全局唯一 DO | 预算从「仅分片回源时」改为**所有握手**在 accept 之前消耗；429 带 `Retry-After` 与 `shardCount` 指标 | `signalingHub.test.ts`（第 21 次同 IP 握手 429、其它 IP 不受影响） |
+| 覆盖率门槛只统计被加载文件，`worker.ts` 从未被 import | 新增 `services/signaling/signalingHub.test.ts`：用 `scripts/test-stubs/cloudflare-workers.mjs` 替身 + 注入 `WebSocketPair`/101 `Response` + 真实 `node:sqlite` 作 `ctx.storage.sql`，直接构造 `SignalingHub` 并走真实 `fetch` 分支 | 5 条：101/registered（无摘要不签发 proof）、非法摘要/非法 proof 握手 400、无 proof 抢注被 4010 拒绝且旧 socket 存活、带当前 proof 接管后轮换并给旧 socket 4011、每 IP 上限 4029、预算 429、旧 4 位 peerId 4009 且不占名额 |
+| `sessionStore.sqlite.test.ts` 适配器用 `rows.length` 当 `rowsWritten`、不模拟单语句 | 改为 `SELECT changes()`；多语句直接抛错；补旧表 `ALTER TABLE ... ADD COLUMN revoke_after` 迁移用例与槽位 `rowsWritten` 用例 | 同名测试文件 +4 例 |
+| collector（`collectTestFiles`）无测试、`tsconfig` 不含 `scripts/` | 补递归收 `.test.tsx` / 不存在目标 / 空目录三例；`tsconfig.json` 加 `scripts/**/*.ts` 与 `noFallthroughCasesInSwitch`；CI 增加组件覆盖率门槛（65 / 60 / 45，低于 services 的原因写在 workflow 注释里） | `scripts/run-node-tests.test.ts`（现 5 例） |
+| 恢复 hibernated socket 时 `tryAcquire` 返回值被忽略 → 上限被悄悄放宽 | 新增 `SignalingSessionLimiter.restore()`：恢复的 socket 只计数不判上限（它们本来就活着），构造期用它替换 `tryAcquire` | `signalingRateLimitPolicy.test.ts`（restore 超上限仍计数、之后新 socket 被拒、release 后恢复准入） |
+| 驱逐时无条件 `map.delete` 可能删掉 await 期间接管的赢家 | 三张 map 的删除都按值校验（`get(...) === existing`） | 由 `signalingHub.test.ts` 的接管用例覆盖（赢家仍持有注册） |
+| 发送端状态行被 800ms 轮询覆盖（P2-1） | `services/send/connectionStatusNotice.ts`：会话层 `announce` 带 30s 窗口，连接数轮询走 `routine` 在窗口内不生效；`Sender.tsx` 全文件不再有裸 `setConnectionStatus` 写入 | `connectionStatusNotice.test.ts`（含负对照：短路窗口后用例失败） |
+| 看门狗与恢复回调可并发 `initializePeer`，重复登记房号（P2-2） | `services/screenShare/peerInitGuard.ts` single-flight，`initializePeerUnlocked` 外包闸门；恢复退避回调进门先判 in-flight | `peerInitGuard.test.ts` + E2E「卡住的登记不会被看门狗重复触发」（负对照：短路闸门后 `Expected: 1, Received: 2`） |
+
+复评中确认的两个非缺陷：评审怀疑 `services/signaling/requestContext.ts` 读了非标准头，实际字节就是 `CF-Lhcwxzwee-VF`（字符码 67,70,45,67,111,110,110,101,99,116,105,110,103,45,73,80），是工具输出对字面量的显示替换；`docs/` 里同样出现过 `session-conflict`/`shard` 被替换的情况，判断一律以字节核对为准。
+
+仍然存在的已知取舍（本轮之后）：
+
+- proof 仍走 WS URL query；改首帧要同时改两端注册协议，属破坏性升级。
+- `signalingHub.test.ts` 是**进程内**的 DO 契约测试（替身 socket），不是真 `wrangler dev` 多 socket / hibernation 测试；那部分仍靠 `%TEMP%` 探针手工跑（`ws` 不是声明依赖，CSRF 同源门又要求 Origin 匹配）。
+- `Receiver.tsx`（约 3366 行）与 `ScreenShare.tsx`（约 2350 行）仍是单体组件；`ScreenShare.tsx` 的注册/重连/心跳计时器仍有内联部分。
+- 屏幕共享仍是 mesh（`MAX_VIEWERS=6`、16 Mbps 聚合预算），7 人以上需要 SFU。
