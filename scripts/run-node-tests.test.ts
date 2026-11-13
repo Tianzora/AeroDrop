@@ -1,7 +1,10 @@
 import assert from 'node:assert/strict';
+import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import { join, relative, sep } from 'node:path';
 import test from 'node:test';
 
-import { buildNodeTestArgs } from './node-test-args.mjs';
+import { buildNodeTestArgs, collectTestFiles } from './node-test-args.mjs';
 
 test('buildNodeTestArgs uses an explicit tsx loader path instead of the bare package specifier', () => {
   const args = buildNodeTestArgs(['services/connectionPolicy.test.ts']);
@@ -49,5 +52,32 @@ test('coverage 只有显式打开时才加参数，CI 用它卡阈值而不拖�
     delete process.env.NODE_TEST_COVERAGE_MIN_LINES;
     if (previous === undefined) delete process.env.NODE_TEST_COVERAGE;
     else process.env.NODE_TEST_COVERAGE = previous;
+  }
+});
+
+test('collectTestFiles 递归收 .test.ts 与 .test.tsx，忽略普通源码', () => {
+  const root = mkdtempSync(join(tmpdir(), 'aerodrop-collect-'));
+  try {
+    mkdirSync(join(root, 'nested'), { recursive: true });
+    writeFileSync(join(root, 'a.test.ts'), '');
+    writeFileSync(join(root, 'nested', 'b.test.tsx'), '');
+    writeFileSync(join(root, 'nested', 'helper.ts'), '');
+    writeFileSync(join(root, 'notes.md'), '');
+
+    const files = collectTestFiles([root]).map((file) => relative(root, file).split(sep).join('/'));
+    assert.deepEqual(files, ['a.test.ts', 'nested/b.test.tsx']);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('collectTestFiles 对不存在的目标与空目录报错，而不是静默跑 0 条测试', () => {
+  assert.throws(() => collectTestFiles(['definitely-missing-dir']), /Test target not found/);
+
+  const empty = mkdtempSync(join(tmpdir(), 'aerodrop-empty-'));
+  try {
+    assert.throws(() => collectTestFiles([empty]), /No test files found/);
+  } finally {
+    rmSync(empty, { recursive: true, force: true });
   }
 });

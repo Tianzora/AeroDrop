@@ -7,6 +7,8 @@ const STUB_MODULES = new Map([
   ['motion/react', './motion-react.mjs'],
   ['@hugeicons/react', './hugeicons-react.mjs'],
   ['@hugeicons/core-free-icons', './hugeicons-core-free-icons.mjs'],
+  // Workers 运行时模块：Node 里不存在，但 worker 编排测试需要 import src/worker.ts。
+  ['cloudflare:workers', './cloudflare-workers.mjs'],
 ]);
 
 const stubUrl = (relative) => new URL(relative, import.meta.url).href;

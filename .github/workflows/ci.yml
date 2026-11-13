@@ -42,6 +42,16 @@ jobs:
           NODE_TEST_COVERAGE: '1'
         run: node ./scripts/run-node-tests.mjs services
 
+      # 组件覆盖率单独卡一套更低的阈值（当前 69.7 行 / 69.4 分支 / 50 函数）：
+      # 组件测试大量走 DOM 桩，函数覆盖率天然偏低，用 services 的阈值会逼出无意义断言。
+      - name: Component coverage gate
+        env:
+          NODE_TEST_COVERAGE: '1'
+          NODE_TEST_COVERAGE_MIN_LINES: '65'
+          NODE_TEST_COVERAGE_MIN_BRANCHES: '60'
+          NODE_TEST_COVERAGE_MIN_FUNCTIONS: '45'
+        run: node ./scripts/run-node-tests.mjs components
+
       - name: Build
         run: npm run build
 
