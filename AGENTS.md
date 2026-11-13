@@ -38,6 +38,7 @@ npm run deploy                        # 手动发布（能生效，但绕过 Git
   同一 peerId 必须永远映射到同一片，口令表仍只在 shard 0，跨片注册要回源查询而不是本地放行。
   分片模式（>1）下「每客户端 12 会话」改由 shard 0 的全局名额表计数，不能让每个片各算一遍。
   分片模式下跨片回源查口令要先过 `services/signaling/handshakeBudget.ts` 的 per-isolate 握手预算。
+  跨片口令查询统一走 `services/signaling/shareCodeLookupBatch.ts` 合并成批量 RPC（同一窗口内的并发注册共用一次请求），不要退回「一次注册一次 RPC」。
   会话凭证：绑定后只认可轮换的 `sessionProof`，静态摘要只在首次注册的 10 分钟兜底窗口内有效；proof 轮换落库前必须重读绑定（读改写竞态），否则并发注册会把对方刚签发的 proof 挤掉。
   信令侧指标统一走 `services/signaling/signalingTelemetry.ts`（结构化日志，一行一个 JSON）：只放分片号/片数/失败原因这类标量，不放 peerId 之外的标识，也不放任何凭证。
 - 传输协议版本改动要同时改 sender/receiver 两侧与 `types/`，不能只改一端。

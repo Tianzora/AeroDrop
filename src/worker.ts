@@ -57,6 +57,12 @@ import {
   signalingShardIndex,
   signalingShardName,
 } from '../services/signaling/shardRouting';
+import {
+  SHARE_CODE_LOOKUP_BATCH_LIMIT,
+  createShareCodeLookupBatcher,
+  type ShareCodeLookupBatcher,
+  type ShareCodeLookupRequest as ShareCodeLookupBatchRequest,
+} from '../services/signaling/shareCodeLookupBatch';
 
 // 注销后保留 peerId 归属的时间窗。与口令 TTL 上限对齐，覆盖「同一个分享反复启停」。
 const SHARE_CODE_TOMBSTONE_MS = 24 * 60 * 60 * 1000;
@@ -174,7 +180,7 @@ const signalingTelemetry = createSignalingTelemetry((line) => console.log(line))
 const SIGNALING_PATH = '/ws-signaling';
 // 分片之间的内部投递与口令回源查询；只由 worker/其它 DO 调用，不对公网暴露。
 const SIGNALING_DELIVER_DO_PATH = '/internal/deliver-signaling';
-const SIGNALING_SHARE_CODE_LOOKUP_PATH = '/internal/lookup-share-code';
+const SIGNALING_SHARE_CODE_LOOKUP_BATCH_PATH = '/internal/lookup-share-codes';
 const SIGNALING_SESSION_SLOT_PATH = '/internal/session-slot';
 // 会话绑定表（摘要 + proof 摘要 + 宽限期历史）只住在 shard 0，跨片走这个内部端点。
 const SIGNALING_SESSION_BINDING_PATH = '/internal/session-binding';
@@ -1108,6 +1114,8 @@ export class SignalingHub extends DurableObject<Env> {
   /** 同一 socket 的投递链，跨片 await 也不会打乱 offer/ICE 的顺序。 */
   private deliveryChains = new Map<WebSocket, Promise<void>>();
   private maxSignalingSessions: number;
+  /** 跨片口令查询的合并器：同一窗口内的并发注册共用一次 RPC，而不是一次注册一次 RPC。 */
+  private shareCodeLookupBatcher: ShareCodeLookupBatcher | null = null;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -1148,8 +1156,8 @@ export class SignalingHub extends DurableObject<Env> {
     if (url.pathname === SIGNALING_DELIVER_DO_PATH) {
       return this.handleSignalingDeliverRequest(request);
     }
-    if (url.pathname === SIGNALING_SHARE_CODE_LOOKUP_PATH) {
-      return this.handleShareCodeLookupRequest(request);
+    if (url.pathname === SIGNALING_SHARE_CODE_LOOKUP_BATCH_PATH) {
+      return this.handleShareCodeLookupBatchRequest(request);
     }
     if (url.pathname === SIGNALING_SESSION_SLOT_PATH) {
       return this.handleSessionSlotRequest(request);
@@ -1700,21 +1708,49 @@ export class SignalingHub extends DurableObject<Env> {
     return this.env.SIGNALING_HUB.get(this.env.SIGNALING_HUB.idFromName(shardName));
   }
 
+  private getShareCodeLookupBatcher(): ShareCodeLookupBatcher {
+    if (this.shareCodeLookupBatcher === null) {
+      this.shareCodeLookupBatcher = createShareCodeLookupBatcher({
+        run: (requests) => this.runShareCodeLookupBatch(requests),
+        // 几毫秒的窗口把几乎同时到达的注册（例如六个人一起点开链接）攒成一批；
+        // 对单次注册只增加个位数毫秒，换掉的是每注册一次跨 DO RPC。
+        defer: (flush) => {
+          setTimeout(flush, 2);
+        },
+      });
+    }
+    return this.shareCodeLookupBatcher;
+  }
+
+  private async runShareCodeLookupBatch(
+    requests: readonly ShareCodeLookupBatchRequest[]
+  ): Promise<readonly (ShareCodeRecord | null)[]> {
+    if (requests.length > 1) {
+      signalingTelemetry.record('signal_share_code_lookup_batched', { size: requests.length });
+    }
+    const response = await this.signalingStub(signalingShardName(0)).fetch(
+      new Request(`https://signaling.internal${SIGNALING_SHARE_CODE_LOOKUP_BATCH_PATH}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ lookups: requests, now: Date.now() }),
+      })
+    );
+    if (!response.ok) {
+      throw new Error(`share-code batch lookup failed with ${response.status}`);
+    }
+    const body = (await response.json()) as { records?: unknown } | null;
+    if (!Array.isArray(body?.records)) {
+      throw new Error('share-code batch lookup returned an invalid payload');
+    }
+    return body.records as (ShareCodeRecord | null)[];
+  }
+
   private async lookupShareCodeRemotely(
     kind: 'code' | 'peerId',
     value: string
   ): Promise<ShareCodeRecord | null> {
     try {
-      const response = await this.signalingStub(signalingShardName(0)).fetch(
-        new Request(`https://signaling.internal${SIGNALING_SHARE_CODE_LOOKUP_PATH}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ kind, value, now: Date.now() }),
-        })
-      );
-      if (!response.ok) return null;
-      const body = (await response.json()) as { record?: ShareCodeRecord | null } | null;
-      return body?.record ?? null;
+      return await this.getShareCodeLookupBatcher().request({ kind, value });
     } catch (error) {
       // 查询失败必须按「没查到」处理：宁可让本次注册被拒，也不能放宽身份校验。
       signalingTelemetry.record('signal_share_code_lookup_failed', { kind });
@@ -1865,25 +1901,33 @@ export class SignalingHub extends DurableObject<Env> {
     return json({ delivered: true });
   }
 
-  private async handleShareCodeLookupRequest(request: Request): Promise<Response> {
+  private async handleShareCodeLookupBatchRequest(request: Request): Promise<Response> {
     if (request.method !== 'POST') {
       return new Response('Method Not Allowed', { status: 405 });
     }
-    let body: { kind?: unknown; value?: unknown; now?: unknown } | null = null;
+    let body: { lookups?: unknown; now?: unknown } | null = null;
     try {
-      body = (await request.json()) as { kind?: unknown; value?: unknown; now?: unknown };
+      body = (await request.json()) as { lookups?: unknown; now?: unknown };
     } catch {
       body = null;
     }
-    const kind = body?.kind;
-    const value = typeof body?.value === 'string' ? body.value : '';
-    const now = typeof body?.now === 'number' && Number.isFinite(body.now) ? body.now : Date.now();
-    if ((kind !== 'code' && kind !== 'peerId') || !value) {
-      return json({ record: null }, { status: 400 });
+    const lookups = body?.lookups;
+    if (!Array.isArray(lookups) || lookups.length === 0 || lookups.length > SHARE_CODE_LOOKUP_BATCH_LIMIT) {
+      return json({ records: [] }, { status: 400 });
     }
-    const record =
-      kind === 'code' ? this.findActiveShareCode(value, now) : this.findActiveShareCodeByPeerId(value, now);
-    return json({ record });
+    const now = typeof body?.now === 'number' && Number.isFinite(body.now) ? body.now : Date.now();
+    const records: (ShareCodeRecord | null)[] = [];
+    for (const lookup of lookups) {
+      const kind = (lookup as { kind?: unknown } | null)?.kind;
+      const value = (lookup as { value?: unknown } | null)?.value;
+      if ((kind !== 'code' && kind !== 'peerId') || typeof value !== 'string' || !value) {
+        return json({ records: [] }, { status: 400 });
+      }
+      records.push(
+        kind === 'code' ? this.findActiveShareCode(value, now) : this.findActiveShareCodeByPeerId(value, now)
+      );
+    }
+    return json({ records });
   }
 
   /**

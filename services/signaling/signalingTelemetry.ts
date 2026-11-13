@@ -23,6 +23,8 @@ export type SignalingTelemetryEvent =
   | 'signal_handshake_budget_exhausted'
   /** 跨片回源查口令失败。 */
   | 'signal_share_code_lookup_failed'
+  /** 一次跨片回源同时答复了多条查询（说明合并生效）。 */
+  | 'signal_share_code_lookup_batched'
   /** shard 0 的会话绑定表不可达：本次接管按身份不可验证处理。 */
   | 'signal_session_binding_unavailable';
 
