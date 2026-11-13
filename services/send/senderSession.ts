@@ -561,6 +561,8 @@ export class SenderSession {
     // 有在途传输时绝不能走 onSessionLost：那条路径会 stopSharing 并广播
     // TRANSFER_CANCELLED，把本来能自己跑完的传输直接掐断。
     if (this.host.getActiveTransfers() > 0) {
+      // 口令已经被服务端注销，继续展示它会让用户把死码发给别人。
+      this.host.setRemainingTime('已失效');
       this.host.notify('分享已失效，当前传输不受影响；需要继续分享请重新创建', 'info');
       return;
     }

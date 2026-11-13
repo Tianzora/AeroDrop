@@ -192,6 +192,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const isManualStopRef = useRef(false);
   const reconnectAttemptsRef = useRef(0);
   const remoteShareEndedRef = useRef(false);
+  // 分享端明确回过「人数已满」：不要再自动重连，否则会一直撞上限并误报成网络问题。
+  const remoteShareFullRef = useRef(false);
   const remoteShareEndHandledRef = useRef(false);
   const sharerReconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const sharerReconnectAttemptsRef = useRef(0);
@@ -895,6 +897,17 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         // P2P mesh 下每多一个 viewer 就多一份上行编码，超过上限后在分享端直接拒绝，
         // 比让信令的每 IP 会话上限在加入中途失败更可解释。
         onNotification(`观看人数已达上限（${SCREEN_SHARE_LIMITS.MAX_VIEWERS} 人）`, 'info');
+        // 光关 call 的话观众只能等到 20s 超时并以为是网络/防火墙问题。数据连接通常
+        // 先于媒体 call 建立，用它回一条明确原因；还没 open 就等它 open 再发。
+        const viewerConn = activeDataConnectionsRef.current.find(c => c.peer === call.peer);
+        if (viewerConn) {
+          const sendShareFull = () => {
+            if (!viewerConn.open) return;
+            try { viewerConn.send({ type: 'share-full' }); } catch { /* best effort */ }
+          };
+          if (viewerConn.open) sendShareFull();
+          else viewerConn.on('open', sendShareFull);
+        }
         try { call.close(); } catch {}
         return;
       }
@@ -1255,6 +1268,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       reconnectAttemptsRef.current = 0;
       remoteShareEndedRef.current = false;
       remoteShareEndHandledRef.current = false;
+      remoteShareFullRef.current = false;
     }
   }, [clearPersistedViewerSession]);
 
@@ -1286,6 +1300,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       isManualStopRef.current = false;
       remoteShareEndedRef.current = false;
       remoteShareEndHandledRef.current = false;
+      remoteShareFullRef.current = false;
     }
 
     if (peerRef.current) {
@@ -1377,6 +1392,15 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         if (data && data.type === 'share-ended') {
           const reasonLabel = data.reason === 'window_closed' ? '共享方已离开页面，屏幕共享已结束' : '共享方已停止共享';
           handleRemoteShareEnded(reasonLabel);
+          return;
+        }
+        if (data && data.type === 'share-full') {
+          // 达到观看人数上限：明确告知并停止自动重连，避免把「人数满」误判成网络问题。
+          remoteShareFullRef.current = true;
+          setError(`分享人数已满（上限 ${SCREEN_SHARE_LIMITS.MAX_VIEWERS} 人），请稍后再试`);
+          setIsConnecting(false);
+          onNotification('分享人数已满，请稍后再试', 'info');
+          stopViewing(false);
         }
       });
 
@@ -1407,7 +1431,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       };
 
       const reconnectViewerAfterLoss = () => {
-        if (isManualStopRef.current || remoteShareEndedRef.current) return;
+        if (isManualStopRef.current || remoteShareEndedRef.current || remoteShareFullRef.current) return;
         if (viewerConnectAttemptRef.current !== attemptId) return;
         stopFreezeWatch();
         logDebug('warn', 'Unexpected disconnection, attempting reconnect...');

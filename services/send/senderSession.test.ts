@@ -391,6 +391,7 @@ test('resume 失败但仍有在途传输时不走 onSessionLost', async () => {
     '分享已失效，当前传输不受影响；需要继续分享请重新创建',
   ]);
   assert.equal(log.notifications[0].type, 'info');
+  assert.equal(log.remainingTimes.includes('已失效'), true);
   assert.equal(log.sessionLost, 0);
   assert.equal(peer()?.destroyed, false);
 });
