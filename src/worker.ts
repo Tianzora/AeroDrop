@@ -1126,6 +1126,13 @@ export class SignalingHub extends DurableObject<Env> {
     // 领名额是 await；落定前再判一次竞争。输了就连刚刚领到的名额一起回滚，绝不覆盖
     // 对方的 map 归属。
     const rejectRaced = async (): Promise<Response | null> => {
+      // 注册途中的 await（跨片名额/绑定 RPC）可能长达数百毫秒。socket 在这期间关闭时，
+      // 继续注册会写进一条永远不会被读的会话，并把名额挂在一个已死的 socket 上；回收只
+      // 发生在 close 事件里，而那时 clientBySocket 还没写，等于永久泄漏。
+      if (server.readyState !== WebSocket.OPEN) {
+        await rollbackQuota();
+        return new Response(null, { status: 101, webSocket: client });
+      }
       const race = classifySignalingSessionRace({
         planned: existing,
         current: this.sessionsByPeer.get(peerId),
@@ -1221,7 +1228,7 @@ export class SignalingHub extends DurableObject<Env> {
         // registered 之后：帧丢了客户端手里只有旧 proof，先落库会在宽限期后让旧 proof
         // 失效，重连直接 4010。helper 把「投递失败 → 不落库」钉死成顺序契约；落库重试仍
         // 失败时由 recover 把新 proof 挂进历史，客户端下次带新 proof 仍能进。
-        await deliverRegisteredThenCommit({
+        const outcome = await deliverRegisteredThenCommit({
           sendRegistered: () => {
             server.send(
               JSON.stringify({
@@ -1254,6 +1261,19 @@ export class SignalingHub extends DurableObject<Env> {
             console.warn('Signaling pending-proof fallback failed', { peerId, error });
           },
         });
+        if (outcome === 'send-failed') {
+          // 帧没发出去：这次注册不算数。名额与三张 map 必须一起回滚，否则分片模式下
+          // 每次失败都永久 +1，累积到上限后整台 IP 的分享都会 4029。
+          this.sessionsByPeer.delete(peerId);
+          this.peerBySocket.delete(server);
+          this.clientBySocket.delete(server);
+          this.slotOwnerSocket.delete(sessionSlotId ?? '');
+          this.slotRefreshedAt.delete(server);
+          await rollbackQuota();
+          signalingTelemetry.record('signal_session_registration_send_failed', {
+            shardCount: this.getSignalingShardCount(),
+          });
+        }
       },
       sendRateLimited: () => {
         server.send(
@@ -1270,8 +1290,6 @@ export class SignalingHub extends DurableObject<Env> {
     return execution.kind === 'respond'
       ? execution.response
       : new Response(null, { status: 101, webSocket: client });
-
-    return new Response(null, { status: 101, webSocket: client });
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -1605,6 +1623,24 @@ export class SignalingHub extends DurableObject<Env> {
       })
     );
     if (!response.ok) throw new Error(`binding commit status ${response.status}`);
+    const result = (await response.json().catch(() => null)) as
+      | { committed?: unknown; superseded?: unknown }
+      | null;
+    if (result?.superseded === true) {
+      // 与 shard 0 本地路径同语义：这次注册在 await 期间被后续注册接管，迟到写入被
+      // 放弃。分片模式下如果不解析 body，就会以为「2xx 即成功」，既丢指标也没补偿。
+      signalingTelemetry.record('signal_session_binding_commit_superseded', {
+        shardCount: this.getSignalingShardCount(),
+        path: 'shard-rpc',
+      });
+      console.warn('Signaling session-binding commit superseded by a newer registration', {
+        peerId,
+      });
+      return;
+    }
+    if (result?.committed === false) {
+      throw new Error('binding commit was rejected by shard 0');
+    }
   }
 
   /**
@@ -1623,9 +1659,12 @@ export class SignalingHub extends DurableObject<Env> {
     const now = Date.now();
     if (this.isShardZero()) {
       // 有效期取绑定本身的 TTL（24h）：要覆盖客户端重连与页面刷新窗口，不是一次宽限期。
+      // expectedProofHash 参与 CAS：自愈是「补一次没落成的轮换」，不能把别人接管的
+      // 权威 proof 又盖回去。
       appendPendingSessionProof(this.getSql(), {
         peerId,
         proofHash,
+        expectedProofHash: admission.pending.expectedProofHash ?? null,
         now,
         proofTtlMs: SIGNALING_SESSION_BINDING_MS,
         bindingTtlMs: SIGNALING_SESSION_BINDING_MS,
@@ -1636,7 +1675,13 @@ export class SignalingHub extends DurableObject<Env> {
       new Request(`https://signaling.internal${SIGNALING_SESSION_BINDING_PATH}`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ action: 'pending', peerId, now, proofHash }),
+        body: JSON.stringify({
+          action: 'pending',
+          peerId,
+          now,
+          proofHash,
+          expectedProofHash: admission.pending.expectedProofHash ?? null,
+        }),
       })
     );
     if (!response.ok) throw new Error(`binding pending status ${response.status}`);
@@ -1707,10 +1752,18 @@ export class SignalingHub extends DurableObject<Env> {
       if (!proofHash || proofHash === '__invalid__') {
         return json({ appended: false }, { status: 400 });
       }
+      const expectedProofHash =
+        body?.expectedProofHash === null || body?.expectedProofHash === undefined
+          ? null
+          : pickHash(body.expectedProofHash);
+      if (expectedProofHash === '__invalid__') {
+        return json({ appended: false }, { status: 400 });
+      }
       return json({
         appended: appendPendingSessionProof(this.getSql(), {
           peerId,
           proofHash,
+          expectedProofHash,
           now,
           proofTtlMs: SIGNALING_SESSION_BINDING_MS,
           bindingTtlMs: SIGNALING_SESSION_BINDING_MS,

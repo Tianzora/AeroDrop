@@ -355,6 +355,12 @@ export const appendPendingSessionProof = (
   input: {
     peerId: string;
     proofHash: string;
+    /**
+     * 落库时的 CAS 期望值：判定阶段看到的权威 proof 摘要（null 表示当时还没有绑定行）。
+     * 自愈补写如果发现权威 proof 已被后续注册换掉，就必须放弃，否则会把接管者的
+     * proof 覆盖成一条只有「迟到那一方」知道的值。
+     */
+    expectedProofHash?: string | null;
     now: number;
     /** 新 proof 在历史里的有效期：要覆盖客户端重连窗口，不只是一次宽限期。 */
     proofTtlMs: number;
@@ -366,6 +372,10 @@ export const appendPendingSessionProof = (
   if (current === null) return false;
   // 重试虽然超时了，但写入其实已经生效：无需再挂一份历史。
   if (current.proofHash.toLowerCase() === input.proofHash.toLowerCase()) return true;
+  if (input.expectedProofHash !== undefined) {
+    const expected = input.expectedProofHash?.toLowerCase() ?? null;
+    if ((current.proofHash.toLowerCase() ?? null) !== expected) return false;
+  }
 
   saveSessionBinding(sql, {
     peerId: input.peerId,

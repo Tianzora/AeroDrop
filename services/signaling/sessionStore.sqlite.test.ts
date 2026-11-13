@@ -1,9 +1,10 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
-import type { SQLInputValue } from 'node:sqlite';
+import { createSqlite } from '../../scripts/test-stubs/sqlite-adapter.ts';
 
 import {
+  appendPendingSessionProof,
   applySessionSlotRelease,
   applySessionSlotReserve,
   applySessionSlotRenew,
@@ -32,28 +33,6 @@ const HOUR = 60 * 60 * 1000;
  * 列序写错、RETURNING 在 ON CONFLICT DO NOTHING 下不返回行这类错误它都看不见。
  * DO 的 `rowsWritten` 语义与 `changes` 对应；有 RETURNING 的写入按查询处理。
  */
-const createSqlite = (db: DatabaseSync): SqlLike => ({
-  exec<T = Record<string, unknown>>(text: string, ...params: unknown[]) {
-    // Durable Object 的 exec 一次只执行一条语句；多语句在这里静默成功，会让迁移脚本在
-    // 生产里变成不可见的「半条执行」。
-    const withoutTrailing = text.trim().replace(/;+$/, '');
-    if (withoutTrailing.includes(';')) {
-      throw new Error(`sqlite test adapter only executes a single statement: ${text}`);
-    }
-    const statement = db.prepare(text);
-    const returnsRows = /^\s*(SELECT|PRAGMA|WITH)/i.test(text) || /\bRETURNING\b/i.test(text);
-    if (returnsRows) {
-      const rows = statement.all(...(params as SQLInputValue[])) as T[];
-      // DO 的 rowsWritten 语义是实际写入行数（= changes），不是 RETURNING 的行数：
-      // ON CONFLICT DO NOTHING 时两者会分叉，用 rows.length 会掩盖「什么都没写」。
-      const changes = db.prepare('SELECT changes() AS count').get() as { count: number };
-      return { toArray: () => rows, rowsWritten: Number(changes.count) };
-    }
-    const info = statement.run(...(params as SQLInputValue[]));
-    return { toArray: () => [] as T[], rowsWritten: Number(info.changes) };
-  },
-});
-
 const countRows = (db: DatabaseSync, table: string): number => {
   const row = db.prepare(`SELECT COUNT(*) AS count FROM ${table}`).get() as { count: number };
   return Number(row.count);
@@ -374,5 +353,55 @@ test('迟到的轮换提交不会覆盖接管者刚写入的权威 proof（CAS�
     .get() as { proof_hash: string; recent_hashes: string };
   assert.equal(stored.proof_hash, 'b'.repeat(64), '权威 proof 必须还是接管者的');
   assert.equal(stored.recent_hashes.includes('c'.repeat(64)), false, '被放弃的轮换不能进历史');
+  db.close();
+});
+
+
+test('自愈补写 pending proof 也走 CAS：接管者换了权威 proof 后不再追加', () => {
+  const db = new DatabaseSync(':memory:');
+  const sql = createSqlite(db);
+  initializeSessionBindingSchema(sql);
+  saveSessionBinding(sql, {
+    peerId: 'peer-pending-cas',
+    secretHash,
+    secretHashExpiresAt: 0,
+    proofHash: 'a'.repeat(64),
+    recentProofHashes: [],
+    now: 1_000,
+    ttlMs: HOUR,
+  });
+  const base = { peerId: 'peer-pending-cas', now: 2_000, proofTtlMs: HOUR, bindingTtlMs: HOUR };
+
+  // 判定时权威值是 a：这次自愈可以把 b 挂进历史。
+  assert.equal(
+    appendPendingSessionProof(sql, { ...base, proofHash: 'b'.repeat(64), expectedProofHash: 'a'.repeat(64) }),
+    true
+  );
+
+  // 期间被别人接管并轮换到 c。
+  const takeover = commitSessionBindingRotation(sql, {
+    peerId: 'peer-pending-cas',
+    now: 3_000,
+    proofHash: 'c'.repeat(64),
+    expectedProofHash: 'a'.repeat(64),
+    graceMs: 10 * 60 * 1000,
+    proofGraceMs: 10 * 60 * 1000,
+    ttlMs: HOUR,
+  });
+  assert.equal(takeover.superseded, false);
+
+  // 迟到的自愈仍然以为 a 是权威值：必须放弃，否则会把 d 写进 c 的历史。
+  assert.equal(
+    appendPendingSessionProof(sql, { ...base, now: 4_000, proofHash: 'd'.repeat(64), expectedProofHash: 'a'.repeat(64) }),
+    false
+  );
+
+  const stored = db
+    .prepare(
+      "SELECT proof_hash, recent_hashes FROM signaling_session_bindings WHERE peer_id = 'peer-pending-cas'"
+    )
+    .get() as { proof_hash: string; recent_hashes: string };
+  assert.equal(stored.proof_hash, 'c'.repeat(64));
+  assert.equal(stored.recent_hashes.includes('d'.repeat(64)), false);
   db.close();
 });
