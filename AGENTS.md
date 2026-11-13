@@ -22,6 +22,7 @@ npm run deploy                        # 手动发布（能生效，但绕过 Git
 
 - 部署走 Cloudflare 的 Git 集成：推送到 `main` 即自动构建并发布到 https://drop.tianzora.uno/ ，这是常规路径。
 - 产品级 E2E 走 `npm run test:e2e:product-transfer`，默认打 `AERODROP_BASE_URL`，未设置时用 `http://127.0.0.1:8787`。
+- CI（`.github/workflows/ci.yml`）在 push/PR 上跑 `typecheck` → `test:all` → `build`。它**不拦部署**：Cloudflare Git 集成是推 `main` 即构建发布，所以本地五条门禁仍是唯一硬闸门。
 - 屏幕共享 E2E（`e2e/screenshare.spec.ts`）需要真实 Worker 信令，挂在 `test:e2e:product-transfer` 里一起跑；Chromium 用 fake display capture（三个 flag 在 `playwright.product.config.ts`），单跑某个用例：`npm run preview` 起 8787 后执行 `npx playwright test --config=playwright.product.config.ts -g "shares frames"`。
 - `test:e2e`/`test:e2e:rtc` 的构建固定为 `vite build --mode e2e`：只有该模式会启用 E2E 测试钩子，生产构建里 `__AERODROP_E2E__` 不生效。
 - 改完代码的顺序：`typecheck` → `test:all` → 相关 E2E。
@@ -30,6 +31,7 @@ npm run deploy                        # 手动发布（能生效，但绕过 Git
 
 - 信令、连接策略、TURN 凭证、超时参数只在 `services/` 与 `constants/` 里改，不在组件中硬编码。
 - 身份与口令：分享口令由 `/api/share-code` 签发并与随机 `peerId` 绑定（HMAC 校验在 `SignalingHub`），发送方 WS 必须带 `code` + `token`；**不要恢复“口令即 peerId”**（4 位旧口令已被拒绝，口令一律 6 位，自定义口令也必须走登记接口）。
+  屏幕共享房号同样走这个登记接口（24h TTL、每 30 分钟续期、停止分享即 revoke），**不要**让客户端自造 `AERO-` 房号。
 - `services/connectionPolicy.ts`、`services/receive/committedReconnectPolicy.ts` 是连接降级与续传的唯一判定点，改行为改这里，不要在各调用方分叉。
 - Vite 8 用 Oxc/Rolldown：`build.minify` 保持 `oxc`，不要恢复 `esbuild` minifier。
 - `package.json` 的 `overrides.esbuild` 是为覆盖 Wrangler 依赖链上被钉住的旧 esbuild；升级 Wrangler 后先跑 `npm audit` 再决定能否移除。
@@ -40,7 +42,10 @@ npm run deploy                        # 手动发布（能生效，但绕过 Git
   分片模式下跨片回源查口令要先过 `services/signaling/handshakeBudget.ts` 的 per-isolate 握手预算。
   跨片口令查询统一走 `services/signaling/shareCodeLookupBatch.ts` 合并成批量 RPC（同一窗口内的并发注册共用一次请求），不要退回「一次注册一次 RPC」。
   会话凭证：绑定后只认可轮换的 `sessionProof`，静态摘要只在首次注册的 10 分钟兜底窗口内有效；proof 轮换落库前必须重读绑定（读改写竞态），否则并发注册会把对方刚签发的 proof 挤掉。
-  信令侧指标统一走 `services/signaling/signalingTelemetry.ts`（结构化日志，一行一个 JSON）：只放分片号/片数/失败原因这类标量，不放 peerId 之外的标识，也不放任何凭证。
+  信令侧指标统一走 `services/signaling/signalingTelemetry.ts`：只放分片号/片数/失败原因这类标量，不放 peerId 之外的标识，也不放任何凭证。
+  **日志行不能是整行合法 JSON**：Cloudflare Workers Logs 会把整行 JSON 拆成结构化属性，`message` 列留空，而告警 SQL 只能查 `message`。所以 telemetry 统一输出 `signaling_metric {json}`（前缀 + 一行），改这里会静默打断告警。
+- 信令与凭证的时间/预算常量统一在 `constants/signaling.ts`（会话绑定 24h、槽位 6h TTL / 30min 续期、proof 宽限 10 分钟、未知码预算 200 次/10s、TURN 凭证 TTL 与超时）。`src/worker.ts` 与 `services/` 只引用，不得再内联一份数字。
+- 屏幕共享：信令注册失败或重建耗尽必须进终态（停采集、清预览、链接失效、不显示绿色「正在共享」）；心跳超时走 `services/screenShare/viewerHeartbeatPolicy.ts`（后台标签页与传输健康要豁免，观众切后台不能被周期性踢掉）；上行上限走 `services/screenShare/bitratePolicy.ts` 的聚合预算，UI 不得把 `MAX_VIEWERS` 当画质承诺。
 - 传输协议版本改动要同时改 sender/receiver 两侧与 `types/`，不能只改一端。
 - 控制面消息（METADATA 等）的大小上限与分片统一走 `constants/transfer.ts` 的 `METADATA_CHUNKING`：分片发送在 `services/send/routeHandshake.ts`，单条消息不得超过 `MAX_MESSAGE_BYTES`（SCTP 单消息硬上限约 256 KiB）。改动分片格式要同时改两端的重组逻辑。
 
@@ -60,6 +65,7 @@ python D:/ovo/Documents/workspace/scripts/agents-md/render.py --root D:/ovo/Docu
 ```
 
 - 改动影响项目定位或状态时，同步更新资料库笔记 `wiki/projects/<name>.md`。
+- `docs/` 默认不入 Git，但 `docs/design-scale-out.md`（规模化设计、落地进展与未决风险）与 `docs/ROADMAP-next.md`（阶段状态）通过 `.gitignore` 白名单纳入版本控制；audit/research 类仍只留本地。
 
 ## 资料库
 
@@ -78,4 +84,4 @@ python D:/ovo/Documents/workspace/scripts/agents-md/render.py --root D:/ovo/Docu
 ## 深入文档
 
 - `README.md` — 功能与连接模式
-- `docs/` — 本地资料（不入 Git）
+- `docs/` — 本地资料；其中 `design-scale-out.md` 与 `ROADMAP-next.md` 已纳入 Git 白名单
