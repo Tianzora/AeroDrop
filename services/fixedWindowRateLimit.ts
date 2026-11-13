@@ -17,6 +17,8 @@ type RateWindow = {
 
 export type FixedWindowRateLimiter = {
   consume(key: string, now: number): FixedWindowRateLimitDecision;
+  /** 这个 key 当前是否已被跟踪（区分「配额用完」与「键表已满」两种拒绝）。 */
+  hasTrackedKey(key: string): boolean;
   getTrackedKeyCount(): number;
 };
 
@@ -24,10 +26,12 @@ export const createFixedWindowRateLimiter = (
   options: FixedWindowRateLimiterOptions
 ): FixedWindowRateLimiter => {
   const windows = new Map<string, RateWindow>();
+  // 0 / 负数上限没有意义；当成「只跟踪一个 key」处理，避免下面的判定退化成恒拒绝。
+  const maxTrackedKeys = Math.max(1, Math.floor(options.maxTrackedKeys));
 
   const prune = (now: number): void => {
     // 到上限就开始找过期项：只在「地图已满」时多花这次扫描，平时 O(1) 返回。
-    if (windows.size < options.maxTrackedKeys) return;
+    if (windows.size < maxTrackedKeys) return;
 
     for (const [key, window] of windows) {
       if (now - window.windowStartedAt >= options.windowMs) {
@@ -36,27 +40,25 @@ export const createFixedWindowRateLimiter = (
     }
   };
 
-  // 分布式突发时所有条目都还没过期，光靠 prune 清不掉：这里给一个硬上限，
-  // 超了就先淘汰窗口最早的那条，保证 map 永远不会无界增长。
-  const enforceHardCap = (incomingKey: string): void => {
-    while (windows.size >= options.maxTrackedKeys && !windows.has(incomingKey)) {
-      let oldestKey: string | null = null;
-      let oldestStart = Number.POSITIVE_INFINITY;
-      for (const [key, window] of windows) {
-        if (window.windowStartedAt < oldestStart) {
-          oldestStart = window.windowStartedAt;
-          oldestKey = key;
-        }
-      }
-      if (oldestKey === null) return;
-      windows.delete(oldestKey);
+  // 键被填满时的 fail-closed：淘汰「窗口最早」的 key 等于给新 key 发一张免费通行证，
+  // 攻击者只要持续换 key 就能让被限流的键重新开始计数（旧实现正是如此）。
+  // 所以满了就拒绝新 key，直到有窗口过期；连带说明：键是 CF 注入的真实出口 IP，
+  // 调用方无法通过伪造请求头制造新 key，fail-closed 不会被用来锁死别人。
+  const soonestExpiry = (now: number): number => {
+    let retryAfterMs = options.windowMs;
+    for (const window of windows.values()) {
+      const remaining = window.windowStartedAt + options.windowMs - now;
+      if (remaining < retryAfterMs) retryAfterMs = remaining;
     }
+    return Math.max(1, retryAfterMs);
   };
 
   return {
     consume(key: string, now: number): FixedWindowRateLimitDecision {
       prune(now);
-      enforceHardCap(key);
+      if (windows.size >= maxTrackedKeys && !windows.has(key)) {
+        return { allowed: false, retryAfterMs: soonestExpiry(now) };
+      }
 
       const existing = windows.get(key);
       const window =
@@ -74,6 +76,9 @@ export const createFixedWindowRateLimiter = (
         allowed: false,
         retryAfterMs: Math.max(1, window.windowStartedAt + options.windowMs - now),
       };
+    },
+    hasTrackedKey(key: string): boolean {
+      return windows.has(key);
     },
     getTrackedKeyCount(): number {
       return windows.size;

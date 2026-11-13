@@ -83,7 +83,7 @@ test('flags signaling frames larger than the byte budget', () => {
   assert.equal(isSignalingMessageTooLarge(cjk), true);
 });
 
-test('prunes expired buckets once the tracked map grows past its cap', () => {
+test('fails closed instead of growing the tracked bucket map past its cap', () => {
   const limiter = createSignalingRateLimiter({
     blockMs: 10_000,
     maxAttemptsPerClientWindow: 10,
@@ -91,17 +91,24 @@ test('prunes expired buckets once the tracked map grows past its cap', () => {
     windowMs: 1_000,
   });
 
-  limiter.recordOfferAttempt({ clientKey: 'ip:a', now: 0 });
-  limiter.recordOfferAttempt({ clientKey: 'ip:b', now: 0 });
-  limiter.recordOfferAttempt({ clientKey: 'ip:c', now: 0 });
-  assert.equal(limiter.getTrackedBucketCounts().clientBuckets, 3);
+  assert.equal(limiter.recordOfferAttempt({ clientKey: 'ip:a', now: 0 }).allowed, true);
+  assert.equal(limiter.recordOfferAttempt({ clientKey: 'ip:b', now: 0 }).allowed, true);
 
-  // All previous windows are stale by now, so the next attempt collects them first.
-  limiter.recordOfferAttempt({ clientKey: 'ip:d', now: 5_000 });
+  // 键表已满：新 key 直接拒绝，而不是淘汰旧 key 放它进来。
+  const rejected = limiter.recordOfferAttempt({ clientKey: 'ip:c', now: 0 });
+  assert.equal(rejected.allowed, false);
+  assert.ok(rejected.allowed === false && rejected.retryAfterMs > 0);
+  assert.equal(limiter.getTrackedBucketCounts().clientBuckets, 2);
+
+  // 已跟踪的 key 不受影响。
+  assert.equal(limiter.recordOfferAttempt({ clientKey: 'ip:a', now: 10 }).allowed, true);
+
+  // 旧窗口过期后腾出位置，新 key 恢复。
+  assert.equal(limiter.recordOfferAttempt({ clientKey: 'ip:d', now: 5_000 }).allowed, true);
   assert.equal(limiter.getTrackedBucketCounts().clientBuckets, 1);
 });
 
-test('keeps still-blocked buckets when pruning', () => {
+test('never evicts still-blocked buckets when the bucket table is full', () => {
   const limiter = createSignalingRateLimiter({
     blockMs: 60_000,
     maxAttemptsPerClientWindow: 1,
@@ -109,13 +116,19 @@ test('keeps still-blocked buckets when pruning', () => {
     windowMs: 1_000,
   });
 
-  limiter.recordOfferAttempt({ clientKey: 'ip:blocked', now: 0 });
-  assert.equal(limiter.recordOfferAttempt({ clientKey: 'ip:blocked', now: 10 }).allowed, false);
+  assert.equal(limiter.recordOfferAttempt({ clientKey: 'ip:blocked', now: 0 }).allowed, true);
+  const blocked = limiter.recordOfferAttempt({ clientKey: 'ip:blocked', now: 10 });
+  assert.equal(blocked.allowed, false);
+  assert.equal(blocked.allowed === false && blocked.retryAfterMs, 60_000, 'quota abuse triggers the silence window');
 
-  limiter.recordOfferAttempt({ clientKey: 'ip:other', now: 20 });
+  // 表满时新 key 只拿窗口剩余时间作退避，不会被记 10 分钟静默期。
+  const other = limiter.recordOfferAttempt({ clientKey: 'ip:other', now: 20 });
+  assert.equal(other.allowed, false);
+  assert.ok(other.allowed === false && other.retryAfterMs < 60_000);
   limiter.recordOfferAttempt({ clientKey: 'ip:third', now: 30 });
-  assert.equal(limiter.getTrackedBucketCounts().clientBuckets, 3);
+  assert.equal(limiter.getTrackedBucketCounts().clientBuckets, 1);
 
-  limiter.recordOfferAttempt({ clientKey: 'ip:fourth', now: 2_000 });
-  assert.equal(limiter.getTrackedBucketCounts().clientBuckets, 2);
+  // 静默期内的原 key 仍然被拒（没有因为表满被淘汰掉）。
+  const stillBlocked = limiter.recordOfferAttempt({ clientKey: 'ip:blocked', now: 2_000 });
+  assert.equal(stillBlocked.allowed, false);
 });

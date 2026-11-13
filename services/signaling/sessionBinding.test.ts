@@ -206,6 +206,51 @@ test('轮换宽限期内的旧 proof 仍可重连，过期后失效', () => {
   );
 });
 
+test('旧 proof 的宽限期必须覆盖 10 分钟的重连预算', () => {
+  // 回归点：宽限期曾只有 120s，registered 帧一丢 / 客户端离线超过 2 分钟就会永久 4010。
+  assert.equal(SESSION_PROOF_GRACE_MS, 10 * 60 * 1000);
+
+  const storedProofHash = 'c'.repeat(64);
+  const previousProofHash = 'e'.repeat(64);
+  const now = 1_000_000;
+  const expiresAt = now + SESSION_PROOF_GRACE_MS;
+  const input = {
+    boundSecretHash: HASH_A,
+    storedProofHash,
+    incomingProofHash: previousProofHash,
+    now,
+  } as const;
+
+  // 距上次轮换 9 分 59 秒：旧 proof 仍可读。
+  assert.equal(
+    shouldAcceptSessionAdmission({
+      ...input,
+      recentProofHashes: [{ proofHash: previousProofHash, expiresAt }],
+      now: now + 9 * 60 * 1000 + 59 * 1000,
+    }),
+    'allow'
+  );
+  // 10 分 01 秒：超出宽限期，必须用轮换后的最新 proof。
+  assert.equal(
+    shouldAcceptSessionAdmission({
+      ...input,
+      recentProofHashes: [{ proofHash: previousProofHash, expiresAt }],
+      now: now + 10 * 60 * 1000 + 1_000,
+    }),
+    'reject'
+  );
+  // 同一时刻，最新 proof 仍然有效：宽限期只作用于历史 proof。
+  assert.equal(
+    shouldAcceptSessionAdmission({
+      ...input,
+      incomingProofHash: storedProofHash,
+      recentProofHashes: [{ proofHash: previousProofHash, expiresAt }],
+      now: now + 10 * 60 * 1000 + 1_000,
+    }),
+    'allow'
+  );
+});
+
 test('轮换历史保留当前摘要、丢弃过期项并限制条数', () => {
   const now = 5_000;
   const current = 'c'.repeat(64);

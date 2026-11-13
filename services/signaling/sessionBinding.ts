@@ -1,3 +1,17 @@
+import {
+  SESSION_PROOF_GRACE_MS,
+  SESSION_PROOF_HISTORY_LIMIT,
+  SESSION_SECRET_BYTES,
+  SESSION_SECRET_HASH_GRACE_MS,
+} from '../../constants/signaling';
+// 常量定义在 constants/signaling.ts；这里重新导出，保持既有导入路径不破。
+export {
+  SESSION_PROOF_GRACE_MS,
+  SESSION_PROOF_HISTORY_LIMIT,
+  SESSION_SECRET_BYTES,
+  SESSION_SECRET_HASH_GRACE_MS,
+} from '../../constants/signaling';
+
 /**
  * 分享会话的身份绑定。
  *
@@ -24,7 +38,6 @@ const toHex = (buffer: ArrayBuffer): string =>
     .map((byte) => byte.toString(16).padStart(2, '0'))
     .join('');
 
-export const SESSION_SECRET_BYTES = 32;
 
 /** 只接受 64 位 hex；大小写都算合法，比较前统一转小写。 */
 export const isValidSessionSecretHash = (value: unknown): value is string =>
@@ -61,20 +74,6 @@ export const shouldAcceptSessionReplacement = (input: {
     : 'reject';
 };
 
-/** proof 轮换后的宽限期：旧 proof 在这段时间内仍可用于重连。 */
-export const SESSION_PROOF_GRACE_MS = 120_000;
-
-/**
- * 首次绑定用静态摘要的兜底窗口。`registered` 帧可能丢、页面可能被挂起，客户端此时
- * 还没有 proof；只在这段时间内接受摘要，过期后必须用 proof，避免静态 bearer 复活。
- */
-export const SESSION_SECRET_HASH_GRACE_MS = 10 * 60 * 1000;
-
-/**
- * 宽限期内旧 proof 的保留条数。连续抖动时客户端可能还没收到新 proof 就再次断线，
- * 只留一条会被第二次轮换覆盖，导致合法客户端被自己拒掉；4 条足以覆盖 120s 内的抖动。
- */
-export const SESSION_PROOF_HISTORY_LIMIT = 4;
 
 /** 历史 proof 摘要及其过期时间。只存摘要，明文 proof 只经 WS 下发一次。 */
 export type SessionProofHistoryEntry = {

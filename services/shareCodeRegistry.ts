@@ -1,3 +1,7 @@
+import { SHARE_CODE_UNKNOWN_LOOKUP_RETRY_AFTER_SECONDS } from '../constants/signaling';
+/** 全局未知码预算耗尽后建议的退避秒数（DO 返回 429 的 Retry-After）。 */
+export { SHARE_CODE_UNKNOWN_LOOKUP_RETRY_AFTER_SECONDS } from '../constants/signaling';
+
 // 配对身份登记表的纯逻辑：码生成、secret 绑定校验、TTL、分配决策。
 // 这里不碰存储，Worker/DO 只把 SQLite 行与请求参数传进来，便于 node:test 直接覆盖。
 
@@ -291,6 +295,23 @@ export const resolveShareCodeRegistration = async (input: {
 };
 
 export const SHARE_CODE_FORBIDDEN_BODY = { error: 'forbidden' } as const;
+
+/**
+ * 口令相关的对外错误文案只在这里定义：Worker 的 HTTP 层与 DO 的内部端点共用一份，
+ * 避免同一句话在两个文件里各写一版、改一处漏一处。
+ */
+export const SHARE_CODE_ERROR_MESSAGES = {
+  invalidCode: 'code must be six digits',
+  notFound: 'Share code not found',
+  notFoundOrExpired: 'Share code not found or expired',
+  lookupFailed: 'Share code lookup failed',
+  allocationFailed: 'Share code allocation failed',
+  rateLimited: 'Too many requests',
+} as const;
+
+/** 凭据类操作（revoke / resume）失败文案；不区分「码不存在」与「凭证不匹配」。 */
+export const shareCodeErrorMessage = (op: 'revoke' | 'resume'): string => `Share code ${op} failed`;
+
 
 export type ShareCodeRevokeDecision = { allowed: true } | { allowed: false };
 

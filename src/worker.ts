@@ -1,15 +1,28 @@
+import {
+  CF_TURN_CACHE_SAFETY_WINDOW_SECONDS,
+  CF_TURN_FETCH_TIMEOUT_MS,
+  DEFAULT_CF_TURN_TTL_SECONDS,
+  ICE_LIMIT_DO_TIMEOUT_MS,
+  MAX_CF_TURN_TTL_SECONDS,
+  MIN_CF_TURN_TTL_SECONDS,
+  SHARE_CODE_REVOKE_MAX_GRACE_MS,
+  SIGNALING_SESSION_SLOT_REFRESH_MS,
+} from '../constants/signaling';
+
 import { DurableObject } from 'cloudflare:workers';
 import { resolveIceTransportPolicyDecision } from '../services/iceConfigPolicy';
 import { createIceConfigRateLimiter, getIceConfigRetryAfterSeconds } from '../services/iceConfigRateLimitPolicy';
 import {
+  SHARE_CODE_ERROR_MESSAGES,
   SHARE_CODE_FORBIDDEN_BODY,
-  SHARE_CODE_MAX_BODY_BYTES,
   SHARE_CODE_REBIND_REJECTED_BODY,
   SHARE_CODE_TAKEN_BODY,
+  SHARE_CODE_UNKNOWN_LOOKUP_RETRY_AFTER_SECONDS,
   allocateShareCode,
   isValidShareCodeSecretHash,
   normalizeShareCode,
   resolveShareCodeRegistration,
+  shareCodeErrorMessage,
   shouldRejectShareCodeRebind,
   validateShareCodeCreatePayload,
   verifyShareCodeRevoke,
@@ -43,14 +56,47 @@ import {
 import {
   SESSION_PROOF_GRACE_MS,
   SESSION_SECRET_HASH_GRACE_MS,
-  buildNextSessionProofHistory,
   createSessionProof,
   hashSessionProof,
   isValidSessionProof,
   isValidSessionSecretHash,
-  shouldAcceptSessionAdmission,
-  type SessionProofHistoryEntry,
 } from '../services/signaling/sessionBinding';
+import {
+  SHARE_CODE_TOMBSTONE_MS,
+  SIGNALING_SESSION_BINDING_MS,
+  SIGNALING_SESSION_SLOT_TTL_MS,
+  applySessionSlotRelease,
+  applySessionSlotRenew,
+  applySessionSlotReserve,
+  commitSessionBindingRotation,
+  deferShareCodeRevoke as applyDeferredShareCodeRevoke,
+  deleteExpiredShareCodes as purgeExpiredShareCodes,
+  deleteShareCodesByPeerId as deleteShareCodesForPeer,
+  findActiveShareCode as readActiveShareCode,
+  findActiveShareCodeByPeerId as readActiveShareCodeByPeerId,
+  findRecentTombstoneByPeerId as readRecentShareCodeTombstone,
+  initializeSessionBindingSchema,
+  initializeSessionSlotSchema,
+  initializeShareCodeSchema,
+  insertShareCode as insertShareCodeRow,
+  planSessionAdmission,
+  resumeShareCode as applyResumeShareCode,
+  revokeShareCode as applyRevokeShareCode,
+  type SqlLike,
+} from '../services/signaling/sessionStore';
+import { assessNetworkRisk, type NetworkRiskReason } from '../services/signaling/networkRisk';
+import { applyResponsePolicies } from '../services/signaling/httpPolicy';
+import { readShareCodeBody } from '../services/signaling/shareCodeBody';
+import {
+  parsePositiveInt,
+  resolveSignalingClientKey,
+} from '../services/signaling/requestContext';
+import {
+  createUnknownShareCodeBudget,
+  type UnknownShareCodeBudget,
+} from '../services/signaling/unknownShareCodeBudget';
+import { deliverRegisteredThenCommit } from '../services/signaling/sessionAdmissionDelivery';
+import { planSignalingSessionSeat } from '../services/signaling/sessionSeat';
 import {
   rendezvousShardIndex,
   resolveSignalingShardCount,
@@ -64,13 +110,8 @@ import {
   type ShareCodeLookupRequest as ShareCodeLookupBatchRequest,
 } from '../services/signaling/shareCodeLookupBatch';
 
-// 注销后保留 peerId 归属的时间窗。与口令 TTL 上限对齐，覆盖「同一个分享反复启停」。
-const SHARE_CODE_TOMBSTONE_MS = 24 * 60 * 60 * 1000;
-// 会话绑定的保留时间：即使 socket 已断开，同 peerId 的接管仍必须出示 proof。
-// 24h 与口令墓碑对齐，避免分享结束后 peerId 立刻可被无凭证抢注。
-const SIGNALING_SESSION_BINDING_MS = 24 * 60 * 60 * 1000;
+// 注销后保留 peerId 归属的时间窗见 services/signaling/sessionStore.ts。
 // pagehide 可能只是切后台/被系统挂起，不能立刻永久注销；延迟窗口内允许原凭证恢复。
-const SHARE_CODE_REVOKE_MAX_GRACE_MS = 120_000;
 
 interface AssetBinding {
   fetch(input: Request | string | URL, init?: RequestInit): Promise<Response>;
@@ -113,25 +154,6 @@ type CloudflareTurnApiResponse = {
   iceServers?: IceServerConfig[];
 };
 
-type NetworkRiskReason = 'isp' | 'score' | 'location' | 'network' | null;
-
-type ClientNetworkHints = {
-  isMobileDevice: boolean;
-  networkType: string;
-  effectiveType: string;
-  saveData: boolean;
-  rtt: number | null;
-  downlink: number | null;
-};
-
-type NetworkRiskAssessment = {
-  isRisk: boolean;
-  reason: NetworkRiskReason;
-  details: string;
-  isp: string;
-  country: string;
-};
-
 type SignalingEnvelope =
   | { type: 'registered'; peerId: string; sessionProof?: string }
   | { type: 'ping' | 'pong'; ts: number; sourcePeerId?: string }
@@ -153,15 +175,6 @@ type SignalingEnvelope =
       candidate: RTCIceCandidateInit;
     };
 
-const IMMUTABLE_ASSET_CACHE_CONTROL = 'public, max-age=31536000, immutable';
-const HTML_CACHE_CONTROL = 'no-cache';
-const SW_CACHE_CONTROL = 'no-cache';
-const MANIFEST_CACHE_CONTROL = 'no-cache';
-const DEFAULT_CF_TURN_TTL_SECONDS = 3600;
-const MIN_CF_TURN_TTL_SECONDS = 60;
-const MAX_CF_TURN_TTL_SECONDS = 86400;
-const CF_TURN_CACHE_SAFETY_WINDOW_SECONDS = 60;
-const CF_TURN_FETCH_TIMEOUT_MS = 4000;
 
 const STUN_SERVERS: IceServerConfig[] = [
   { urls: 'stun:stun.l.google.com:19302' },
@@ -187,11 +200,7 @@ const SIGNALING_SHARE_CODE_LOOKUP_BATCH_PATH = '/internal/lookup-share-codes';
 const SIGNALING_SESSION_SLOT_PATH = '/internal/session-slot';
 // 会话绑定表（摘要 + proof 摘要 + 宽限期历史）只住在 shard 0，跨片走这个内部端点。
 const SIGNALING_SESSION_BINDING_PATH = '/internal/session-binding';
-// 会话名额的兜底 TTL：正常路径由 socket 关闭时释放；进程被杀/DO 迁移可能漏掉释放，
-// 超过这个时间没有心跳的槽位在下次领取时被清掉，避免一次故障永久占满出口 IP 的名额。
-const SIGNALING_SESSION_SLOT_TTL_MS = 6 * 60 * 60 * 1000;
 /** 常驻连接每 30 分钟续一次名额 TTL；ping 每 5s 一次，不节流会变成写热点。 */
-const SIGNALING_SESSION_SLOT_REFRESH_MS = 30 * 60 * 1000;
 
 // Per-isolate budget for TURN credential issuance; see iceConfigRateLimitPolicy.
 const iceConfigRateLimiter = createIceConfigRateLimiter();
@@ -208,63 +217,6 @@ const SHARE_CODE_DO_URL = 'https://signaling-hub.internal' + SHARE_CODE_DO_PATH;
 const ICE_LIMIT_DO_PATH = '/internal/ice-limit';
 const ICE_LIMIT_DO_URL = 'https://signaling-hub.internal' + ICE_LIMIT_DO_PATH;
 // 一次 DO 往返的上限；超时就退回 isolate 内限流，不给 ice-config 加不可控延迟。
-const ICE_LIMIT_DO_TIMEOUT_MS = 800;
-
-type ShareCodeRow = {
-  code: string;
-  peer_id: string;
-  secret_hash: string;
-  expires_at: number;
-  revoke_after: number | null;
-};
-
-type ShareCodeBodyResult =
-  | { ok: true; tooLarge: false; value: unknown }
-  | { ok: false; tooLarge: boolean };
-
-const setSecurityHeaders = (headers: Headers) => {
-  headers.set('X-Content-Type-Options', 'nosniff');
-  headers.set('X-Frame-Options', 'DENY');
-  headers.set('Referrer-Policy', 'strict-origin-when-cross-origin');
-  headers.set('Permissions-Policy', 'camera=(), microphone=(self), geolocation=()');
-  headers.set('X-XSS-Protection', '1; mode=block');
-  if (!headers.has('Strict-Transport-Security')) {
-    headers.set('Strict-Transport-Security', 'max-age=63072000; includeSubDomains; preload');
-  }
-};
-
-const applyResponsePolicies = (request: Request, response: Response): Response => {
-  const headers = new Headers(response.headers);
-  setSecurityHeaders(headers);
-
-  const method = request.method.toUpperCase();
-  if (method === 'GET' || method === 'HEAD') {
-    const pathname = new URL(request.url).pathname.toLowerCase();
-
-    if (pathname === '/sw.js') {
-      headers.set('Cache-Control', SW_CACHE_CONTROL);
-    } else if (pathname === '/manifest.json') {
-      headers.set('Cache-Control', MANIFEST_CACHE_CONTROL);
-    } else if (pathname.endsWith('.js') || pathname.endsWith('.css')) {
-      headers.set('Cache-Control', IMMUTABLE_ASSET_CACHE_CONTROL);
-    } else if (pathname === '/' || pathname.endsWith('/index.html') || pathname.endsWith('.html')) {
-      headers.set('Cache-Control', HTML_CACHE_CONTROL);
-
-      // 分享链接（文件 ?code=、屏幕共享 ?view=）只对持链接的人有效，不该被搜索引擎收录。
-      // 响应头对不执行 JS 的爬虫同样生效，静态 meta 做不到这一点。
-      const url = new URL(request.url);
-      if (url.searchParams.has('code') || url.searchParams.has('view')) {
-        headers.set('X-Robots-Tag', 'noindex');
-      }
-    }
-  }
-
-  return new Response(response.body, {
-    status: response.status,
-    statusText: response.statusText,
-    headers,
-  });
-};
 
 const json = (data: unknown, init: ResponseInit = {}): Response => {
   const headers = new Headers(init.headers);
@@ -276,38 +228,6 @@ const json = (data: unknown, init: ResponseInit = {}): Response => {
     ...init,
     headers,
   });
-};
-
-const parsePositiveInt = (value: string | undefined, fallback: number): number => {
-  if (!value) {
-    return fallback;
-  }
-
-  const parsed = Number.parseInt(value, 10);
-  return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
-};
-
-const parseBooleanFlag = (value: string | null): boolean => value === '1' || value === 'true';
-
-const parseNullableNumber = (value: string | null): number | null => {
-  if (!value) {
-    return null;
-  }
-
-  const parsed = Number(value);
-  return Number.isFinite(parsed) && parsed >= 0 ? parsed : null;
-};
-
-const getClientNetworkHints = (request: Request): ClientNetworkHints => {
-  const url = new URL(request.url);
-  return {
-    isMobileDevice: parseBooleanFlag(url.searchParams.get('mobileDevice')),
-    networkType: url.searchParams.get('networkType')?.trim().toLowerCase() || 'unknown',
-    effectiveType: url.searchParams.get('effectiveType')?.trim().toLowerCase() || 'unknown',
-    saveData: parseBooleanFlag(url.searchParams.get('saveData')),
-    rtt: parseNullableNumber(url.searchParams.get('rtt')),
-    downlink: parseNullableNumber(url.searchParams.get('downlink')),
-  };
 };
 
 const getCloudflareTurnTokenId = (env: Env): string => {
@@ -386,99 +306,6 @@ const isAllowedSameOriginRequest = (request: Request): boolean => {
       !refererOrigin &&
       (secFetchSite === 'same-origin' || secFetchSite === 'same-site'))
   );
-};
-
-const assessNetworkRisk = (request: Request): NetworkRiskAssessment => {
-  const cf = request.cf;
-  const clientNetwork = getClientNetworkHints(request);
-
-  if (!cf) {
-    return {
-      isRisk: clientNetwork.networkType === 'cellular' || clientNetwork.saveData,
-      reason: clientNetwork.networkType === 'cellular' || clientNetwork.saveData ? 'network' : null,
-      details: 'Local development or CF object missing',
-      isp: 'Local Dev',
-      country: 'CN',
-    };
-  }
-
-  const riskKeywords = [
-    'google',
-    'amazon',
-    'aws',
-    'microsoft',
-    'azure',
-    'digitalocean',
-    'linode',
-    'vultr',
-    'alibaba',
-    'tencent',
-    'oracle',
-    'cloudflare',
-    'cdn',
-    'server',
-  ];
-  const mobileCarrierKeywords = [
-    'mobile',
-    'wireless',
-    'cellular',
-    'telecom',
-    'unicom',
-    'cmcc',
-    'verizon',
-    'vodafone',
-    't-mobile',
-    'sprint',
-    'telefonica',
-  ];
-
-  const originalIsp = (cf.asOrganization as string) || 'Unknown';
-  const isp = originalIsp.toLowerCase();
-  const country = (cf.country as string) || 'Unknown';
-  const threatScore = (cf.threatScore as number) || 0;
-  const isLikelyMobileNetwork =
-    clientNetwork.networkType === 'cellular' ||
-    mobileCarrierKeywords.some((keyword) => isp.includes(keyword));
-  const clientLooksConstrained =
-    clientNetwork.saveData ||
-    clientNetwork.effectiveType === 'slow-2g' ||
-    clientNetwork.effectiveType === '2g' ||
-    clientNetwork.effectiveType === '3g' ||
-    (clientNetwork.rtt !== null && clientNetwork.rtt >= 180) ||
-    (clientNetwork.downlink !== null && clientNetwork.downlink > 0 && clientNetwork.downlink < 5);
-
-  let isRisk = false;
-  let reason: NetworkRiskReason = null;
-  let details = '';
-
-  if (isLikelyMobileNetwork && (clientLooksConstrained || clientNetwork.isMobileDevice)) {
-    isRisk = true;
-    reason = 'network';
-    details = `${originalIsp} / ${clientNetwork.networkType} / ${clientNetwork.effectiveType}`;
-  } else if (riskKeywords.some((keyword) => isp.includes(keyword))) {
-    isRisk = true;
-    reason = 'isp';
-    details = originalIsp;
-  } else if (isLikelyMobileNetwork) {
-    isRisk = true;
-    reason = 'network';
-    details = `${originalIsp} / ${clientNetwork.networkType}`;
-  } else if (threatScore > 10) {
-    isRisk = true;
-    reason = 'score';
-    details = `Threat Score: ${threatScore}`;
-  } else if (country !== 'CN') {
-    reason = 'location';
-    details = `Location: ${country}`;
-  }
-
-  return {
-    isRisk,
-    reason,
-    details,
-    isp: originalIsp,
-    country,
-  };
 };
 
 const fetchCloudflareTurnIceConfig = async (env: Env): Promise<IceConfigPayload | null> => {
@@ -634,7 +461,7 @@ const handleIceConfig = async (request: Request, env: Env): Promise<Response> =>
     );
   }
 
-    const clientKey = getSignalingClientKey(request);
+    const clientKey = resolveSignalingClientKey(request.headers);
   const globalLimit = await consumeIceConfigGlobalLimit(env, clientKey);
   if (globalLimit.kind === 'limited') {
     return iceConfigRateLimitedResponse(globalLimit.retryAfterSeconds);
@@ -775,53 +602,6 @@ const callShareCodeStore = async (env: Env, body: Record<string, unknown>): Prom
   );
 };
 
-const readShareCodeBody = async (request: Request): Promise<ShareCodeBodyResult> => {
-  const contentLength = Number(request.headers.get('Content-Length') ?? '');
-  if (Number.isFinite(contentLength) && contentLength > SHARE_CODE_MAX_BODY_BYTES) {
-    return { ok: false, tooLarge: true };
-  }
-
-  // 没有 Content-Length 的分块上传也必须边读边限：先 request.text() 再判断长度
-  // 等于让调用方用超大 body 吃掉 Worker 内存。
-  if (!request.body) {
-    return { ok: false, tooLarge: false };
-  }
-
-  const reader = request.body.getReader();
-  const chunks: Uint8Array[] = [];
-  let received = 0;
-  try {
-    for (;;) {
-      const { done, value } = await reader.read();
-      if (done) break;
-      if (!value) continue;
-      received += value.byteLength;
-      if (received > SHARE_CODE_MAX_BODY_BYTES) {
-        await reader.cancel().catch(() => {});
-        return { ok: false, tooLarge: true };
-      }
-      chunks.push(value);
-    }
-  } catch {
-    return { ok: false, tooLarge: false };
-  } finally {
-    reader.releaseLock?.();
-  }
-
-  const bytes = new Uint8Array(received);
-  let offset = 0;
-  for (const chunk of chunks) {
-    bytes.set(chunk, offset);
-    offset += chunk.byteLength;
-  }
-
-  try {
-    return { ok: true, tooLarge: false, value: JSON.parse(new TextDecoder().decode(bytes)) as unknown };
-  } catch {
-    return { ok: false, tooLarge: false };
-  }
-};
-
 const handleShareCodeCreate = async (request: Request, env: Env): Promise<Response> => {
   if (!isAllowedSameOriginRequest(request)) {
     return shareCodeJson({ error: 'Forbidden' }, 403);
@@ -833,7 +613,7 @@ const handleShareCodeCreate = async (request: Request, env: Env): Promise<Respon
     });
   }
 
-  const rateLimit = shareCodeRateLimiters.post.consume(getSignalingClientKey(request), Date.now());
+  const rateLimit = shareCodeRateLimiters.post.consume(resolveSignalingClientKey(request.headers), Date.now());
   if (!rateLimit.allowed) {
     return shareCodeRateLimitedResponse(rateLimit.retryAfterMs);
   }
@@ -862,7 +642,7 @@ const handleShareCodeCreate = async (request: Request, env: Env): Promise<Respon
     return shareCodeJson(SHARE_CODE_TAKEN_BODY, 409);
   }
   if (!storeResponse.ok) {
-    return shareCodeJson({ error: 'Share code allocation failed' }, 503);
+    return shareCodeJson({ error: SHARE_CODE_ERROR_MESSAGES.allocationFailed }, 503);
   }
 
   return shareCodeJson(await storeResponse.json());
@@ -879,22 +659,28 @@ const handleShareCodeLookup = async (request: Request, env: Env): Promise<Respon
     });
   }
 
-  const rateLimit = shareCodeRateLimiters.get.consume(getSignalingClientKey(request), Date.now());
+  const rateLimit = shareCodeRateLimiters.get.consume(resolveSignalingClientKey(request.headers), Date.now());
   if (!rateLimit.allowed) {
     return shareCodeRateLimitedResponse(rateLimit.retryAfterMs);
   }
 
   const code = normalizeShareCode(new URL(request.url).searchParams.get('code'));
   if (!code) {
-    return shareCodeJson({ error: 'code must be six digits' }, 400);
+    return shareCodeJson({ error: SHARE_CODE_ERROR_MESSAGES.invalidCode }, 400);
   }
 
   const storeResponse = await callShareCodeStore(env, { op: 'lookup', code });
   if (storeResponse.status === 404) {
-    return shareCodeJson({ error: 'Share code not found or expired' }, 404);
+    return shareCodeJson({ error: SHARE_CODE_ERROR_MESSAGES.notFoundOrExpired }, 404);
+  }
+  if (storeResponse.status === 429) {
+    // 全局未知码预算在 shard 0 里判定；把 Retry-After 原样交给调用方，客户端才能退避。
+    return shareCodeJson({ error: SHARE_CODE_ERROR_MESSAGES.rateLimited }, 429, {
+      'Retry-After': String(SHARE_CODE_UNKNOWN_LOOKUP_RETRY_AFTER_SECONDS),
+    });
   }
   if (!storeResponse.ok) {
-    return shareCodeJson({ error: 'Share code lookup failed' }, 503);
+    return shareCodeJson({ error: SHARE_CODE_ERROR_MESSAGES.lookupFailed }, 503);
   }
 
   return shareCodeJson(await storeResponse.json());
@@ -916,14 +702,14 @@ const handleShareCodeCredentialAction = async (
     });
   }
 
-  const rateLimit = shareCodeRateLimiters.post.consume(getSignalingClientKey(request), Date.now());
+  const rateLimit = shareCodeRateLimiters.post.consume(resolveSignalingClientKey(request.headers), Date.now());
   if (!rateLimit.allowed) {
     return shareCodeRateLimitedResponse(rateLimit.retryAfterMs);
   }
 
   const code = normalizeShareCode(rawCode);
   if (!code) {
-    return shareCodeJson({ error: 'code must be six digits' }, 400);
+    return shareCodeJson({ error: SHARE_CODE_ERROR_MESSAGES.invalidCode }, 400);
   }
 
   const body = await readShareCodeBody(request);
@@ -959,10 +745,10 @@ const handleShareCodeCredentialAction = async (
     return shareCodeJson(SHARE_CODE_FORBIDDEN_BODY, 403);
   }
   if (storeResponse.status === 404) {
-    return shareCodeJson({ error: 'Share code not found' }, 404);
+    return shareCodeJson({ error: SHARE_CODE_ERROR_MESSAGES.notFound }, 404);
   }
   if (!storeResponse.ok) {
-    return shareCodeJson({ error: `Share code ${op} failed` }, 503);
+    return shareCodeJson({ error: shareCodeErrorMessage(op) }, 503);
   }
 
   return shareCodeJson(await storeResponse.json());
@@ -1055,47 +841,18 @@ type SessionBindingAdmissionInput = {
   now: number;
 };
 
-type SessionBindingAdmission = {
-  allowed: boolean;
-  /** 本次注册签发的新 proof 明文；只有非空时才出现在 registered 帧里。 */
-  proof?: string;
-};
-
-type SessionBindingRecord = {
-  secretHash: string | null;
-  secretHashExpiresAt: number;
-  proofHash: string;
-  recentProofHashes: SessionProofHistoryEntry[];
-};
-
-/** 历史 proof 是 JSON 文本列；解析失败按「没有历史」处理，绝不让坏数据变成放行。 */
-const parseSessionProofHistory = (raw: string | null): SessionProofHistoryEntry[] => {
-  if (!raw) return [];
-  try {
-    const parsed: unknown = JSON.parse(raw);
-    if (!Array.isArray(parsed)) return [];
-    return parsed.flatMap((entry) => {
-      if (!entry || typeof entry !== 'object') return [];
-      const candidate = entry as { proofHash?: unknown; expiresAt?: unknown };
-      if (typeof candidate.proofHash !== 'string' || typeof candidate.expiresAt !== 'number') {
-        return [];
-      }
-      return [{ proofHash: candidate.proofHash, expiresAt: candidate.expiresAt }];
-    });
-  } catch {
-    return [];
-  }
-};
-
-const getSignalingClientKey = (request: Request): string => {
-  const cfConnectingIp = request.headers.get('CF-Connecting-IP')?.trim();
-  if (cfConnectingIp) return `ip:${cfConnectingIp}`;
-
-  const forwardedFor = request.headers.get('X-Forwarded-For')?.split(',')[0]?.trim();
-  if (forwardedFor) return `xff:${forwardedFor}`;
-
-  return 'ip:unknown';
-};
+type SessionBindingAdmission =
+  | { allowed: false }
+  | {
+      allowed: true;
+      /** 本次注册签发的新 proof 明文；只有非空时才出现在 registered 帧里。 */
+      proof?: string;
+      /**
+       * 等待落库的轮换。proof 已经在 registered 帧里交给客户端，落库必须晚于「确认能投递」，
+       * 否则帧丢失 + 超出 proof 宽限期会让客户端永久 4010。
+       */
+      pending?: { proofHash: string; boundSecretHash: string | null };
+    };
 
 export class SignalingHub extends DurableObject<Env> {
   private sessionsByPeer = new Map<string, WebSocket>();
@@ -1119,6 +876,12 @@ export class SignalingHub extends DurableObject<Env> {
   private maxSignalingSessions: number;
   /** 跨片口令查询的合并器：同一窗口内的并发注册共用一次 RPC，而不是一次注册一次 RPC。 */
   private shareCodeLookupBatcher: ShareCodeLookupBatcher | null = null;
+  /** 口令 GET 的全局未知码预算：只保护 shard 0 的口令表，不按码锁定。 */
+  private unknownShareCodeBudget: UnknownShareCodeBudget = createUnknownShareCodeBudget();
+
+  private getSql(): SqlLike {
+    return this.ctx.storage.sql as unknown as SqlLike;
+  }
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
@@ -1130,9 +893,11 @@ export class SignalingHub extends DurableObject<Env> {
     );
     this.sessionLimiter = createSignalingSessionLimiter(this.maxSignalingSessions);
 
-    this.initializeShareCodeSchema();
-    this.initializeSessionBindingSchema();
-    this.initializeSessionSlotSchema();
+    // DO 里只剩「表结构 + 状态机入口」；SQL 细节全部下沉到 sessionStore，便于用 fake 单测。
+    const sql = this.getSql();
+    initializeShareCodeSchema(sql);
+    initializeSessionBindingSchema(sql);
+    initializeSessionSlotSchema(sql);
 
     for (const ws of this.ctx.getWebSockets()) {
       const attachment = ws.deserializeAttachment() as SessionAttachment | null;
@@ -1188,7 +953,7 @@ export class SignalingHub extends DurableObject<Env> {
     if (sessionProof !== undefined && !isValidSessionProof(sessionProof)) {
       return new Response('Invalid sessionProof', { status: 400 });
     }
-    const clientKey = getSignalingClientKey(request);
+    const clientKey = resolveSignalingClientKey(request.headers);
     const remoteLookup = this.shouldUseRemoteShareCodeLookup();
     // 分片模式下每次注册要跨 DO 回源查口令，且发生在会话名额与消息节流之前；
     // 先消耗 per-isolate 握手预算，别让未认证的握手放大成 DO 调用风暴。
@@ -1290,10 +1055,11 @@ export class SignalingHub extends DurableObject<Env> {
       return new Response(null, { status: 101, webSocket: client });
     }
     const existingClientKey = isTakeover ? this.clientBySocket.get(existing) : undefined;
-    if (isTakeover && existingClientKey === clientKey) {
-      // 同一出口 IP 的接管：名额此刻在旧 socket 手里，先收回再领取，等价于原子迁移。
-      this.sessionLimiter.release(clientKey);
-    }
+    // 同一出口 IP 的接管：名额此刻记在旧 socket 上。接管块会把旧 socket 从 clientBySocket
+    // 摘除（旧 socket 关闭时不再释放），所以这里直接「转移」席位：既不 release 也不
+    // tryAcquire。先 release 再 tryAcquire 的旧写法在 tryAcquire 失败时会留下计数 -1 的
+    // 漂移，而且这条路径提前 return，旧 socket 也没被关掉。
+    const seatPlan = planSignalingSessionSeat({ isTakeover, existingClientKey, clientKey });
 
     // 分片后「每客户端 12 会话」必须全局计数：每个片各算一次会把上限放大成 12×N。
     // 权威计数在 shard 0（与 ice-config 全局计数同处），只有分片 > 1 时才启用；
@@ -1321,7 +1087,7 @@ export class SignalingHub extends DurableObject<Env> {
       this.slotBySocket.set(server, sessionSlotId);
     }
 
-    if (!this.sessionLimiter.tryAcquire(clientKey)) {
+    if (seatPlan.kind === 'acquire' && !this.sessionLimiter.tryAcquire(clientKey)) {
       if (sessionSlotId) {
         this.slotBySocket.delete(server);
         await this.releaseSignalingSessionSlot(sessionSlotId);
@@ -1385,13 +1151,20 @@ export class SignalingHub extends DurableObject<Env> {
       this.slotRefreshedAt.set(server, now);
     }
     // proof 明文只在这一帧出现一次，绑定表里存的是它的 SHA-256 摘要。
-    server.send(
-      JSON.stringify({
-        type: 'registered',
-        peerId,
-        ...(admission.proof ? { sessionProof: admission.proof } : {}),
-      } satisfies SignalingEnvelope)
-    );
+    // 轮换落库必须在 registered 之后：帧丢了客户端手里只有旧 proof，先落库会在宽限期后
+    // 让旧 proof 失效，重连直接 4010。helper 会把「投递失败 → 不落库」钉死成顺序契约。
+    await deliverRegisteredThenCommit({
+      sendRegistered: () => {
+        server.send(
+          JSON.stringify({
+            type: 'registered',
+            peerId,
+            ...(admission.proof ? { sessionProof: admission.proof } : {}),
+          } satisfies SignalingEnvelope)
+        );
+      },
+      commit: () => this.finalizeSignalingSessionAdmission(peerId, admission),
+    });
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -1538,156 +1311,6 @@ export class SignalingHub extends DurableObject<Env> {
     }
   }
 
-  private initializeShareCodeSchema(): void {
-    this.ctx.storage.sql.exec(
-      'CREATE TABLE IF NOT EXISTS share_codes (' +
-        'code TEXT PRIMARY KEY, ' +
-        'peer_id TEXT NOT NULL, ' +
-        'secret_hash TEXT NOT NULL, ' +
-        'expires_at INTEGER NOT NULL, ' +
-        'created_at INTEGER NOT NULL, ' +
-        'revoke_after INTEGER)'
-    );
-    // 旧库补列：pagehide 的延迟注销需要记录待生效时间。
-    const columns = this.ctx.storage.sql
-      .exec<{ name: string }>('PRAGMA table_info(share_codes)')
-      .toArray();
-    if (!columns.some((column) => column.name === 'revoke_after')) {
-      this.ctx.storage.sql.exec('ALTER TABLE share_codes ADD COLUMN revoke_after INTEGER');
-    }
-    // 注销后保留一段时间的「墓碑」：只 DELETE 活跃行会让 peerId 的归属信息消失，
-    // 任何拿到过发送方 peerId 的人都能抢先用自己的 secretHash 重新绑定这个 id，
-    // 之后发送方续期会一直 409 并被静默吞掉。墓碑让 24h 内的重绑定仍需原凭证。
-    this.ctx.storage.sql.exec(
-      'CREATE TABLE IF NOT EXISTS share_code_tombstones (' +
-        'peer_id TEXT PRIMARY KEY, ' +
-        'code TEXT NOT NULL, ' +
-        'secret_hash TEXT NOT NULL, ' +
-        'revoked_at INTEGER NOT NULL)'
-    );
-    this.ctx.storage.sql.exec(
-      'CREATE INDEX IF NOT EXISTS idx_share_code_tombstones_revoked ' +
-        'ON share_code_tombstones(revoked_at)'
-    );
-    // 分片回源会按 peer_id 查活跃口令（续期 / 重连探测），没有索引就是全表扫。
-    this.ctx.storage.sql.exec(
-      'CREATE INDEX IF NOT EXISTS idx_share_codes_peer_id ON share_codes(peer_id)'
-    );
-  }
-
-  private deleteExpiredShareCodes(now: number): void {
-    // 口令 TTL 与分享有效期相等，自然到期时活跃行已经不存在，而 revoke 对过期记录
-    // 一律 403：不在这里补写墓碑，最常用的到期路径就完全没有归属记录。
-    this.ctx.storage.sql.exec(
-      'INSERT INTO share_code_tombstones (peer_id, code, secret_hash, revoked_at) ' +
-        'SELECT peer_id, code, secret_hash, ? FROM share_codes ' +
-        'WHERE expires_at <= ? OR (revoke_after IS NOT NULL AND revoke_after <= ?) ' +
-        'ON CONFLICT(peer_id) DO UPDATE SET code = excluded.code, ' +
-        'secret_hash = excluded.secret_hash, revoked_at = excluded.revoked_at',
-      now,
-      now,
-      now
-    );
-    this.ctx.storage.sql.exec(
-      'DELETE FROM share_codes WHERE expires_at <= ? OR (revoke_after IS NOT NULL AND revoke_after <= ?)',
-      now,
-      now
-    );
-    this.ctx.storage.sql.exec(
-      'DELETE FROM share_code_tombstones WHERE revoked_at <= ?',
-      now - SHARE_CODE_TOMBSTONE_MS
-    );
-  }
-
-  private initializeSessionBindingSchema(): void {
-    this.ctx.storage.sql.exec(
-      'CREATE TABLE IF NOT EXISTS signaling_session_bindings (' +
-        'peer_id TEXT PRIMARY KEY, ' +
-        'secret_hash TEXT, ' +
-        'secret_hash_expires_at INTEGER NOT NULL DEFAULT 0, ' +
-        'proof_hash TEXT NOT NULL, ' +
-        "recent_hashes TEXT NOT NULL DEFAULT '[]', " +
-        'updated_at INTEGER NOT NULL, ' +
-        'expires_at INTEGER NOT NULL)'
-    );
-    this.ctx.storage.sql.exec(
-      'CREATE INDEX IF NOT EXISTS idx_signaling_session_bindings_expires ' +
-        'ON signaling_session_bindings(expires_at)'
-    );
-    // 老部署的表里没有这一列：ALTER 没有 IF NOT EXISTS，先查 PRAGMA 再补。
-    const columns = this.ctx.storage.sql
-      .exec<{ name: string }>("PRAGMA table_info('signaling_session_bindings')")
-      .toArray();
-    if (!columns.some((column) => column.name === 'secret_hash_expires_at')) {
-      this.ctx.storage.sql.exec(
-        'ALTER TABLE signaling_session_bindings ADD COLUMN secret_hash_expires_at INTEGER NOT NULL DEFAULT 0'
-      );
-    }
-  }
-
-  private findSessionBinding(peerId: string, now: number): SessionBindingRecord | null {
-    const rows = this.ctx.storage.sql
-      .exec<{
-        secret_hash: string | null;
-        secret_hash_expires_at: number;
-        proof_hash: string;
-        recent_hashes: string | null;
-        expires_at: number;
-      }>(
-        'SELECT secret_hash, secret_hash_expires_at, proof_hash, recent_hashes, expires_at ' +
-          'FROM signaling_session_bindings WHERE peer_id = ?',
-        peerId
-      )
-      .toArray();
-    const row = rows[0];
-    if (!row) return null;
-    if (row.expires_at <= now) {
-      // 过期绑定立刻清掉：否则 peerId 会被一个没人持有的会话一直锁住。
-      this.ctx.storage.sql.exec('DELETE FROM signaling_session_bindings WHERE peer_id = ?', peerId);
-      return null;
-    }
-    return {
-      secretHash: row.secret_hash,
-      secretHashExpiresAt: Number(row.secret_hash_expires_at) || 0,
-      proofHash: row.proof_hash,
-      recentProofHashes: parseSessionProofHistory(row.recent_hashes),
-    };
-  }
-
-  private saveSessionBinding(input: {
-    peerId: string;
-    secretHash?: string | null;
-    secretHashExpiresAt?: number;
-    proofHash: string;
-    recentProofHashes: SessionProofHistoryEntry[];
-    now: number;
-  }): void {
-    // 顺手清理过期行：注册频率远低于查询频率，不值得单独开 alarm。
-    this.ctx.storage.sql.exec(
-      'DELETE FROM signaling_session_bindings WHERE expires_at <= ?',
-      input.now
-    );
-    this.ctx.storage.sql.exec(
-      'INSERT INTO signaling_session_bindings ' +
-        '(peer_id, secret_hash, secret_hash_expires_at, proof_hash, recent_hashes, updated_at, expires_at) ' +
-        'VALUES (?, ?, ?, ?, ?, ?, ?) ' +
-        'ON CONFLICT(peer_id) DO UPDATE SET ' +
-        'secret_hash = excluded.secret_hash, ' +
-        'secret_hash_expires_at = excluded.secret_hash_expires_at, ' +
-        'proof_hash = excluded.proof_hash, ' +
-        'recent_hashes = excluded.recent_hashes, ' +
-        'updated_at = excluded.updated_at, ' +
-        'expires_at = excluded.expires_at',
-      input.peerId,
-      input.secretHash ?? null,
-      input.secretHashExpiresAt ?? 0,
-      input.proofHash,
-      JSON.stringify(input.recentProofHashes),
-      input.now,
-      input.now + SIGNALING_SESSION_BINDING_MS
-    );
-  }
-
   private getSignalingShardCount(): number {
     return resolveSignalingShardCount(this.env.SIGNALING_SHARD_COUNT);
   }
@@ -1787,7 +1410,7 @@ export class SignalingHub extends DurableObject<Env> {
       if (!response.ok) throw new Error(`binding rpc status ${response.status}`);
       const body = (await response.json()) as SessionBindingAdmission | null;
       if (!body || typeof body.allowed !== 'boolean') throw new Error('binding rpc body');
-      return { allowed: body.allowed, proof: body.proof };
+      return body.allowed ? { allowed: true, proof: body.proof, pending: body.pending } : { allowed: false };
     } catch (error) {
       signalingTelemetry.record('signal_session_binding_unavailable', {});
       console.warn('signaling session-binding lookup failed', error);
@@ -1799,47 +1422,68 @@ export class SignalingHub extends DurableObject<Env> {
   private async applySessionBindingAdmission(
     input: SessionBindingAdmissionInput
   ): Promise<SessionBindingAdmission> {
-    const { peerId, now } = input;
-    const binding = this.findSessionBinding(peerId, now);
-    const boundSecretHash = binding?.secretHash ?? input.existingSecretHash ?? input.incomingSecretHash;
-    const admission = shouldAcceptSessionAdmission({
-      boundSecretHash,
-      storedProofHash: binding?.proofHash,
-      recentProofHashes: binding?.recentProofHashes,
-      secretHashGraceExpiresAt: binding?.secretHashExpiresAt,
-      incomingSecretHash: input.incomingSecretHash,
-      incomingProofHash: input.incomingProofHash,
-      now,
-    });
-    if (admission === 'reject') {
+    const plan = planSessionAdmission(this.getSql(), input);
+    if (!plan.allowed) {
       return { allowed: false };
     }
-    if (binding === null && boundSecretHash === undefined) {
+    if (!plan.needsRotation) {
       return { allowed: true };
     }
     // 绑定过密钥的会话每次成功注册都轮换 proof：客户端下次重连只带 proof，静态分享密钥
     // 摘要不再出现在 WS URL 上。明文只回给调用方一帧，落库的是摘要。
+    //
+    // 这里刻意不落库：注册流程在 slot/名额检查之后才发 registered，帧一旦丢失客户端
+    // 手里就没有新 proof；先落库会让旧 proof 在宽限期后失效并永久 4010。落库由
+    // finalizeSignalingSessionAdmission 在确认投递之后完成。
     const proof = createSessionProof();
     const proofHash = await hashSessionProof(proof);
-    // 轮换是读改写：await 期间另一条注册可能已经换过 proof。用旧快照构造历史会把对方
-    // 刚签发的那份挤掉，所以落库前重读。
-    const current = this.findSessionBinding(peerId, now) ?? binding;
-    const secretHash = current?.secretHash ?? boundSecretHash ?? null;
-    this.saveSessionBinding({
-      peerId,
-      secretHash,
-      // 首次 registered 帧可能丢：摘要只在短窗口内兜底，过期后必须用 proof。
-      secretHashExpiresAt: secretHash ? now + SESSION_SECRET_HASH_GRACE_MS : 0,
-      proofHash,
-      recentProofHashes: buildNextSessionProofHistory({
-        storedProofHash: current?.proofHash,
-        recentProofHashes: current?.recentProofHashes,
-        now,
-        graceMs: SESSION_PROOF_GRACE_MS,
-      }),
-      now,
-    });
-    return { allowed: true, proof };
+    return { allowed: true, proof, pending: { proofHash, boundSecretHash: plan.boundSecretHash ?? null } };
+  }
+
+  /**
+   * registered 帧发出后落库 proof 轮换。失败只记指标：帧已经交给客户端，无法回滚，
+   * 但内存里的旧摘要仍是有效凭证（宽限期 + proof 历史），最坏是少轮换一次。
+   */
+  private async finalizeSignalingSessionAdmission(
+    peerId: string,
+    admission: SessionBindingAdmission
+  ): Promise<void> {
+    if (!admission.allowed || !admission.pending) return;
+    const { proofHash, boundSecretHash } = admission.pending;
+    const now = Date.now();
+    try {
+      if (this.isShardZero()) {
+        commitSessionBindingRotation(this.getSql(), {
+          peerId,
+          now,
+          proofHash,
+          boundSecretHash,
+          graceMs: SESSION_SECRET_HASH_GRACE_MS,
+          proofGraceMs: SESSION_PROOF_GRACE_MS,
+          ttlMs: SIGNALING_SESSION_BINDING_MS,
+        });
+        return;
+      }
+      const response = await this.signalingStub(signalingShardName(0)).fetch(
+        new Request(`https://signaling.internal${SIGNALING_SESSION_BINDING_PATH}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            action: 'commit',
+            peerId,
+            now,
+            proofHash,
+            boundSecretHash,
+          }),
+        })
+      );
+      if (!response.ok) throw new Error(`binding commit status ${response.status}`);
+    } catch (error) {
+      signalingTelemetry.record('signal_session_binding_commit_failed', {
+        shardCount: this.getSignalingShardCount(),
+      });
+      console.warn('signaling session-binding commit failed', error);
+    }
   }
 
   private async handleSessionBindingRequest(request: Request): Promise<Response> {
@@ -1871,6 +1515,25 @@ export class SignalingHub extends DurableObject<Env> {
     ) {
       return json({ allowed: false }, { status: 400 });
     }
+
+    if (body?.action === 'commit') {
+      const proofHash = pickHash(body?.proofHash);
+      const boundSecretHash = body?.boundSecretHash === null ? null : pickHash(body?.boundSecretHash);
+      if (!proofHash || proofHash === '__invalid__' || boundSecretHash === '__invalid__') {
+        return json({ committed: false }, { status: 400 });
+      }
+      commitSessionBindingRotation(this.getSql(), {
+        peerId,
+        now,
+        proofHash,
+        boundSecretHash: boundSecretHash ?? null,
+        graceMs: SESSION_SECRET_HASH_GRACE_MS,
+        proofGraceMs: SESSION_PROOF_GRACE_MS,
+        ttlMs: SIGNALING_SESSION_BINDING_MS,
+      });
+      return json({ committed: true });
+    }
+
     const result = await this.applySessionBindingAdmission({
       peerId,
       existingSecretHash,
@@ -2023,70 +1686,6 @@ export class SignalingHub extends DurableObject<Env> {
     this.ctx.waitUntil(next);
   }
 
-  private initializeSessionSlotSchema(): void {
-    this.ctx.storage.sql.exec(
-      'CREATE TABLE IF NOT EXISTS signaling_session_slots (' +
-        'slot_id TEXT PRIMARY KEY, ' +
-        'client_key TEXT NOT NULL, ' +
-        'expires_at INTEGER NOT NULL)'
-    );
-    this.ctx.storage.sql.exec(
-      'CREATE INDEX IF NOT EXISTS idx_signaling_session_slots_client ' +
-        'ON signaling_session_slots(client_key)'
-    );
-  }
-
-  /**
-   * 原子语义的近似：先清过期槽位，再数一次、插一条。DO 内单线程执行，无并发窗口。
-   * 同一个 slotId 已存在时是「接管续期」而不是新占名额：直接改归属与过期时间，
-   * 否则接管方要先释放再领取，领取失败就把旧会话的名额白白吃掉。
-   */
-  private applySessionSlotReserve(slotId: string, clientKey: string, now: number): boolean {
-    this.ctx.storage.sql.exec('DELETE FROM signaling_session_slots WHERE expires_at <= ?', now);
-    const existing = this.ctx.storage.sql
-      .exec<{ slot_id: string }>('SELECT slot_id FROM signaling_session_slots WHERE slot_id = ?', slotId)
-      .toArray();
-    if (existing.length > 0) {
-      this.ctx.storage.sql.exec(
-        'UPDATE signaling_session_slots SET client_key = ?, expires_at = ? WHERE slot_id = ?',
-        clientKey,
-        now + SIGNALING_SESSION_SLOT_TTL_MS,
-        slotId
-      );
-      return true;
-    }
-    const rows = this.ctx.storage.sql
-      .exec<{ count: number }>(
-        'SELECT COUNT(*) AS count FROM signaling_session_slots WHERE client_key = ?',
-        clientKey
-      )
-      .toArray();
-    if (Number(rows[0]?.count ?? 0) >= this.maxSignalingSessions) {
-      return false;
-    }
-    this.ctx.storage.sql.exec(
-      'INSERT OR REPLACE INTO signaling_session_slots (slot_id, client_key, expires_at) VALUES (?, ?, ?)',
-      slotId,
-      clientKey,
-      now + SIGNALING_SESSION_SLOT_TTL_MS
-    );
-    return true;
-  }
-
-  private applySessionSlotRelease(slotId: string): void {
-    this.ctx.storage.sql.exec('DELETE FROM signaling_session_slots WHERE slot_id = ?', slotId);
-  }
-
-  /** 常驻连接续期；槽位已被清掉（例如 TTL 过期或被别人接管）时返回 false。 */
-  private applySessionSlotRenew(slotId: string, now: number): boolean {
-    const cursor = this.ctx.storage.sql.exec(
-      'UPDATE signaling_session_slots SET expires_at = ? WHERE slot_id = ?',
-      now + SIGNALING_SESSION_SLOT_TTL_MS,
-      slotId
-    );
-    return cursor.rowsWritten > 0;
-  }
-
   private async handleSessionSlotRequest(request: Request): Promise<Response> {
     if (request.method !== 'POST') {
       return new Response('Method Not Allowed', { status: 405 });
@@ -2102,18 +1701,32 @@ export class SignalingHub extends DurableObject<Env> {
       return json({ granted: false, released: false }, { status: 400 });
     }
     if (body?.action === 'release') {
-      this.applySessionSlotRelease(slotId);
+      applySessionSlotRelease(this.getSql(), slotId);
       return json({ released: true });
     }
     const now = typeof body?.now === 'number' && Number.isFinite(body.now) ? body.now : Date.now();
     if (body?.action === 'renew') {
-      return json({ renewed: this.applySessionSlotRenew(slotId, now) });
+      return json({
+        renewed: applySessionSlotRenew(this.getSql(), {
+          slotId,
+          now,
+          ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
+        }),
+      });
     }
     if (body?.action !== 'reserve') {
       return json({ granted: false, released: false }, { status: 400 });
     }
     const clientKey = typeof body?.clientKey === 'string' && body.clientKey ? body.clientKey : 'ip:unknown';
-    return json({ granted: this.applySessionSlotReserve(slotId, clientKey, now) });
+    return json({
+      granted: applySessionSlotReserve(this.getSql(), {
+        slotId,
+        clientKey,
+        now,
+        maxSessions: this.maxSignalingSessions,
+        ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
+      }),
+    });
   }
 
   /**
@@ -2122,7 +1735,15 @@ export class SignalingHub extends DurableObject<Env> {
    */
   private async reserveSignalingSessionSlot(slotId: string, clientKey: string): Promise<boolean> {
     if (this.getSignalingShardCount() <= 1) return true;
-    if (this.isShardZero()) return this.applySessionSlotReserve(slotId, clientKey, Date.now());
+    if (this.isShardZero()) {
+      return applySessionSlotReserve(this.getSql(), {
+        slotId,
+        clientKey,
+        now: Date.now(),
+        maxSessions: this.maxSignalingSessions,
+        ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
+      });
+    }
     try {
       const response = await this.signalingStub(signalingShardName(0)).fetch(
         new Request(`https://signaling.internal${SIGNALING_SESSION_SLOT_PATH}`, {
@@ -2143,7 +1764,11 @@ export class SignalingHub extends DurableObject<Env> {
   private async renewSignalingSessionSlot(slotId: string): Promise<void> {
     if (this.getSignalingShardCount() <= 1) return;
     if (this.isShardZero()) {
-      this.applySessionSlotRenew(slotId, Date.now());
+      applySessionSlotRenew(this.getSql(), {
+        slotId,
+        now: Date.now(),
+        ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
+      });
       return;
     }
     try {
@@ -2163,7 +1788,7 @@ export class SignalingHub extends DurableObject<Env> {
   private async releaseSignalingSessionSlot(slotId: string): Promise<void> {
     if (this.getSignalingShardCount() <= 1) return;
     if (this.isShardZero()) {
-      this.applySessionSlotRelease(slotId);
+      applySessionSlotRelease(this.getSql(), slotId);
       return;
     }
     try {
@@ -2179,63 +1804,13 @@ export class SignalingHub extends DurableObject<Env> {
     }
   }
 
+  // 口令表的 SQL 全部在 services/signaling/sessionStore.ts；这里只保留 DO 的调用语义。
   private findActiveShareCode(code: string, now: number): ShareCodeRecord | null {
-    this.deleteExpiredShareCodes(now);
-    const rows = this.ctx.storage.sql
-      .exec<ShareCodeRow>(
-        'SELECT code, peer_id, secret_hash, expires_at, revoke_after FROM share_codes WHERE code = ?',
-        code
-      )
-      .toArray();
-    const row = rows[0];
-    if (!row) return null;
-    if (row.expires_at <= now || (row.revoke_after !== null && row.revoke_after <= now)) {
-      return null;
-    }
-
-    const record: ShareCodeRecord = {
-      code: row.code,
-      peerId: row.peer_id,
-      secretHash: row.secret_hash,
-      expiresAt: row.expires_at,
-    };
-    return record;
+    return readActiveShareCode(this.getSql(), { code, now, tombstoneMs: SHARE_CODE_TOMBSTONE_MS });
   }
 
   private findActiveShareCodeByPeerId(peerId: string, now: number): ShareCodeRecord | null {
-    const rows = this.ctx.storage.sql
-      .exec<ShareCodeRow>(
-        'SELECT code, peer_id, secret_hash, expires_at, revoke_after FROM share_codes WHERE peer_id = ?',
-        peerId
-      )
-      .toArray();
-    const row = rows[0];
-    if (!row) return null;
-    if (row.expires_at <= now || (row.revoke_after !== null && row.revoke_after <= now)) {
-      return null;
-    }
-    const record: ShareCodeRecord = {
-      code: row.code,
-      peerId: row.peer_id,
-      secretHash: row.secret_hash,
-      expiresAt: row.expires_at,
-    };
-    return record;
-  }
-
-  private findRecentTombstoneByPeerId(
-    peerId: string,
-    now: number
-  ): { secretHash: string } | null {
-    const rows = this.ctx.storage.sql
-      .exec<{ secret_hash: string }>(
-        'SELECT secret_hash FROM share_code_tombstones WHERE peer_id = ? ' +
-          'AND revoked_at > ? ORDER BY revoked_at DESC LIMIT 1',
-        peerId,
-        now - SHARE_CODE_TOMBSTONE_MS
-      )
-      .toArray();
-    return rows[0] ? { secretHash: rows[0].secret_hash } : null;
+    return readActiveShareCodeByPeerId(this.getSql(), peerId, now);
   }
 
   private registerShareCode(
@@ -2246,13 +1821,17 @@ export class SignalingHub extends DurableObject<Env> {
     ttlMs?: number
   ): ShareCodeAllocationResult {
     // 先清过期行：这样「冲突」只可能来自仍然有效的码，不会把 TTL 清理混进 409。
-    this.deleteExpiredShareCodes(now);
+    purgeExpiredShareCodes(this.getSql(), { now, tombstoneMs: SHARE_CODE_TOMBSTONE_MS });
 
     // 改绑必须先证明自己就是原来的持有者：否则任何知道口令的人都能用「码 -> peerId」
     // 查到发送方 id，再用自己的 HMAC 覆盖这行记录，把仍在进行的分享劫走。
     // 活跃行与 24h 墓碑都算归属证明，覆盖「先 revoke 再抢绑」的窗口。
-    const existingBinding = this.findActiveShareCodeByPeerId(peerId, now);
-    const tombstone = this.findRecentTombstoneByPeerId(peerId, now);
+    const existingBinding = readActiveShareCodeByPeerId(this.getSql(), peerId, now);
+    const tombstone = readRecentShareCodeTombstone(this.getSql(), {
+      peerId,
+      now,
+      tombstoneMs: SHARE_CODE_TOMBSTONE_MS,
+    });
     if (
       shouldRejectShareCodeRebind({
         activeSecretHash: existingBinding?.secretHash ?? null,
@@ -2264,7 +1843,7 @@ export class SignalingHub extends DurableObject<Env> {
     }
 
     // 同一 peerId 只保留最新一张码，避免反复建码把表堆大。
-    this.ctx.storage.sql.exec('DELETE FROM share_codes WHERE peer_id = ?', peerId);
+    deleteShareCodesForPeer(this.getSql(), peerId);
 
     return allocateShareCode({
       peerId,
@@ -2272,20 +1851,7 @@ export class SignalingHub extends DurableObject<Env> {
       code: requestedCode,
       now,
       ttlMs,
-      tryInsert: (record) => {
-        const inserted = this.ctx.storage.sql
-          .exec<{ code: string }>(
-            'INSERT INTO share_codes (code, peer_id, secret_hash, expires_at, created_at) ' +
-              'VALUES (?, ?, ?, ?, ?) ON CONFLICT(code) DO NOTHING RETURNING code',
-            record.code,
-            record.peerId,
-            record.secretHash,
-            record.expiresAt,
-            now
-          )
-          .toArray();
-        return inserted.length > 0;
-      },
+      tryInsert: (record) => insertShareCodeRow(this.getSql(), record, now),
     });
   }
 
@@ -2314,47 +1880,15 @@ export class SignalingHub extends DurableObject<Env> {
   }
 
   private deferShareCodeRevoke(record: ShareCodeRecord, revokeAfter: number): boolean {
-    const updated = this.ctx.storage.sql
-      .exec<{ code: string }>(
-        'UPDATE share_codes SET revoke_after = ? ' +
-          'WHERE code = ? AND peer_id = ? AND secret_hash = ? RETURNING code',
-        revokeAfter,
-        record.code,
-        record.peerId,
-        record.secretHash
-      )
-      .toArray();
-    return updated.length > 0;
+    return applyDeferredShareCodeRevoke(this.getSql(), record, revokeAfter);
   }
 
   private resumeShareCode(record: ShareCodeRecord): boolean {
-    const updated = this.ctx.storage.sql
-      .exec<{ code: string }>(
-        'UPDATE share_codes SET revoke_after = NULL ' +
-          'WHERE code = ? AND peer_id = ? AND secret_hash = ? RETURNING code',
-        record.code,
-        record.peerId,
-        record.secretHash
-      )
-      .toArray();
-    return updated.length > 0;
+    return applyResumeShareCode(this.getSql(), record);
   }
 
   private revokeShareCode(record: ShareCodeRecord, now: number): boolean {
-    // 先写墓碑再删活跃行：即使 DELETE 失败，归属信息也不会丢。
-    this.ctx.storage.sql.exec(
-      'INSERT INTO share_code_tombstones (peer_id, code, secret_hash, revoked_at) ' +
-        'VALUES (?, ?, ?, ?) ON CONFLICT(peer_id) DO UPDATE SET ' +
-        'code = excluded.code, secret_hash = excluded.secret_hash, revoked_at = excluded.revoked_at',
-      record.peerId,
-      record.code,
-      record.secretHash,
-      now
-    );
-    const deleted = this.ctx.storage.sql
-      .exec<{ code: string }>('DELETE FROM share_codes WHERE code = ? RETURNING code', record.code)
-      .toArray();
-    return deleted.length > 0;
+    return applyRevokeShareCode(this.getSql(), record, now);
   }
 
   private async handleShareCodeInternalRequest(request: Request): Promise<Response> {
@@ -2382,7 +1916,7 @@ export class SignalingHub extends DurableObject<Env> {
 
       const requestedCode = typeof payload.code === 'string' ? normalizeShareCode(payload.code) : null;
       if (payload.code !== undefined && requestedCode === null) {
-        return new Response('code must be six digits', { status: 400 });
+        return new Response(SHARE_CODE_ERROR_MESSAGES.invalidCode, { status: 400 });
       }
 
       const requestedTtlMs = typeof payload.ttlMs === 'number' ? payload.ttlMs : undefined;
@@ -2406,7 +1940,22 @@ export class SignalingHub extends DurableObject<Env> {
     if (payload.op === 'lookup') {
       if (!code) return new Response('Bad Request', { status: 400 });
       const record = this.findActiveShareCode(code, now);
-      if (!record) return new Response('Not Found', { status: 404 });
+      if (!record) {
+        // 未命中走 shard 0 的全局预算：逐码锁定会被人用轮换码打满内存，也帮攻击者
+        // 确认「这个码存在但被锁了」。预算满了就 fail closed，命中路径不受影响。
+        const budget = this.unknownShareCodeBudget.consume(now);
+        signalingTelemetry.record('share_code_lookup_miss', {
+          shardCount: this.getSignalingShardCount(),
+          budgetExhausted: !budget.allowed,
+        });
+        if (!budget.allowed) {
+          return new Response(SHARE_CODE_ERROR_MESSAGES.rateLimited, {
+            status: 429,
+            headers: { 'Retry-After': String(SHARE_CODE_UNKNOWN_LOOKUP_RETRY_AFTER_SECONDS) },
+          });
+        }
+        return new Response('Not Found', { status: 404 });
+      }
       return Response.json({ peerId: record.peerId, expiresAt: record.expiresAt });
     }
 

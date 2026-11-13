@@ -1,12 +1,8 @@
+import { createFixedWindowRateLimiter } from './fixedWindowRateLimit.ts';
+
 export type SignalingRateLimitDecision =
   | { allowed: true }
   | { allowed: false; retryAfterMs: number };
-
-type RateBucket = {
-  blockedUntil: number;
-  count: number;
-  windowStartedAt: number;
-};
 
 type SignalingRateLimiterOptions = {
   blockMs: number;
@@ -29,66 +25,13 @@ const DEFAULT_OPTIONS: SignalingRateLimiterOptions = {
   windowMs: 60 * 1000,
 };
 
-const getBucket = (
-  buckets: Map<string, RateBucket>,
-  key: string,
-  now: number,
-  windowMs: number
-): RateBucket => {
-  const existing = buckets.get(key);
-  if (!existing || now - existing.windowStartedAt >= windowMs) {
-    const next = {
-      blockedUntil: existing?.blockedUntil && existing.blockedUntil > now ? existing.blockedUntil : 0,
-      count: 0,
-      windowStartedAt: now,
-    };
-    buckets.set(key, next);
-    return next;
-  }
-
-  return existing;
-};
-
-const recordBucket = (
-  bucket: RateBucket,
-  now: number,
-  maxAttempts: number,
-  blockMs: number
-): { allowed: true } | { allowed: false; retryAfterMs: number } => {
-  if (bucket.blockedUntil > now) {
-    return {
-      allowed: false,
-      retryAfterMs: bucket.blockedUntil - now,
-    };
-  }
-
-  bucket.count += 1;
-  if (bucket.count <= maxAttempts) {
-    return { allowed: true };
-  }
-
-  bucket.blockedUntil = now + blockMs;
-  return {
-    allowed: false,
-    retryAfterMs: blockMs,
-  };
-};
-
-const pruneBuckets = (
-  buckets: Map<string, RateBucket>,
-  now: number,
-  windowMs: number,
-  maxTrackedBuckets: number
-): void => {
-  if (buckets.size <= maxTrackedBuckets) return;
-
-  for (const [key, bucket] of buckets) {
-    if (bucket.blockedUntil <= now && now - bucket.windowStartedAt >= windowMs) {
-      buckets.delete(key);
-    }
-  }
-};
-
+/**
+ * offer 的每客户端限流。
+ *
+ * 计数与「键表硬上限」都复用 services/fixedWindowRateLimit.ts：窗口内超过配额返回拒绝，
+ * 键表填满时 fail-closed（拒绝新 key），不再淘汰最早窗口放行。超出配额后额外进入
+ * blockMs 静默期——这是枚举/刷连接的成本，不是「等下个窗口再说」。
+ */
 export const createSignalingRateLimiter = (
   partialOptions: Partial<SignalingRateLimiterOptions> = {}
 ) => {
@@ -96,27 +39,50 @@ export const createSignalingRateLimiter = (
     ...DEFAULT_OPTIONS,
     ...partialOptions,
   };
-  const clientBuckets = new Map<string, RateBucket>();
+  const maxTrackedBuckets = Math.max(1, Math.floor(options.maxTrackedBuckets));
+  const windows = createFixedWindowRateLimiter({
+    maxAttempts: options.maxAttemptsPerClientWindow,
+    maxTrackedKeys: maxTrackedBuckets,
+    windowMs: options.windowMs,
+  });
+  // 静默期单独一张表（固定窗口表达不了「超过配额后锁 10 分钟」）。它同样有硬上限：
+  // 满了只拒绝新 key，不淘汰已经在静默的 key（否则等于提前解除封锁）。
+  const blockedUntil = new Map<string, number>();
+
+  const pruneBlocks = (now: number): void => {
+    if (blockedUntil.size < maxTrackedBuckets) return;
+    for (const [key, until] of blockedUntil) {
+      if (until <= now) blockedUntil.delete(key);
+    }
+  };
 
   return {
     recordOfferAttempt(input: RecordOfferAttemptInput): SignalingRateLimitDecision {
-      pruneBuckets(clientBuckets, input.now, options.windowMs, options.maxTrackedBuckets);
+      pruneBlocks(input.now);
 
-      const clientBucket = getBucket(clientBuckets, input.clientKey, input.now, options.windowMs);
-      const clientDecision = recordBucket(
-        clientBucket,
-        input.now,
-        options.maxAttemptsPerClientWindow,
-        options.blockMs
-      );
-      if (!clientDecision.allowed) {
-        return { allowed: false, retryAfterMs: clientDecision.retryAfterMs };
+      const blocked = blockedUntil.get(input.clientKey);
+      if (blocked !== undefined && blocked > input.now) {
+        return { allowed: false, retryAfterMs: blocked - input.now };
       }
 
-      return { allowed: true };
+      const decision = windows.consume(input.clientKey, input.now);
+      if (decision.allowed) {
+        return { allowed: true };
+      }
+
+      // 只有「这个 key 自己把配额用完」才进静默期。键表满导致的新 key 拒绝不是滥用，
+      // 记 10 分钟封锁会把无辜的新出口关在门外，且白占静默期表。
+      const exhaustedQuota = windows.hasTrackedKey(input.clientKey);
+      if (!exhaustedQuota) {
+        return { allowed: false, retryAfterMs: decision.retryAfterMs };
+      }
+      if (blockedUntil.has(input.clientKey) || blockedUntil.size < maxTrackedBuckets) {
+        blockedUntil.set(input.clientKey, input.now + options.blockMs);
+      }
+      return { allowed: false, retryAfterMs: options.blockMs };
     },
     getTrackedBucketCounts() {
-      return { clientBuckets: clientBuckets.size };
+      return { clientBuckets: windows.getTrackedKeyCount() };
     },
   };
 };

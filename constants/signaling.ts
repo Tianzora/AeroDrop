@@ -1,0 +1,77 @@
+// 信令与凭证的共享常量：这是唯一来源。
+//
+// 约束（AGENTS.md）：信令、连接策略、超时参数只在 services/ 与 constants/ 里定义。
+// services/ 与 src/worker.ts 只允许引用这里的名字，不得再内联一份数字。
+// 改这里的值等于改线上行为（会话锁定时长、枚举预算、TURN 凭证有效期），必须同步
+// docs/design-scale-out.md 与相关测试。
+
+/** 会话密钥摘要的字节数（SHA-256 之前）。 */
+export const SESSION_SECRET_BYTES = 32;
+
+/**
+ * 轮换后的旧 proof 宽限期。
+ *
+ * `registered` 帧可能丢失（断线、4010/4029 截断），客户端只会拿着旧 proof 重连；
+ * 宽限期必须覆盖「离线后重连」的预算，否则合法客户端会被自己拒成 4010 终态。
+ * 语义不变：只认「当前 proof + 近 10 分钟内轮换掉的 proof」。
+ */
+export const SESSION_PROOF_GRACE_MS = 10 * 60 * 1000;
+
+/**
+ * 静态分享摘要的兜底窗口，只从首次绑定开始计。
+ *
+ * 首次 `registered` 帧可能丢了，客户端手里只有 `sessionSecretHash`；给一个短窗口
+ * 让它还能注册一次。窗口从首次绑定开始，后续注册不续期，过期后把摘要置 NULL，
+ * 之后只认 proof——否则等于把静态 bearer 永久保留。
+ */
+export const SESSION_SECRET_HASH_GRACE_MS = 10 * 60 * 1000;
+
+/** 宽限期历史里最多保留几份旧 proof（正常重连只会用到最近一两份）。 */
+export const SESSION_PROOF_HISTORY_LIMIT = 4;
+
+/** 注销后保留 peerId 归属的时间窗：覆盖「同一个分享反复启停」。 */
+export const SHARE_CODE_TOMBSTONE_MS = 24 * 60 * 60 * 1000;
+
+/** 会话绑定保留 24h：socket 断开后，同 peerId 的接管仍必须出示 proof。 */
+export const SIGNALING_SESSION_BINDING_MS = 24 * 60 * 60 * 1000;
+
+/**
+ * 会话名额的兜底 TTL：正常路径由 socket 关闭时释放；进程被杀/DO 迁移可能漏掉释放，
+ * 超过这个时间没有心跳的槽位在下次领取时被清掉，避免一次故障永久占满出口 IP 的名额。
+ */
+export const SIGNALING_SESSION_SLOT_TTL_MS = 6 * 60 * 60 * 1000;
+
+/** 分片模式下名额续期间隔（随 ping 触发，节流）。 */
+export const SIGNALING_SESSION_SLOT_REFRESH_MS = 30 * 60 * 1000;
+
+/** 注销允许的最长宽限（客户端 pagehide 时用 sendBeacon 传 graceMs）。 */
+export const SHARE_CODE_REVOKE_MAX_GRACE_MS = 120_000;
+
+/**
+ * 口令 GET 的「全局未知码」预算。
+ *
+ * 口令是 6 位数字，单 IP 预算（shareCodeRateLimitPolicy）挡不住分布式枚举；
+ * 这里在 shard 0 的 DO 里加一个全局限额：只对「查不到的码」计数，正常查得到
+ * 的注册不受影响，也不做逐码锁定（逐码锁定会被用来批量锁死别人的口令）。
+ */
+export const UNKNOWN_SHARE_CODE_BUDGET = {
+  maxMisses: 200,
+  windowMs: 10 * 1000,
+} as const;
+
+/** 未知码预算耗尽时返回的 Retry-After。 */
+export const SHARE_CODE_UNKNOWN_LOOKUP_RETRY_AFTER_SECONDS = 5;
+
+/** `/api/ice-config` 全局限流计数 RPC 的超时；宁可少计一次也不要拖垮 ICE 配置。 */
+export const ICE_LIMIT_DO_TIMEOUT_MS = 800;
+
+/** Cloudflare 短期 TURN 凭证的 TTL 与取值边界（秒）。 */
+export const DEFAULT_CF_TURN_TTL_SECONDS = 3600;
+export const MIN_CF_TURN_TTL_SECONDS = 60;
+export const MAX_CF_TURN_TTL_SECONDS = 86_400;
+
+/** 凭证缓存要提前多久失效，避免把即将过期的凭证发给客户端。 */
+export const CF_TURN_CACHE_SAFETY_WINDOW_SECONDS = 60;
+
+/** 调用 Cloudflare TURN API 的超时。 */
+export const CF_TURN_FETCH_TIMEOUT_MS = 4000;

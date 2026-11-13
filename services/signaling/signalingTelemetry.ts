@@ -26,7 +26,11 @@ export type SignalingTelemetryEvent =
   /** 一次跨片回源同时答复了多条查询（说明合并生效）。 */
   | 'signal_share_code_lookup_batched'
   /** shard 0 的会话绑定表不可达：本次接管按身份不可验证处理。 */
-  | 'signal_session_binding_unavailable';
+  | 'signal_session_binding_unavailable'
+  /** proof 轮换已在 registered 之后签发，但落库失败（帧已发，无法回滚）。 */
+  | 'signal_session_binding_commit_failed'
+  /** 口令查询未命中（含全局未知码预算耗尽）：只记标量，不记码/peerId。 */
+  | 'share_code_lookup_miss';
 
 export type SignalingTelemetryFieldValue = string | number | boolean | null | undefined;
 export type SignalingTelemetryFields = Record<string, SignalingTelemetryFieldValue>;
