@@ -324,3 +324,26 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 - **覆盖率/lint 未引入**：只在 CI 里跑 typecheck + test + build；`any`/`as` 数量下降但没有门禁。
 - **TURN 中继路径仍无 E2E**：product spec 的 ICE 走 host/host（本机），中继回退靠手工。
 
+
+### 8.4 第二轮复评后的补齐（2026-11-13，复评基线 90 / 91 / 88）
+
+复评给出的三条都不是「方向错」，而是「还差最后一公里」。本轮按缺口逐条补，仍然不新增依赖、不引入付费服务。
+
+安全/正确性（90 → 目标 95）：
+
+| 缺口 | 修法 | 测试 |
+| --- | --- | --- |
+| proof 轮换落库失败后客户端持新 proof、库里只有旧 proof，重连 4010 终态 | `deliverRegisteredThenCommit` 落库重试 3 次（短退避，指标带 attempt）；仍失败时 `appendPendingSessionProof` 把新 proof 摘要挂进 `recent_hashes`（24h），客户端下次带新 proof 仍能进。顺序契约不变（先投递后落库）。 | `sessionAdmissionDelivery.test.ts`（瞬态失败重试、退避、pending 兜底、recovery 失败不外溢）+ `sessionStore.test.ts`（追加/去重/无绑定行） |
+| shard 0 绑定表不可达时新注册 fail-open | `admitSignalingSession` 回源失败返回 `null`，升级在 accept 之前直接 503 + `Retry-After: 5`；不再「先 accept 再发 error」留下半开连接 | `registrationPlan.test.ts`（503 分支）+ 服务端执行循环 |
+| 分片模式同 peerId 并发注册可双开 | await 名额之后重读 `sessionsByPeer`（`classifySignalingSessionRace`），输了回滚名额 + 4010，绝不覆盖对方归属 | `registrationPlan.test.ts`（raced 中止、不驱逐赢家） |
+| DO 编排层零测试（工程高危） | 注册顺序抽成 `planSignalingRegistration` 纯函数（拒绝 → 领名额 → 驱逐 → registered → commit），worker 只执行动作序列 | 7 条顺序断言 + rollback |
+
+产品/可靠性（91 → 目标 95）：房号登记失败按服务端原因分类（429 直接终态，占用/网络退避后可自愈）；`pagehide` 用 `keepalive` 撤销房号（bfcache 跳过）；续期连续 3 次失败置 amber 风险提示但不停直播；有在途传输时信令终态只降级 `connectionStatus`（「分享已失效，进行中的传输不受影响，新设备无法加入」），不再 `setPhase('error')` 把传输列表撤掉；E2E 补「4010 终态 → 点重新开始 → 恢复」「登记 429 → 终态」「登记 503 → 自愈」；接收端拒收原因归口 `getTransferRejectedMessage`。
+
+工程（88 → 目标 95）：新增 `services/signaling/sessionStore.sqlite.test.ts`——用 `node:sqlite` 的 `:memory:` 库执行同一批 SQL（建表/迁移/绑定轮换/槽位/口令表 RETURNING 与墓碑），伪 SQL 测不出的列序与 RETURNING 语义现在会被真实执行；`scripts/node-test-args.mjs` 统一加 `--experimental-sqlite`；CI 增加覆盖率门槛（`NODE_TEST_COVERAGE=1`，默认 lines 85 / branches 78 / functions 75）与独立的 Chromium E2E job。
+
+仍然存在的已知取舍（评审共识，非本轮遗漏）：
+
+- proof 仍走 WS URL query（改首帧需要同时改客户端与服务端的注册协议，属于破坏性升级，单独排期）。
+- DO 级集成测试仍未引入：`ws` 不是声明依赖、Node 全局 `WebSocket` 不能自定义 `Origin`，而 CSRF 同源门要求 Origin 匹配；继续靠 `%TEMP%` 探针 + 编排纯函数测试覆盖。
+- 千行组件只拆了 `Sender`：`Receiver.tsx`（约 3366 行）与 `ScreenShare.tsx`（约 2350 行）仍是单体，属于可维护性债务而非正确性问题。
