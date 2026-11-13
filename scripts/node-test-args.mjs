@@ -4,9 +4,19 @@ import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const scriptDir = dirname(fileURLToPath(import.meta.url));
 const tsxLoaderPath = pathToFileURL(resolve(scriptDir, '../node_modules/tsx/dist/loader.mjs')).href;
+const testStubRegisterPath = pathToFileURL(resolve(scriptDir, 'test-stubs/register.mjs')).href;
 
 // Pure helpers only: importing this module must never start a test run.
-export const buildNodeTestArgs = (files) => ['--import', tsxLoaderPath, '--test', ...files];
+export const buildNodeTestArgs = (files) => [
+  // tsx 负责 TS/JSX 转译；test-stubs 把只在浏览器里做视觉效果的大 barrel 依赖
+  // （motion/react、@hugeicons/*）换成本地极简实现，避免每个测试子进程重复转译。
+  '--import',
+  tsxLoaderPath,
+  '--import',
+  testStubRegisterPath,
+  '--test',
+  ...files,
+];
 
 export const collectTestFiles = (targets) => {
   const discovered = new Set();

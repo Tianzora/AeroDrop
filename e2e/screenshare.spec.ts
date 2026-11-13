@@ -149,4 +149,87 @@ test.describe('screen share', () => {
     await expect(page.getByText(/\d+ 人观看/)).toHaveCount(0, { timeout: 35_000 });
     await expect(page.getByText('正在共享')).toBeVisible();
   });
-});
+
+  // 失败路径：信令连接被服务端拒绝（4010 = 同一会话的密钥不匹配 / 被顶号）时，分享端必须
+  // 落到明确的错误终态，而不是留着绿色「正在共享」和一条打不开的链接。4010 在
+  // services/peerRuntime.ts 的 TERMINAL_SIGNALING_CLOSE_CODES 里映射成 session-conflict 终端错误。
+  // page.routeWebSocket 拦不住这条信令连接（实测无效），所以在页面脚本执行前替换 WebSocket。
+  test('sharer shows an error terminal state instead of a fake LIVE when signaling rejects the session', async ({
+    page,
+  }) => {
+    // 必须早于 goto：init script 只在后续导航的文档创建时注入。
+    await page.addInitScript(() => {
+      const NativeWebSocket = window.WebSocket;
+
+      class RejectedSignalingSocket extends EventTarget {
+        url: string;
+        readyState = 0;
+        binaryType = 'blob';
+        onopen: ((event: Event) => void) | null = null;
+        onmessage: ((event: MessageEvent) => void) | null = null;
+        onerror: ((event: Event) => void) | null = null;
+        onclose: ((event: CloseEvent) => void) | null = null;
+
+        constructor(url: string) {
+          super();
+          this.url = url;
+          // 先「打开」再被拒：这才是丢会话凭证/被顶号时服务端的真实形态。
+          setTimeout(() => {
+            this.readyState = 1;
+            this.onopen?.(new Event('open'));
+            this.dispatchEvent(new Event('open'));
+          }, 0);
+          setTimeout(() => {
+            this.readyState = 3;
+            const closeEvent = new CloseEvent('close', {
+              code: 4010,
+              reason: 'Signaling session conflict',
+              wasClean: false,
+            });
+            this.onclose?.(closeEvent);
+            this.dispatchEvent(closeEvent);
+          }, 150);
+        }
+
+        send() {}
+
+        close() {
+          this.readyState = 3;
+        }
+      }
+
+      window.WebSocket = new Proxy(NativeWebSocket, {
+        construct(target, args) {
+          const url = String(args[0]);
+          if (!/\/ws-signaling/.test(url)) {
+            return Reflect.construct(target, args);
+          }
+          return new RejectedSignalingSocket(url);
+        },
+      });
+    });
+
+    await page.goto('/');
+    const supported = await page.evaluate(
+      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
+    );
+    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+
+    await page.getByRole('button', { name: '共享' }).click();
+    await page.getByRole('button', { name: '开始共享屏幕' }).click();
+
+    // 同一条提示既出现在 toast 里也出现在终态卡片里，所以断言要限定在主区域。
+    const terminalCard = page.getByRole('main');
+    await expect(terminalCard.getByText('共享已中断')).toBeVisible({ timeout: 25_000 });
+    await expect(
+      terminalCard.getByText('分享会话已被其他连接占用，请重新开始共享')
+    ).toBeVisible();
+    // 绿色 LIVE 与可复制的链接都必须消失：留着就是「假共享」。
+    await expect(page.getByText('正在共享')).toHaveCount(0);
+    await expect(
+      terminalCard.getByText('此前分享的链接已失效，观众无法再加入。')
+    ).toBeVisible();
+    await expect(terminalCard.getByRole('button', { name: '重新开始共享' })).toBeVisible();
+    await expect(page.locator('a[href*="view="]')).toHaveCount(0);
+  });
+})

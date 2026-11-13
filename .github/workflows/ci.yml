@@ -1,0 +1,39 @@
+name: CI
+
+on: [push, pull_request]
+
+# 同一分支/PR 的新提交取消上一轮构建，避免排队烧分钟数。
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    name: typecheck + tests + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # `vite build` 不做类型检查，typecheck 必须显式跑在 build 之前。
+      - name: Typecheck
+        run: npm run typecheck
+
+      - name: Unit tests
+        run: npm run test:all
+
+      - name: Build
+        run: npm run build
