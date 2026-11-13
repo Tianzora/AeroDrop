@@ -68,7 +68,8 @@ const toHex = (buffer: ArrayBuffer): string => {
   return hex;
 };
 
-const constantTimeEqual = (left: string, right: string): boolean => {
+/** 常量时间比较：给凭证类摘要用，避免按字节提前返回泄漏前缀。 */
+export const constantTimeEqual = (left: string, right: string): boolean => {
   if (left.length !== right.length) return false;
   let diff = 0;
   for (let index = 0; index < left.length; index += 1) {

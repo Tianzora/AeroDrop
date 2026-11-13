@@ -368,6 +368,75 @@ test('收到终态 error（peerId 被顶替）后主动断开信令且不再重�
   }
 });
 
+test('分享会话密钥摘要随信令注册 URL 上行，未提供时不出现该参数', async () => {
+  FakeWebSocket.instances.length = 0;
+
+  const { restore } = installFakeTimers();
+
+  try {
+    const { default: WorkerSignaledPeer } = await import('./peerRuntime.ts');
+    const sessionSecretHash = 'a'.repeat(64);
+    const boundPeer = new WorkerSignaledPeer({ debug: 0, sessionSecretHash });
+    assert.equal(
+      new URL(FakeWebSocket.instances[0].url).searchParams.get('sessionSecretHash'),
+      sessionSecretHash
+    );
+    boundPeer.destroy();
+
+    // 文件传输 / 观众端不传摘要：多带一个空参数会改变服务端的接管判定输入。
+    const plainPeer = new WorkerSignaledPeer({ debug: 0 });
+    assert.equal(
+      new URL(FakeWebSocket.instances[1].url).searchParams.has('sessionSecretHash'),
+      false
+    );
+    plainPeer.destroy();
+  } finally {
+    restore();
+  }
+});
+
+test('session-conflict 是终态：断开且不再重连，recoveryState 标记为 rejected', async () => {
+  FakeWebSocket.instances.length = 0;
+
+  const { scheduledTimeouts, restore } = installFakeTimers();
+
+  try {
+    const { default: WorkerSignaledPeer } = await import('./peerRuntime.ts');
+    const peer = new WorkerSignaledPeer({ debug: 0, sessionSecretHash: 'a'.repeat(64) });
+    const peerErrors: string[] = [];
+    peer.on('error', (error) => {
+      peerErrors.push(error.type);
+    });
+
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'error',
+        code: 'session-conflict',
+        message: 'Session is bound to another connection',
+      }),
+    });
+
+    assert.equal(socket.readyState, FakeWebSocket.CLOSED);
+    assert.deepEqual(peerErrors, ['session-conflict']);
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // 没有密钥的重连会被服务端反复拒绝；继续退避重连就是「改了但没生效」的互踢现场。
+    assert.equal(FakeWebSocket.instances.length, 1);
+    assert.equal(scheduledTimeouts.length, 0);
+    assert.equal(peer.signalingRecoveryState(), 'rejected');
+    // 自动恢复接口也必须停手，由上层提示用户重新开始共享。
+    assert.equal(peer.retrySignaling(), false);
+    assert.equal(FakeWebSocket.instances.length, 1);
+
+    peer.destroy();
+  } finally {
+    restore();
+  }
+});
+
 test('终态拒绝之后，显式重连会重新获得自动重连能力', async () => {
   FakeWebSocket.instances.length = 0;
   const { scheduledTimeouts, restore } = installFakeTimers();

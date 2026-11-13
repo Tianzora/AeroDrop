@@ -9,6 +9,7 @@ type PeerRuntimeErrorType =
   | 'unavailable-id'
   | 'invalid-id'
   | 'unauthorized'
+  | 'session-conflict'
   | 'peer-unavailable'
   | 'rate-limited'
   | 'disconnected'
@@ -25,6 +26,11 @@ type PeerOptions = {
   pingInterval?: number;
   signalingCode?: string;
   signalingToken?: string;
+  /**
+   * 分享会话绑定的密钥摘要（32 字节随机 secret 的 SHA-256，小写 hex）。带上它之后，
+   * 同 peerId 的会话接管必须出示同一摘要；不传则保持历史行为（文件传输走这条）。
+   */
+  sessionSecretHash?: string;
   config?: RTCConfiguration;
   host?: string;
   port?: number;
@@ -160,7 +166,14 @@ const IMPORTANT_SIGNAL_INFO_EVENTS = new Set([
   'data_channel_close',
 ]);
 
-const TERMINAL_SIGNALING_ERROR_CODES = new Set(['unavailable-id', 'invalid-id', 'unauthorized']);
+// session-conflict：同 peerId 的已有分享会话没有匹配的密钥摘要，被服务端拒绝接管。
+// 继续重连只会反复被拒（还可能与真正的分享者互踢），所以按终态处理，由上层提示用户。
+const TERMINAL_SIGNALING_ERROR_CODES = new Set([
+  'unavailable-id',
+  'invalid-id',
+  'unauthorized',
+  'session-conflict',
+]);
 
 /**
  * 这些 close code 表示「继续重连也没有意义」：服务端已经因为这层连接本身拒绝了我们
@@ -210,9 +223,9 @@ const toWebSocketUrl = (base: string): string => {
   return `${window.location.protocol === 'https:' ? 'wss://' : 'ws://'}${base}`;
 };
 
-// 信令 URL 里的 token 等价于发送方凭证：只允许真正用于建连，日志/指标一律脱敏。
+// 信令 URL 里的 token / sessionSecretHash 等价于凭证：只允许真正用于建连，日志/指标一律脱敏。
 const redactSignalingUrl = (url: string): string =>
-  url.replace(/([?&]token=)[^&]*/i, '$1<redacted>');
+  url.replace(/([?&](?:token|sessionSecretHash)=)[^&]*/gi, '$1<redacted>');
 
 const createSignalingUrl = (peerId: string, options: PeerOptions = {}): string => {
   const baseUrl = new URL(toWebSocketUrl(SIGNALING_BASE));
@@ -220,6 +233,9 @@ const createSignalingUrl = (peerId: string, options: PeerOptions = {}): string =
   wsUrl.searchParams.set('peerId', peerId);
   if (options.signalingCode) wsUrl.searchParams.set('code', options.signalingCode);
   if (options.signalingToken) wsUrl.searchParams.set('token', options.signalingToken);
+  if (options.sessionSecretHash) {
+    wsUrl.searchParams.set('sessionSecretHash', options.sessionSecretHash);
+  }
   return wsUrl.toString();
 };
 

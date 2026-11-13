@@ -35,6 +35,10 @@ import {
   hasTurnIceServers,
   selectReliableIceServers,
 } from '../services/turnCredentials';
+import {
+  isValidSessionSecretHash,
+  shouldAcceptSessionReplacement,
+} from '../services/signaling/sessionBinding';
 
 // 注销后保留 peerId 归属的时间窗。与口令 TTL 上限对齐，覆盖「同一个分享反复启停」。
 const SHARE_CODE_TOMBSTONE_MS = 24 * 60 * 60 * 1000;
@@ -975,6 +979,9 @@ export default {
 type SessionAttachment = {
   clientKey: string;
   peerId: string;
+  // 分享会话绑定的密钥摘要。只有分享端会带；文件传输会话不带，接管行为保持原样。
+  // 必须进 attachment：DO 休眠后用 deserializeAttachment 恢复，内存里的判定要靠它。
+  sessionSecretHash?: string;
 };
 
 const getSignalingClientKey = (request: Request): string => {
@@ -1035,13 +1042,22 @@ export class SignalingHub extends DurableObject {
     if (!peerId) {
       return new Response('Missing peerId', { status: 400 });
     }
+    // 摘要格式非法说明客户端实现有问题（也可能是伪造）：在握手阶段就拒绝，不给会话名额。
+    const sessionSecretHash = url.searchParams.get('sessionSecretHash')?.trim() || undefined;
+    if (sessionSecretHash !== undefined && !isValidSessionSecretHash(sessionSecretHash)) {
+      return new Response('Invalid sessionSecretHash', { status: 400 });
+    }
     const clientKey = getSignalingClientKey(request);
 
     const pair = new WebSocketPair();
     const client = pair[0];
     const server = pair[1];
 
-    server.serializeAttachment({ clientKey, peerId } satisfies SessionAttachment);
+    server.serializeAttachment({
+      clientKey,
+      peerId,
+      ...(sessionSecretHash ? { sessionSecretHash } : {}),
+    } satisfies SessionAttachment);
     this.ctx.acceptWebSocket(server);
 
     const registration = await resolveShareCodeRegistration({
@@ -1079,6 +1095,27 @@ export class SignalingHub extends DurableObject {
     // 再驱逐：否则新连接因出口 IP 满额被 4029 时，旧会话已经被关掉，双方都没人服务。
     const existing = this.sessionsByPeer.get(peerId);
     const isTakeover = existing !== undefined && existing !== server;
+    if (isTakeover) {
+      // 身份绑定：旧会话若绑定了分享密钥，新连接必须出示同一摘要才能接管。否则知道
+      // peerId（分享链接里就有）的人就能顶掉分享者。这里直接拒绝且不碰限流名额与
+      // 会话表——旧会话必须原样继续服务。
+      const existingAttachment = existing.deserializeAttachment() as SessionAttachment | null;
+      const decision = shouldAcceptSessionReplacement({
+        existingSecretHash: existingAttachment?.sessionSecretHash,
+        incomingSecretHash: sessionSecretHash,
+      });
+      if (decision === 'reject') {
+        server.send(
+          JSON.stringify({
+            type: 'error',
+            code: 'session-conflict',
+            message: 'Session is bound to another connection',
+          } satisfies SignalingEnvelope)
+        );
+        server.close(4009, 'Signaling session conflict');
+        return new Response(null, { status: 101, webSocket: client });
+      }
+    }
     const existingClientKey = isTakeover ? this.clientBySocket.get(existing) : undefined;
     if (isTakeover && existingClientKey === clientKey) {
       // 同一出口 IP 的接管：名额此刻在旧 socket 手里，先收回再领取，等价于原子迁移。
