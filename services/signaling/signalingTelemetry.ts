@@ -22,7 +22,9 @@ export type SignalingTelemetryEvent =
   /** 分片模式的握手预算耗尽。 */
   | 'signal_handshake_budget_exhausted'
   /** 跨片回源查口令失败。 */
-  | 'signal_share_code_lookup_failed';
+  | 'signal_share_code_lookup_failed'
+  /** shard 0 的会话绑定表不可达：本次接管按身份不可验证处理。 */
+  | 'signal_session_binding_unavailable';
 
 export type SignalingTelemetryFieldValue = string | number | boolean | null | undefined;
 export type SignalingTelemetryFields = Record<string, SignalingTelemetryFieldValue>;

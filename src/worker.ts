@@ -176,6 +176,8 @@ const SIGNALING_PATH = '/ws-signaling';
 const SIGNALING_DELIVER_DO_PATH = '/internal/deliver-signaling';
 const SIGNALING_SHARE_CODE_LOOKUP_PATH = '/internal/lookup-share-code';
 const SIGNALING_SESSION_SLOT_PATH = '/internal/session-slot';
+// 会话绑定表（摘要 + proof 摘要 + 宽限期历史）只住在 shard 0，跨片走这个内部端点。
+const SIGNALING_SESSION_BINDING_PATH = '/internal/session-binding';
 // 会话名额的兜底 TTL：正常路径由 socket 关闭时释放；进程被杀/DO 迁移可能漏掉释放，
 // 超过这个时间没有心跳的槽位在下次领取时被清掉，避免一次故障永久占满出口 IP 的名额。
 const SIGNALING_SESSION_SLOT_TTL_MS = 6 * 60 * 60 * 1000;
@@ -1036,6 +1038,20 @@ type SessionAttachment = {
  * 会话绑定的持久化记录。proof 轮换后 attachment 里不再有分享密钥摘要（重连只带 proof），
  * 所以「socket 断开后仍要求凭证」只能靠这张表；只存摘要，明文 proof 只下发一次。
  */
+type SessionBindingAdmissionInput = {
+  peerId: string;
+  existingSecretHash?: string;
+  incomingSecretHash?: string;
+  incomingProofHash?: string;
+  now: number;
+};
+
+type SessionBindingAdmission = {
+  allowed: boolean;
+  /** 本次注册签发的新 proof 明文；只有非空时才出现在 registered 帧里。 */
+  proof?: string;
+};
+
 type SessionBindingRecord = {
   secretHash: string | null;
   secretHashExpiresAt: number;
@@ -1137,6 +1153,9 @@ export class SignalingHub extends DurableObject<Env> {
     }
     if (url.pathname === SIGNALING_SESSION_SLOT_PATH) {
       return this.handleSessionSlotRequest(request);
+    }
+    if (url.pathname === SIGNALING_SESSION_BINDING_PATH) {
+      return this.handleSessionBindingRequest(request);
     }
 
     const upgradeHeader = request.headers.get('Upgrade');
@@ -1243,23 +1262,19 @@ export class SignalingHub extends DurableObject<Env> {
       ? (existing.deserializeAttachment() as SessionAttachment | null)
       : null;
     const now = Date.now();
-    // 身份绑定：会话一旦绑定，接管必须出示当前（或宽限期内的上一代）proof；没有绑定
-    // 记录时才回落到首次注册用的分享密钥摘要。判定与限流名额无关——拒绝路径必须让
-    // 旧会话原样继续服务。
-    const binding = this.findSessionBinding(peerId, now);
+    // 身份绑定表只住在 shard 0：分片数变化时同一个 peerId 会换片，绑定不能跟着旧片的
+    // socket 走，否则新片查不到绑定就会退回「知道 peerId 即可接管」。所以判定与本次
+    // proof 轮换都在 shard 0 完成（本片就是 shard 0 时走本地），这里只消费结果。
     const incomingProofHash = sessionProof ? await hashSessionProof(sessionProof) : undefined;
-    const boundSecretHash =
-      binding?.secretHash ?? existingAttachment?.sessionSecretHash ?? sessionSecretHash;
-    const admission = shouldAcceptSessionAdmission({
-      boundSecretHash,
-      storedProofHash: binding?.proofHash,
-      recentProofHashes: binding?.recentProofHashes,
-      secretHashGraceExpiresAt: binding?.secretHashExpiresAt,
+    const admission = await this.admitSignalingSession({
+      peerId,
+      isTakeover,
+      existingSecretHash: existingAttachment?.sessionSecretHash,
       incomingSecretHash: sessionSecretHash,
       incomingProofHash,
       now,
     });
-    if (admission === 'reject') {
+    if (!admission.allowed) {
       this.sendSessionConflict(server, peerId, now);
       return new Response(null, { status: 101, webSocket: client });
     }
@@ -1358,36 +1373,12 @@ export class SignalingHub extends DurableObject<Env> {
       this.slotOwnerSocket.set(sessionSlotId, server);
       this.slotRefreshedAt.set(server, now);
     }
-    // 绑定过密钥的会话在每次成功注册后轮换 proof：客户端下一次重连只带 proof，静态
-    // 分享密钥摘要不再出现在 WS URL 上。明文 proof 只在这一帧里出现一次，落库的是摘要。
-    let issuedProof: string | undefined;
-    if (binding !== null || boundSecretHash !== undefined) {
-      issuedProof = createSessionProof();
-      const issuedProofHash = await hashSessionProof(issuedProof);
-      // 轮换是读改写：await 期间另一条注册可能已经换过 proof。用旧快照构造历史会
-      // 把对方刚签发的那份挤出去，它的客户端下次就被 4010 拒掉，所以落库前重读。
-      const current = this.findSessionBinding(peerId, now) ?? binding;
-      const secretHash = current?.secretHash ?? boundSecretHash ?? null;
-      this.saveSessionBinding({
-        peerId,
-        secretHash,
-        // 首次 registered 帧可能丢：摘要只在短窗口内兜底，过期后必须用 proof。
-        secretHashExpiresAt: secretHash ? now + SESSION_SECRET_HASH_GRACE_MS : 0,
-        proofHash: issuedProofHash,
-        recentProofHashes: buildNextSessionProofHistory({
-          storedProofHash: current?.proofHash,
-          recentProofHashes: current?.recentProofHashes,
-          now,
-          graceMs: SESSION_PROOF_GRACE_MS,
-        }),
-        now,
-      });
-    }
+    // proof 明文只在这一帧出现一次，绑定表里存的是它的 SHA-256 摘要。
     server.send(
       JSON.stringify({
         type: 'registered',
         peerId,
-        ...(issuedProof ? { sessionProof: issuedProof } : {}),
+        ...(admission.proof ? { sessionProof: admission.proof } : {}),
       } satisfies SignalingEnvelope)
     );
     return new Response(null, { status: 101, webSocket: client });
@@ -1730,6 +1721,125 @@ export class SignalingHub extends DurableObject<Env> {
       console.warn('signaling share-code lookup failed', error);
       return null;
     }
+  }
+
+  /**
+   * 会话绑定的权威副本只在 shard 0。分片模式下的注册必须回 shard 0 做「判定 + 轮换」，
+   * 因为分片数一改，同一个 peerId 就会落到别的片，跟着 socket 存在的 attachment 与
+   * 片内 SQL 都会失效——那正是「改分片数 = 静默降级为无绑定」的来源。
+   */
+  private async admitSignalingSession(
+    input: SessionBindingAdmissionInput & { isTakeover: boolean }
+  ): Promise<SessionBindingAdmission> {
+    if (this.isShardZero()) {
+      return this.applySessionBindingAdmission(input);
+    }
+    // 每次注册都要回源：只知道 peerId 的攻击者可以在原 socket 断开后以「全新注册」
+    // 的身份挤进来（此时没有 existing 会话，isTakeover 为 false，拿不到这条捷径）。
+    // 未绑定的 peerId（观众、文件传输、首次注册）在 shard 0 查不到绑定，直接放行。
+    try {
+      const response = await this.signalingStub(signalingShardName(0)).fetch(
+        new Request(`https://signaling.internal${SIGNALING_SESSION_BINDING_PATH}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ ...input, isTakeover: undefined }),
+        })
+      );
+      if (!response.ok) throw new Error(`binding rpc status ${response.status}`);
+      const body = (await response.json()) as SessionBindingAdmission | null;
+      if (!body || typeof body.allowed !== 'boolean') throw new Error('binding rpc body');
+      return { allowed: body.allowed, proof: body.proof };
+    } catch (error) {
+      signalingTelemetry.record('signal_session_binding_unavailable', {});
+      console.warn('signaling session-binding lookup failed', error);
+      // 接管必须有权威绑定才放行（fail closed）；全新注册没有可夺的会话，放行以保可用性。
+      return { allowed: !input.isTakeover };
+    }
+  }
+
+  private async applySessionBindingAdmission(
+    input: SessionBindingAdmissionInput
+  ): Promise<SessionBindingAdmission> {
+    const { peerId, now } = input;
+    const binding = this.findSessionBinding(peerId, now);
+    const boundSecretHash = binding?.secretHash ?? input.existingSecretHash ?? input.incomingSecretHash;
+    const admission = shouldAcceptSessionAdmission({
+      boundSecretHash,
+      storedProofHash: binding?.proofHash,
+      recentProofHashes: binding?.recentProofHashes,
+      secretHashGraceExpiresAt: binding?.secretHashExpiresAt,
+      incomingSecretHash: input.incomingSecretHash,
+      incomingProofHash: input.incomingProofHash,
+      now,
+    });
+    if (admission === 'reject') {
+      return { allowed: false };
+    }
+    if (binding === null && boundSecretHash === undefined) {
+      return { allowed: true };
+    }
+    // 绑定过密钥的会话每次成功注册都轮换 proof：客户端下次重连只带 proof，静态分享密钥
+    // 摘要不再出现在 WS URL 上。明文只回给调用方一帧，落库的是摘要。
+    const proof = createSessionProof();
+    const proofHash = await hashSessionProof(proof);
+    // 轮换是读改写：await 期间另一条注册可能已经换过 proof。用旧快照构造历史会把对方
+    // 刚签发的那份挤掉，所以落库前重读。
+    const current = this.findSessionBinding(peerId, now) ?? binding;
+    const secretHash = current?.secretHash ?? boundSecretHash ?? null;
+    this.saveSessionBinding({
+      peerId,
+      secretHash,
+      // 首次 registered 帧可能丢：摘要只在短窗口内兜底，过期后必须用 proof。
+      secretHashExpiresAt: secretHash ? now + SESSION_SECRET_HASH_GRACE_MS : 0,
+      proofHash,
+      recentProofHashes: buildNextSessionProofHistory({
+        storedProofHash: current?.proofHash,
+        recentProofHashes: current?.recentProofHashes,
+        now,
+        graceMs: SESSION_PROOF_GRACE_MS,
+      }),
+      now,
+    });
+    return { allowed: true, proof };
+  }
+
+  private async handleSessionBindingRequest(request: Request): Promise<Response> {
+    if (request.method !== 'POST') {
+      return new Response('Method Not Allowed', { status: 405 });
+    }
+    let body: Record<string, unknown> | null = null;
+    try {
+      body = (await request.json()) as Record<string, unknown> | null;
+    } catch {
+      body = null;
+    }
+    const peerId = typeof body?.peerId === 'string' ? body.peerId : '';
+    const now = typeof body?.now === 'number' && Number.isFinite(body.now) ? body.now : Date.now();
+    const pickHash = (value: unknown): string | undefined => {
+      if (value === undefined) return undefined;
+      if (typeof value !== 'string' || !isValidSessionSecretHash(value)) return '__invalid__';
+      return value;
+    };
+    const existingSecretHash = pickHash(body?.existingSecretHash);
+    const incomingSecretHash = pickHash(body?.incomingSecretHash);
+    const incomingProofHash = pickHash(body?.incomingProofHash);
+    // 内部端点也校验入参：坏数据不能被当成「没有绑定」从而放宽判定。
+    if (
+      !peerId ||
+      existingSecretHash === '__invalid__' ||
+      incomingSecretHash === '__invalid__' ||
+      incomingProofHash === '__invalid__'
+    ) {
+      return json({ allowed: false }, { status: 400 });
+    }
+    const result = await this.applySessionBindingAdmission({
+      peerId,
+      existingSecretHash,
+      incomingSecretHash,
+      incomingProofHash,
+      now,
+    });
+    return json(result);
   }
 
   private async handleSignalingDeliverRequest(request: Request): Promise<Response> {
