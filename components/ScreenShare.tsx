@@ -835,6 +835,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     peer.on('connection', (conn) => {
       logDebug('log', 'Data connection received from:', conn.peer);
       activeDataConnectionsRef.current.push(conn);
+      // 每个观众只保留一条数据连接：重复接入会让心跳与画质状态互相覆盖。
+      // 先入列再关旧连接，旧连接的 close 处理器因此能看到新的替代连接。
+      activeDataConnectionsRef.current
+        .filter(c => c !== conn && c.peer === conn.peer)
+        .forEach(c => { try { c.close(); } catch {} });
 
       // 初始化该观看者的心跳时间
       viewerHeartbeatsRef.current[conn.peer] = Date.now();
@@ -855,6 +860,19 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       conn.on('close', () => {
         activeDataConnectionsRef.current = activeDataConnectionsRef.current.filter(c => c !== conn);
+        const stillConnected = activeDataConnectionsRef.current.some(c => c.peer === conn.peer);
+        if (stillConnected) return;
+        // 观众离开后座位不该再等 ICE 的 disconnected 宽限（旧实现会让「重连中的观众」
+        // 在宽限窗口里占两个座位）。只回收已经不在 connected 的媒体连接，避免数据
+        // 通道的瞬时抖动误杀正在观看的 call。
+        activeCallsRef.current
+          .filter(c => c.peer === conn.peer)
+          .forEach(c => {
+            const state = c.peerConnection?.connectionState;
+            if (!state || state === 'closed' || state === 'failed' || state === 'disconnected') {
+              try { c.close(); } catch {}
+            }
+          });
         delete viewerHeartbeatsRef.current[conn.peer];
       });
 
@@ -879,6 +897,15 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         onNotification(`观看人数已达上限（${SCREEN_SHARE_LIMITS.MAX_VIEWERS} 人）`, 'info');
         try { call.close(); } catch {}
         return;
+      }
+
+      // 正常重连会换新 peerId（观众侧每次 new PeerRuntime），所以同一个 peerId 再来
+      // 一条 call 只可能是客户端故意多开：关掉旧 call，保证每个 peer 最多一条媒体连接，
+      // 否则一个「观众」就能让分享端跑 N 条 PeerConnection 并绕过 MAX_VIEWERS。
+      if (alreadyTracked && !pendingViewers.has(call.peer)) {
+        activeCallsRef.current
+          .filter((active) => active.peer === call.peer)
+          .forEach((active) => { try { active.close(); } catch {} });
       }
 
       // answer() 要等一次 round-trip：名额必须现在占，不能等 answer 回来才计入。

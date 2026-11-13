@@ -1001,6 +1001,8 @@ export class SignalingHub extends DurableObject {
   private rateLimiter = createSignalingRateLimiter();
   private sessionLimiter: SignalingSessionLimiter;
   private messageWindows = new Map<WebSocket, SignalingMessageWindow>();
+  // 会话密钥不匹配的拒绝不限流（发生在会话名额检查之前），日志按 peerId 每分钟最多一条。
+  private lastConflictLogAt = new Map<string, number>();
   // 全局 /api/ice-config 限流计数（住在单例 DO 里，跨 colo 共享）。
   private iceConfigGlobalLimiter = createIceConfigGlobalLimiter();
 
@@ -1113,8 +1115,13 @@ export class SignalingHub extends DurableObject {
           } satisfies SignalingEnvelope)
         );
         // 被拒说明有人拿着分享链接但拿不到会话密钥：留一条日志，便于区分
-        // 「用户重装/换浏览器」与「真的在顶号」。
-        console.warn('Rejected signaling session replacement without matching secret', { peerId });
+        // 「用户重装/换浏览器」与「真的在顶号」。这条路径不占名额，必须限频。
+        const now = Date.now();
+        if (now - (this.lastConflictLogAt.get(peerId) ?? 0) >= 60_000) {
+          if (this.lastConflictLogAt.size > 500) this.lastConflictLogAt.clear();
+          this.lastConflictLogAt.set(peerId, now);
+          console.warn('Rejected signaling session replacement without matching secret', { peerId });
+        }
         server.close(4010, 'Signaling session conflict');
         return new Response(null, { status: 101, webSocket: client });
       }
