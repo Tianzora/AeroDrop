@@ -373,3 +373,32 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 - `signalingHub.test.ts` 是**进程内**的 DO 契约测试（替身 socket），不是真 `wrangler dev` 多 socket / hibernation 测试；那部分仍靠 `%TEMP%` 探针手工跑（`ws` 不是声明依赖，CSRF 同源门又要求 Origin 匹配）。
 - `Receiver.tsx`（约 3366 行）与 `ScreenShare.tsx`（约 2350 行）仍是单体组件；`ScreenShare.tsx` 的注册/重连/心跳计时器仍有内联部分。
 - 屏幕共享仍是 mesh（`MAX_VIEWERS=6`、16 Mbps 聚合预算），7 人以上需要 SFU。
+
+### 8.6 第四轮复评后的补齐（2026-11-14，复评基线 94 / 90 / 91）
+
+这轮的关键变化不是新增能力，而是把「测试已经证明的规则」和「生产中实际执行的分支」之间的缝补上：
+
+| 缺口（复评） | 修法 | 回归测试 |
+| --- | --- | --- |
+| 重建只带静态摘要、不带 proof：共享跑过 10 分钟后任何一次（重连耗尽的）重建都会 4010 终态并撤销房号 | `PeerRuntime` 新增 `session-proof` 事件与 `getSessionProof()`；`services/screenShare/sessionProofStore.ts` 按 peerId 存 sessionStorage，`screenSharePeerCredentials.ts` 有 proof 时只带 `sessionProof`、**不再带**静态摘要；重建时优先用存下的 proof，停止/终态清除 | `sessionProofStore.test.ts`（6 例，含损坏 JSON/不可用 storage 容错）、`screenSharePeerCredentials.test.ts`（3 例，断言有 proof 时 `'sessionSecretHash' in credentials === false`） |
+| 注册途中 socket 关闭：名额/会话写进已死 socket，回收只发生在 close（那时 `clientBySocket` 还没写）→ 分片模式名额永久泄漏 | 每次 await 后 `rejectRaced()` 先查 `server.readyState`；`send-failed` 时回滚名额并清三张 map 与槽位归属，记 `signal_session_registration_send_failed` | `signalingHub.test.ts`「注册途中 socket 关闭：不写会话、名额与槽位一起回滚」（变异：短路 readyState 判定 ⇒ 红） |
+| 自愈补写 pending proof 绕过 CAS：被放弃的轮换仍以 24h 进历史 | `appendPendingSessionProof` 增加 `expectedProofHash`，与当前权威 proof 不一致就放弃；跨片 RPC 同样传该字段 | `sessionStore.sqlite.test.ts`「自愈补写 pending proof 也走 CAS」（变异：短路比较 ⇒ 红） |
+| 分片 commit 只看 `response.ok`，丢弃 `{committed, superseded}` → CAS 弃写无指标 | 解析响应体：`superseded` 记 `signal_session_binding_commit_superseded{path:'shard-rpc'}`，`committed:false` 视为失败重试 | `signalingHub.test.ts`「分片模式下 commit 返回 superseded 时记指标」（变异：把判定改假 ⇒ 红） |
+| 新测试全部顺序 await，check-then-act 交错无覆盖 | 在 shard 1 的 `reserve` RPC 在途时启动同 peerId 的第二条注册，A 恢复后必须重读 map 并放弃 | `signalingHub.test.ts`「交错注册竞态…」（变异：race 判定恒 `null` ⇒ 红；槽位归属 B） |
+| 跨片投递 `rpc_error` 分支与 `webSocketError` 单独路径无测试 | 补两个用例：RPC 抛错 ⇒ 调用方 `peer-unavailable` + 一条 `rpc_error` 指标；`webSocketError` 不误删同 peerId 的其他 socket、席位可释放 | `signalingHub.test.ts`（变异：吞掉异常 / 删 `unregisterSession` 调用 / 删 limiter release 均变红） |
+| 房号登记无超时 → `initializePeer` 永不结束 → 闸门永久占用 → 永久 amber 只能刷新 | `requestShareCode` 加 8s `AbortController`（`SHARE_CODE_REGISTER_TIMEOUT_MS`），超时状态单独上报；`peerInitGuard` 增加 `isStale` 与换新闸门；连续 2 次超时（≈17s）落终态 | `shareRoomRegistration.test.ts`「登记超时被单独报出来」（变异：吞成 failed ⇒ 红）+ `e2e/screenshare.spec.ts`「卡住的登记进入可操作终态」（把上限改 99 ⇒ 25s 内不出现终态，红） |
+| 停止→立刻再开始被旧闸门挡住（最长 20s） | `stopScreenShare`/`failSharerSession` 换新闸门对象（旧调用的 `finally` 只碰旧对象） | `peerInitGuard.test.ts` +2（`isStale`、跨会话换新闸门） |
+| 发送端「分享已失效」只活 30s，随后状态行回落「等待连接」、口令仍可复制 | `SenderSessionHost.setShareRevoked` 持久降级位（start/open/resume 成功才清），`SenderUI` 据此显示「已失效」、amber 链接说明与「重新创建分享」；状态行收敛为 `pushConnectionStatus`/`applyRoutineConnectionStatus` 两个入口 | `senderSession.test.ts` +2（作废是持久事实、重新开始不继承）、`connectionStatusNotice.test.ts`（5 例） |
+| 房号 TTL 过期分享端无感（续期要连续失败约 1.5h 才提示） | `expiresAt` 回传 + 30 分钟定时续期 + `visibilitychange`/`online` 立即续期 + 60s 过期看门狗；`shareRoomExpired` 时徽标切「链接已失效」并禁用复制 | `ScreenShareUI.test.ts` +2、`shareRoomRegistration.test.ts` |
+| 首连就报「信令中断」、英文 `getDisplayMedia` 文案直拼 | 只有 `hasBeenReady` 之后才说「信令中断」；采集失败文案搬到 `services/screenShare/screenCaptureGuidance.ts` 按 `error.name` 映射中文 | `screenCaptureGuidance.test.ts`（3 例，含「英文 message 不进文案」）、`ScreenShareUI.test.ts` |
+
+同时完成的三项工程收敛：sqlite 测试适配器去重到 `scripts/test-stubs/sqlite-adapter.ts`（覆盖率默认排除该目录）；runner 测试顺带覆盖 collector 与退出码透传；`tsconfig.json` 纳入 `scripts/**/*.ts` 并开启 `noFallthroughCasesInSwitch`。
+
+`src/worker.ts` 的契约测试覆盖（`services/signaling/signalingHub.test.ts`）从 5 例扩到 15 例后，worker 的行覆盖 58.64% → 68.24%、函数 29.76% → 51.65%；全部用例都做过「改坏生产码 → 变红 → 还原」的变异验证。
+
+仍然存在的已知取舍（本轮之后）：
+
+- proof 仍走 WS URL query；改首帧要同时改两端注册协议，属破坏性升级。
+- `signalingHub.test.ts` 是进程内替身，不覆盖真实 hibernation 与多 isolate 调度；跨片/休眠相关探针仍只在 `%TEMP%` 手工跑。
+- 长时共享（>10 分钟）后「重连耗尽 → 重建带 proof」只有单测与结构保证，没有真实时间推进的 E2E（CI 不适合等 10 分钟）。
+- `Receiver.tsx` / `ScreenShare.tsx` 仍是千行组件；屏幕共享仍是 mesh（`MAX_VIEWERS=6`、16 Mbps 聚合预算）。
