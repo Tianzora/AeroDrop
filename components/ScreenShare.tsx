@@ -14,6 +14,7 @@ import { createSessionSecretHash } from '../services/signaling/sessionBinding';
 import { logDebug } from '../services/diagnostics';
 import { SIGNALING_UNREACHABLE_MESSAGE, getPeerRuntimeErrorMessage } from '../services/connectionGuidance';
 import { canAdmitViewer } from '../services/screenShare/viewerAdmission';
+import { VIEWER_DISCONNECT_GRACE_MS, decideViewerConnection } from '../services/screenShare/viewerConnectionPolicy';
 import {
   CONNECTION_TIMINGS,
   SCREEN_SHARE_LIMITS,
@@ -1512,6 +1513,64 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
             });
         }, SCREEN_SHARE_VIEWER_STATS_INTERVAL_MS);
       };
+
+      // 观众侧连接看护：`stream` 事件在 ICE 连通之前就会到，光靠冻帧看护发现不了
+      // 「一直黑屏」。failed 立即重连，disconnected 给一段宽限再重连，connected 清零。
+      const viewerPc = call.peerConnection;
+      let viewerDisconnectedSince = 0;
+      const clearViewerWatch = () => {
+        if (viewerGraceTimer) {
+          clearTimeout(viewerGraceTimer);
+          viewerGraceTimer = null;
+        }
+        viewerPc?.removeEventListener('connectionstatechange', handleViewerConnectionState);
+      };
+      let viewerGraceTimer: NodeJS.Timeout | null = null;
+      const retryViewerConnection = (message: string) => {
+        clearViewerWatch();
+        onNotification(message, 'info');
+        reconnectViewerAfterLoss();
+      };
+      const handleViewerConnectionState = () => {
+        if (viewerConnectAttemptRef.current !== attemptId) {
+          clearViewerWatch();
+          return;
+        }
+        const state = viewerPc?.connectionState ?? 'unknown';
+        if (state === 'disconnected' && viewerDisconnectedSince === 0) {
+          viewerDisconnectedSince = Date.now();
+        }
+        const decision = decideViewerConnection({
+          state,
+          disconnectedForMs: Date.now() - viewerDisconnectedSince,
+          graceMs: VIEWER_DISCONNECT_GRACE_MS,
+        });
+        if (decision === 'ok') {
+          viewerDisconnectedSince = 0;
+          if (viewerGraceTimer) {
+            clearTimeout(viewerGraceTimer);
+            viewerGraceTimer = null;
+          }
+          return;
+        }
+        if (decision === 'wait' && state === 'disconnected' && !viewerGraceTimer) {
+          viewerGraceTimer = setTimeout(() => {
+            viewerGraceTimer = null;
+            const lateState = viewerPc?.connectionState ?? 'unknown';
+            if (lateState === 'connected' || viewerConnectAttemptRef.current !== attemptId) return;
+            if (decideViewerConnection({ state: lateState, disconnectedForMs: Date.now() - viewerDisconnectedSince, graceMs: VIEWER_DISCONNECT_GRACE_MS }) !== 'retry') return;
+            retryViewerConnection('视频连接中断，正在重新连接...');
+          }, VIEWER_DISCONNECT_GRACE_MS);
+          return;
+        }
+        if (decision === 'retry') {
+          retryViewerConnection(state === 'failed' ? '视频连接建立失败，正在重试...' : '视频连接已断开，正在重新连接...');
+        }
+      };
+      if (viewerPc) {
+        viewerPc.addEventListener('connectionstatechange', handleViewerConnectionState);
+        handleViewerConnectionState();
+      }
 
       call.on('stream', (remoteStream) => {
         if (viewerConnectAttemptRef.current !== attemptId) return;
