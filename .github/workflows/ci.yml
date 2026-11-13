@@ -57,7 +57,9 @@ jobs:
 
   e2e:
     name: e2e (chromium)
-    runs-on: ubuntu-latest
+    # Playwright 1.59 只认到 ubuntu 24.04；`ubuntu-latest` 已漂到 26.04，
+    # `playwright install --with-deps` 会直接拒绝安装（Cannot install dependencies for ubuntu26.04-x64）。
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - name: Checkout
