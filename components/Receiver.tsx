@@ -24,6 +24,7 @@ import {
   getPeerRuntimeErrorMessage,
   getReceiverDisconnectedMessage,
   getReceiverPreTransferFailureMessage,
+  getTransferRejectedMessage,
   NO_TURN_WARNING_MESSAGE,
   RATE_LIMITED_CONNECTION_MESSAGE,
 } from '../services/connectionGuidance';
@@ -1662,7 +1663,7 @@ export const Receiver: React.FC<ReceiverProps> = ({ initialCode, onNotification,
     }
     else if (msg.type === 'REJECT_TRANSFER') {
        markConnectionFailure(connectTelemetryRef.current, 'rejected_by_sender', { reason: msg.payload?.reason });
-       setErrorMsg(msg.payload?.reason || "发送方拒绝了请求");
+       setErrorMsg(getTransferRejectedMessage(msg.payload?.reason));
        setState(TransferState.ERROR);
        markIntentionalConnectionClose(conn);
        conn.close();

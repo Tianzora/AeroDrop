@@ -160,6 +160,9 @@ test.describe('screen share', () => {
     // 必须早于 goto：init script 只在后续导航的文档创建时注入。
     await page.addInitScript(() => {
       const NativeWebSocket = window.WebSocket;
+      // 只拒绝第一条信令连接：终态之后点「重新开始共享」必须能真的连上，
+      // 否则这条用例只证明「会失败」，证明不了「失败后可恢复」。
+      let rejectedOnce = false;
 
       class RejectedSignalingSocket extends EventTarget {
         url: string;
@@ -201,9 +204,10 @@ test.describe('screen share', () => {
       window.WebSocket = new Proxy(NativeWebSocket, {
         construct(target, args) {
           const url = String(args[0]);
-          if (!/\/ws-signaling/.test(url)) {
+          if (!/\/ws-signaling/.test(url) || rejectedOnce) {
             return Reflect.construct(target, args);
           }
+          rejectedOnce = true;
           return new RejectedSignalingSocket(url);
         },
       });
@@ -231,5 +235,93 @@ test.describe('screen share', () => {
     ).toBeVisible();
     await expect(terminalCard.getByRole('button', { name: '重新开始共享' })).toBeVisible();
     await expect(page.locator('a[href*="view="]')).toHaveCount(0);
+
+    // 终态必须可恢复：同一条链接不能永久报废，点「重新开始共享」要重新注册房号、
+    // 重新握手并回到绿色 LIVE，否则用户只剩刷新页面一条路。
+    await terminalCard.getByRole('button', { name: '重新开始共享' }).click();
+    await expect(page.getByText('正在共享')).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('a[href*="view="]')).toHaveCount(1);
+  });
+
+  // 失败路径：房号登记被限流（429）是终态——重试只会继续吃限流窗口，所以必须立刻
+  // 停采集、清预览、不进绿色 LIVE，并把限流文案直接给用户，而不是「请重试」。
+  test('sharer fails fast and terminally when the share room registration is rate limited', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      const nativeFetch = window.fetch.bind(window);
+      const state = window as typeof window & { __shareCodeAttempts?: number; __nativeFetch?: typeof fetch };
+      state.__shareCodeAttempts = 0;
+
+      window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+        if (method === 'POST' && /\/api\/share-code$/.test(new URL(rawUrl, location.href).pathname)) {
+          state.__shareCodeAttempts = (state.__shareCodeAttempts ?? 0) + 1;
+          return Promise.resolve(
+            new Response(JSON.stringify({ error: 'too many share code requests' }), {
+              status: 429,
+              headers: { 'Content-Type': 'application/json', 'Retry-After': '30' },
+            })
+          );
+        }
+        return nativeFetch(input as RequestInfo, init);
+      }) as typeof window.fetch;
+    });
+
+    await page.goto('/');
+    const supported = await page.evaluate(
+      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
+    );
+    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+
+    await page.getByRole('button', { name: '共享' }).click();
+    await page.getByRole('button', { name: '开始共享屏幕' }).click();
+
+    const terminalCard = page.getByRole('main');
+    await expect(terminalCard.getByText('共享已中断')).toBeVisible({ timeout: 25_000 });
+    await expect(terminalCard.getByText('创建共享房间过于频繁，请稍后再试')).toBeVisible();
+    await expect(page.getByText('正在共享')).toHaveCount(0);
+    await expect(page.locator('a[href*="view="]')).toHaveCount(0);
+    await expect(terminalCard.getByText('此前分享的链接已失效，观众无法再加入。')).toBeVisible();
+
+    // 终态不能靠连打接口熬过去：命中限流后只登记过一次。
+    expect(await page.evaluate(() => (window as typeof window & { __shareCodeAttempts?: number }).__shareCodeAttempts)).toBe(1);
+  });
+
+  // 失败路径：登记接口偶发 5xx 属于可自愈失败——继续重试到成功，不能把分享杀掉。
+  test('sharer recovers from a transient share room registration failure instead of killing the share', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      const nativeFetch = window.fetch.bind(window);
+      const state = window as typeof window & { __shareCodeAttempts?: number };
+      state.__shareCodeAttempts = 0;
+
+      window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+        if (method === 'POST' && /\/api\/share-code$/.test(new URL(rawUrl, location.href).pathname)) {
+          state.__shareCodeAttempts = (state.__shareCodeAttempts ?? 0) + 1;
+          if (state.__shareCodeAttempts === 1) {
+            return Promise.resolve(new Response('', { status: 503 }));
+          }
+        }
+        return nativeFetch(input as RequestInfo, init);
+      }) as typeof window.fetch;
+    });
+
+    await page.goto('/');
+    const supported = await page.evaluate(
+      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
+    );
+    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+
+    await page.getByRole('button', { name: '共享' }).click();
+    await page.getByRole('button', { name: '开始共享屏幕' }).click();
+
+    await expect(page.getByText('正在共享')).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('a[href*="view="]')).toHaveCount(1);
+    expect(await page.evaluate(() => (window as typeof window & { __shareCodeAttempts?: number }).__shareCodeAttempts)).toBe(2);
   });
 })

@@ -681,6 +681,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
       setPreparingStage: (stage) => setPreparingStage(stage),
       setShareCode: (code) => setTransferCode(code),
       setRemainingTime: (text) => setRemainingTime(text),
+      setConnectionStatus: (status) => setConnectionStatus(status),
       setMetadata: (next) => setMetadata(next),
       notify: (message, type) => onNotification?.(message, type),
       getActiveTransfers: () => activeTransfersCount.current,

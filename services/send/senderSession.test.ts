@@ -8,7 +8,7 @@ import type {
   SenderSessionHost,
 } from './senderSession.ts';
 import type { IceConfigResult } from '../stunService.ts';
-import { getPeerRuntimeErrorMessage } from '../connectionGuidance.ts';
+import { getPeerRuntimeErrorMessage, SHARE_SIGNALING_LOST_MESSAGE } from '../connectionGuidance.ts';
 
 // peerRuntime.ts 在模块顶层读 window.location.origin，Node 测试里必须先补最小 DOM 桩，
 // 再用动态 import 加载被测模块（与 peerRuntime.test.ts 的做法一致）。
@@ -150,6 +150,8 @@ interface HostLog {
   sessionLost: number;
   shareEnded: number;
   connectionFailures: string[];
+  /** 状态行文案的写入顺序：用来断言「有在途传输时降级提示而不是 error」 */
+  connectionStatuses: string[];
   /** 关键回调顺序，用来断言「先走完整停止流程，再写 error 态」。 */
   order: string[];
   metadata: FileMetadata | null;
@@ -169,11 +171,13 @@ const createHost = () => {
     sessionLost: 0,
     shareEnded: 0,
     connectionFailures: [],
+    connectionStatuses: [],
     order: [],
     metadata: null,
     phase: () => log.phases[log.phases.length - 1]?.phase ?? '',
   };
   let activeTransfers = 0;
+  let activeConnections = 0;
   let unavailable = false;
   const host: SenderSessionHost = {
     attachPeer: (next) => { peer = next as unknown as FakePeer; },
@@ -189,10 +193,11 @@ const createHost = () => {
     setPreparingStage: (stage) => { log.preparingStages.push(stage); },
     setShareCode: (code) => { log.shareCodes.push(code); },
     setRemainingTime: (text) => { log.remainingTimes.push(text); },
+    setConnectionStatus: (status) => { log.connectionStatuses.push(status); },
     setMetadata: (next) => { log.metadata = next; },
     notify: (message, type) => { log.notifications.push({ message, type }); },
     getActiveTransfers: () => activeTransfers,
-    getActiveConnectionCount: () => 0,
+    getActiveConnectionCount: () => activeConnections,
     isUnavailable: () => unavailable,
     onIceConfig: () => {},
     markSignalingOpen: () => {},
@@ -211,6 +216,7 @@ const createHost = () => {
     log,
     peer: () => peer,
     setActiveTransfers: (value: number) => { activeTransfers = value; },
+    setActiveConnections: (value: number) => { activeConnections = value; },
     setUnavailable: (value: boolean) => { unavailable = value; },
   };
 };
@@ -597,4 +603,60 @@ test('无活动连接时的通用 peer 错误进入 error 且停掉倒计时', a
   assert.equal(revokeCalls.length, 1);
   assert.equal(clock.intervalCount, 0);
   assert.equal(log.phases[log.phases.length - 1].message, getPeerRuntimeErrorMessage('socket-closed'));
+});
+
+test('有在途传输时信令终态只降级状态位，不打错误页（否则传输列表消失）', async () => {
+  const { host, log, peer, setActiveConnections } = createHost();
+  const { deps } = createDeps();
+  const session = createSenderSession(host, deps);
+
+  await session.start({ metadata, expiryOption: '10m' });
+  peer()?.emit('open');
+  log.connectionStatuses.length = 0;
+  setActiveConnections(1);
+
+  peer()?.emit('error', { type: 'unauthorized' });
+  await Promise.resolve();
+
+  assert.deepEqual(log.connectionStatuses, [SHARE_SIGNALING_LOST_MESSAGE]);
+  assert.notEqual(log.phase(), 'error', '有在途传输时不能把 UI 打到错误页');
+  // 倒计时可以继续走完（到期时会把状态标成「已失效」），但不能立刻触发分享结束。
+  assert.equal(log.shareEnded, 0);
+});
+
+test('限流且已有连接在传时不进 error：提示链接失效但保留传输视图', async () => {
+  const { host, log, peer, setActiveConnections } = createHost();
+  const { deps } = createDeps();
+  const session = createSenderSession(host, deps);
+
+  await session.start({ metadata, expiryOption: '10m' });
+  peer()?.emit('open');
+  log.connectionStatuses.length = 0;
+  setActiveConnections(2);
+
+  peer()?.emit('error', { type: 'rate-limited' });
+  await Promise.resolve();
+
+  assert.deepEqual(log.connectionStatuses, [SHARE_SIGNALING_LOST_MESSAGE]);
+  assert.notEqual(log.phase(), 'error');
+  assert.deepEqual(
+    log.notifications.map((item) => item.message),
+    [SHARE_SIGNALING_LOST_MESSAGE],
+  );
+});
+
+test('信令恢复（open）会清掉降级状态位，不留一条过期提示', async () => {
+  const { host, log, peer, setActiveConnections } = createHost();
+  const { deps } = createDeps();
+  const session = createSenderSession(host, deps);
+
+  await session.start({ metadata, expiryOption: '10m' });
+  peer()?.emit('open');
+  setActiveConnections(1);
+  peer()?.emit('error', { type: 'unauthorized' });
+  await Promise.resolve();
+  assert.equal(log.connectionStatuses[log.connectionStatuses.length - 1], SHARE_SIGNALING_LOST_MESSAGE);
+
+  peer()?.emit('open');
+  assert.equal(log.connectionStatuses[log.connectionStatuses.length - 1], '');
 });

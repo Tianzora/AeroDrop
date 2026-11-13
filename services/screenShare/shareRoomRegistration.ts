@@ -20,11 +20,39 @@ export type ScreenShareRoom = {
   expiresAt: number;
 };
 
-export type ScreenShareRoomFailure = { status: 'failed'; message: string };
+/** 登记失败原因：重试策略与文案都按它分流，不再一律当成「网络不可达」。 */
+export type ScreenShareRoomFailureReason = 'taken' | 'rate-limited' | 'failed';
+
+export type ScreenShareRoomFailure = {
+  status: 'failed';
+  reason: ScreenShareRoomFailureReason;
+  message: string;
+  /** 429 时服务端给的冷却时间（其它原因没有）。 */
+  retryAfterMs?: number;
+};
 
 export type ScreenShareRoomRegistration =
   | { status: 'ok'; room: ScreenShareRoom }
   | ScreenShareRoomFailure;
+
+const toFailureReason = (status: string): ScreenShareRoomFailureReason => {
+  switch (status) {
+    case 'taken':
+      return 'taken';
+    case 'rate-limited':
+      return 'rate-limited';
+    default:
+      return 'failed';
+  }
+};
+
+/**
+ * 限流是服务端明确的「现在不给」：重试只会继续吃 429，调用方必须直接进终态。
+ * taken 还能换一个随机 peerId 自愈，failed 可能只是网络抖动，两者交给退避重试。
+ */
+export const isTerminalScreenShareRoomFailure = (
+  reason: ScreenShareRoomFailureReason,
+): boolean => reason === 'rate-limited';
 
 const PEER_ID_PREFIX = 'AERO-';
 // 9 字节 → 18 位 hex（72 bit）：可枚举性远低于旧的 6 位 base36（约 31 bit）。
@@ -64,7 +92,12 @@ export const registerScreenShareRoom = async (input?: {
   });
 
   if (result.status !== 'ok') {
-    return { status: 'failed', message: describeScreenShareRoomFailure(result.status) };
+    return {
+      status: 'failed',
+      reason: toFailureReason(result.status),
+      message: describeScreenShareRoomFailure(result.status),
+      ...(result.status === 'rate-limited' ? { retryAfterMs: result.retryAfterMs } : {}),
+    };
   }
 
   return {
@@ -104,6 +137,31 @@ export const revokeScreenShareRoom = async (
       peerId: room.peerId,
       secret: room.secret,
     });
+  } catch {
+    return false;
+  }
+};
+
+/**
+ * 页面正在卸载（刷新/关标签/跳走）时的撤销。
+ *
+ * 这条路径上没人等返回值，普通 fetch 会被文档销毁直接取消，房号就一直活到 TTL，
+ * 旧链接在 24 小时内仍能被别人打开。keepalive 让请求越过页面卸载继续发出；
+ * 正常停止分享仍走 revokeScreenShareRoom（能拿到结果、能重试）。
+ */
+export const revokeScreenShareRoomBeacon = (
+  room: ScreenShareRoom | null | undefined,
+): boolean => {
+  if (!room) return false;
+  try {
+    void fetch(`/api/share-code/${encodeURIComponent(room.code)}/revoke`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ peerId: room.peerId, secretHash: room.secretHash }),
+      keepalive: true,
+      cache: 'no-store',
+    }).catch(() => false);
+    return true;
   } catch {
     return false;
   }

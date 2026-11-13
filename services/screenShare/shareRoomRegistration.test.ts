@@ -5,7 +5,9 @@ import {
   createScreenSharePeerId,
   describeScreenShareRoomFailure,
   formatScreenSharePeerId,
+  isTerminalScreenShareRoomFailure,
   registerScreenShareRoom,
+  revokeScreenShareRoomBeacon,
 } from './shareRoomRegistration.ts';
 
 const PEER_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
@@ -49,9 +51,94 @@ test('Node 环境下没有浏览器 fetch 覆盖点：登记失败也必须落�
     assert.equal(result.status, 'failed');
     if (result.status === 'failed') {
       assert.equal(result.message, '共享房间登记失败，请检查网络后重试');
+      assert.equal(result.reason, 'failed');
     }
     assert.deepEqual(calls, ['/api/share-code']);
   } finally {
     globalThis.fetch = originalFetch;
   }
+});
+
+const withFetch = async (
+  handler: (input: RequestInfo | URL, init?: RequestInit) => Promise<Response>,
+  run: (calls: Array<{ url: string; init?: RequestInit }>) => Promise<void>,
+) => {
+  const originalFetch = globalThis.fetch;
+  const calls: Array<{ url: string; init?: RequestInit }> = [];
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    calls.push({ url: String(input), init });
+    return handler(input, init);
+  }) as typeof fetch;
+  try {
+    await run(calls);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+};
+
+test('登记失败把服务端原因带出来：占用/限流/网络不能都塌成一句「重试」', async () => {
+  await withFetch(
+    async () => new Response('', { status: 409 }),
+    async () => {
+      const result = await registerScreenShareRoom({ peerId: 'AERO-0123456789abcdef01' });
+      assert.equal(result.status, 'failed');
+      if (result.status === 'failed') {
+        assert.equal(result.reason, 'taken');
+        assert.equal(result.message, '共享房间号已被占用，请重新开始共享');
+      }
+    },
+  );
+
+  await withFetch(
+    async () =>
+      new Response('', { status: 429, headers: { 'Retry-After': '7' } }),
+    async () => {
+      const result = await registerScreenShareRoom({ peerId: 'AERO-0123456789abcdef02' });
+      assert.equal(result.status, 'failed');
+      if (result.status === 'failed') {
+        assert.equal(result.reason, 'rate-limited');
+        assert.equal(result.message, '创建共享房间过于频繁，请稍后再试');
+        assert.equal(result.retryAfterMs, 7_000);
+      }
+    },
+  );
+});
+
+test('只有限流是终态：占用/网络还有自愈空间，不该立刻杀掉整个分享', () => {
+  assert.equal(isTerminalScreenShareRoomFailure('rate-limited'), true);
+  assert.equal(isTerminalScreenShareRoomFailure('taken'), false);
+  assert.equal(isTerminalScreenShareRoomFailure('failed'), false);
+});
+
+test('页面卸载时的撤销用 keepalive 抢发：普通 fetch 会被文档销毁直接取消', async () => {
+  const room = {
+    peerId: 'AERO-0123456789abcdef03',
+    code: '123456',
+    secret: 'secret-value',
+    secretHash: 'hash-value',
+    expiresAt: Date.now() + 60_000,
+  };
+
+  await withFetch(
+    async () => new Response('{}', { status: 200 }),
+    async (calls) => {
+      assert.equal(revokeScreenShareRoomBeacon(room), true);
+      assert.equal(calls.length, 1);
+      assert.equal(calls[0].url, '/api/share-code/123456/revoke');
+      assert.equal(calls[0].init?.method, 'POST');
+      assert.equal(calls[0].init?.keepalive, true);
+      assert.deepEqual(JSON.parse(String(calls[0].init?.body)), {
+        peerId: room.peerId,
+        secretHash: room.secretHash,
+      });
+    },
+  );
+
+  await withFetch(
+    async () => new Response('{}', { status: 200 }),
+    async (calls) => {
+      assert.equal(revokeScreenShareRoomBeacon(null), false);
+      assert.equal(calls.length, 0, '没有房号时不该发出空撤销');
+    },
+  );
 });

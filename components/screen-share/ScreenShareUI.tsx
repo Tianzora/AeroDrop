@@ -26,6 +26,8 @@ interface ScreenShareUIProps {
   isPeerReady: boolean;
   /** 绿色「正在共享」的唯一条件：已登记且信令健康。 */
   isShareLive: boolean;
+  /** 房号续期连续失败：画面照常，但链接快到期了，不能再显示「一切正常」。 */
+  shareRoomRenewalWarning: boolean;
   sharerFailure: { reason: 'signaling_failed'; message: string } | null;
   dismissSharerFailure: () => void;
   recommendedViewerCount: number;
@@ -58,6 +60,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   copyShareLink,
   copied,
   isShareLive,
+  shareRoomRenewalWarning,
   sharerFailure,
   dismissSharerFailure,
   recommendedViewerCount,
@@ -513,6 +516,11 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                 {!isShareLive && (
                   <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
                     信令中断，新观众暂时无法加入
+                  </p>
+                )}
+                {isShareLive && shareRoomRenewalWarning && (
+                  <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+                    分享链接续期失败，到期后观众将无法再加入
                   </p>
                 )}
                 <p className="mt-1.5 text-xs text-slate-400 dark:text-night-500">

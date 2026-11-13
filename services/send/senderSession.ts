@@ -1,6 +1,11 @@
 import { CONNECTION_TIMINGS, EXPIRY_DURATIONS, type ExpiryOption } from '../../constants/transfer';
 import { P2P_PROTOCOL_VERSION, type FileMetadata } from '../../types';
-import { NO_TURN_WARNING_MESSAGE, getPeerRuntimeErrorMessage } from '../connectionGuidance';
+import {
+  NO_TURN_WARNING_MESSAGE,
+  SHARE_SIGNALING_LOST_MESSAGE,
+  getPeerRuntimeErrorMessage,
+  isShareSessionLostError,
+} from '../connectionGuidance';
 import { loadPeerRuntime, type Peer } from '../peerRuntime';
 import { createSessionActivityTracker } from '../sessionActivityTracker';
 import { clampShareCodeTtlSeconds } from '../shareCodeRegistry';
@@ -41,6 +46,11 @@ export interface SenderSessionHost {
   setPreparingStage: (stage: SenderPreparingStage) => void;
   setShareCode: (code: string) => void;
   setRemainingTime: (text: string) => void;
+  /**
+   * 状态行的可见文案（空串 = 恢复正常）。用于「分享已失效但传输还在跑」这类
+   * 不该打到错误页、又不能让界面显示一切正常的中间态。
+   */
+  setConnectionStatus: (status: string) => void;
   setMetadata: (metadata: FileMetadata) => void;
   notify: (message: string, type: 'success' | 'info' | 'error') => void;
   getActiveTransfers: () => number;
@@ -197,6 +207,8 @@ export class SenderSession {
     const token = this.activity.begin();
     this.expiryHandled = false;
     this.expiresAt = undefined;
+    // 新一轮分享从干净状态开始：上一次的「分享已失效」提示不能残留到新口令上。
+    this.host.setConnectionStatus('');
     this.host.setPhase('preparing');
     this.host.setPreparingStage('fetching_ice');
 
@@ -383,6 +395,7 @@ export class SenderSession {
       this.host.setShareCode(signalingCode);
       this.host.setPreparingStage('fetching_ice');
       this.host.setPhase('waiting');
+      this.host.setConnectionStatus('');
       this.startCountdown();
     });
     customPeer.on('error', (err) => {
@@ -408,6 +421,13 @@ export class SenderSession {
       this.clearCountdown();
       this.host.markConnectionFailure(err.type === 'rate-limited' ? 'rate_limited' : 'message_too_large');
       void this.release();
+      if (this.host.getActiveConnectionCount() > 0) {
+        // 有在途传输：setPhase('error') 会把传输列表从界面上撤掉，用户会以为文件也断了。
+        // 改成状态位的降级提示——链接不能再发给新设备，已有连接照常传完。
+        this.host.setConnectionStatus(SHARE_SIGNALING_LOST_MESSAGE);
+        this.host.notify(SHARE_SIGNALING_LOST_MESSAGE, 'info');
+        return;
+      }
       this.host.setPhase('error', getPeerRuntimeErrorMessage(err.type));
     } else if (err.type === 'network' || err.type === 'server-error' || err.type === 'socket-error') {
       return;
@@ -418,10 +438,16 @@ export class SenderSession {
         this.clearCountdown();
         void this.release();
         this.host.setPhase('error', getPeerRuntimeErrorMessage(err.type ?? ''));
-      } else if (err.type === 'unauthorized' && !this.registration) {
-        // 分享到期后口令已注销：信令重连会失败，但已有连接上的传输不受影响。
-        // 不提示的话用户会以为网络恢复后还能续传。
-        this.host.notify('分享已过期，网络中断后将无法自动续传；当前传输不受影响', 'info');
+      } else {
+        // 有在途传输时信令可能再也回不来，但已有连接还能把文件传完。
+        // 不提示的话用户会以为网络恢复后还能续传（旧实现在这里只弹一条 toast）。
+        if (isShareSessionLostError(err.type)) {
+          this.host.setConnectionStatus(SHARE_SIGNALING_LOST_MESSAGE);
+        }
+        if (err.type === 'unauthorized' && !this.registration) {
+          // 分享到期后口令已注销：信令重连会失败，但已有连接上的传输不受影响。
+          this.host.notify('分享已过期，网络中断后将无法自动续传；当前传输不受影响', 'info');
+        }
       }
     }
   }
@@ -555,7 +581,10 @@ export class SenderSession {
     if (!registration) return;
 
     const resumed = await this.deps.resumeShareSession(registration);
-    if (resumed) return;
+    if (resumed) {
+      this.host.setConnectionStatus('');
+      return;
+    }
     // 窗口已过或码已被回收：不要再让 UI 展示一个连不上的分享。
     if (this.registration !== registration) return;
     // 有在途传输时绝不能走 onSessionLost：那条路径会 stopSharing 并广播
@@ -563,6 +592,7 @@ export class SenderSession {
     if (this.host.getActiveTransfers() > 0) {
       // 口令已经被服务端注销，继续展示它会让用户把死码发给别人。
       this.host.setRemainingTime('已失效');
+      this.host.setConnectionStatus(SHARE_SIGNALING_LOST_MESSAGE);
       this.host.notify('分享已失效，当前传输不受影响；需要继续分享请重新创建', 'info');
       return;
     }

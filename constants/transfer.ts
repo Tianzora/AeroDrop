@@ -33,6 +33,12 @@ export const FLOW_CONTROL = {
 export const CONNECTION_TIMINGS = {
   /** 「永久」分享的口令续期间隔（服务端 TTL 上限 24h）。 */
   SHARE_CODE_RENEWAL_INTERVAL_MS: 30 * 60 * 1000,
+  /**
+   * 屏幕共享房号连续续期失败多少次才提示用户。
+   * TTL 有 24h 余量，单次 429/抖动不该打扰正在分享的人；连续 3 次（约 1.5h）
+   * 说明链接真的要到期了，必须给 amber 提示，但不要因此停掉直播。
+   */
+  SHARE_ROOM_RENEWAL_MAX_FAILURES: 3,
   /** 接收端兑换口令的超时：断网/Worker 卡住时不能无限停在等待页。 */
   SHARE_CODE_LOOKUP_TIMEOUT_MS: 4_000,
   /** pagehide 时延后注销口令的窗口：期间原凭证可 resume，避免切后台被误杀。 */

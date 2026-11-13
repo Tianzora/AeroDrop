@@ -14,6 +14,12 @@ export const ICE_CONNECTION_FAILED_MESSAGE =
   '媒体通道建立失败（可能是网络或防火墙限制），请重试';
 export const UNKNOWN_CONNECTION_ERROR_MESSAGE =
   '连接失败，请稍后重试';
+/**
+ * 分享链接已经不能再用（口令失效/会话被接管/房号已撤销），但已有连接上的传输还能跑完。
+ * 这种状态必须可见，又不能把用户打到错误页——否则他会以为正在传的文件也挂了。
+ */
+export const SHARE_SIGNALING_LOST_MESSAGE =
+  '分享已失效，进行中的传输不受影响，新设备无法加入';
 
 /**
  * peerRuntime 的 error.type 到用户可懂文案的唯一映射点。
@@ -51,6 +57,35 @@ export const getPeerRuntimeErrorMessage = (type: string): string => {
       return '信令连接异常，请检查网络后重试';
     default:
       return UNKNOWN_CONNECTION_ERROR_MESSAGE;
+  }
+};
+
+/**
+ * 哪些 peer 错误意味着「这个分享链接已经废了」。
+ *
+ * 有在途传输时它们不该把 UI 打到错误页（传输是在已建立的 P2P 连接上跑的，跟信令无关），
+ * 但也不能继续显示「等待连接」——否则用户会把一个死码发出去。
+ * network/server-error/socket-error 不在此列：那三类由 peerRuntime 自己退避重连。
+ */
+export const isShareSessionLostError = (type?: string | null): boolean =>
+  type === 'unauthorized' ||
+  type === 'session-conflict' ||
+  type === 'invalid-id' ||
+  type === 'peer-unavailable' ||
+  type === 'disconnected';
+
+/**
+ * 接收端把发送方的拒收原因翻译成人话。
+ *
+ * `payload.reason` 是协议字段，直出会把内部标识丢给用户；已知原因走映射，
+ * 未知原因保留原文（新加的拒收理由至少还能看懂，不会变成一句空话）。
+ */
+export const getTransferRejectedMessage = (reason?: string | null): string => {
+  switch (reason) {
+    case '分享已过期':
+      return '发送方的分享已过期，请让对方重新分享';
+    default:
+      return reason?.trim() || '发送方拒绝了请求';
   }
 };
 

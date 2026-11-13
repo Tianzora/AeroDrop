@@ -27,6 +27,7 @@ const baseProps: React.ComponentProps<typeof ScreenShareUI> = {
   copied: false,
   isPeerReady: true,
   isShareLive: false,
+  shareRoomRenewalWarning: false,
   sharerFailure: null,
   dismissSharerFailure: () => {},
   recommendedViewerCount: 4,
@@ -124,6 +125,32 @@ test('未开始时也展示建议人数，且不渲染共享链接卡片', () =>
 
   assert.match(markup, /建议 4 人同时观看（依网络），最多 6 人/);
   assert.doesNotMatch(markup, /复制分享链接/);
+});
+
+test('续期连续失败：保持绿色 LIVE 的同时给出过期风险提示', () => {
+  const markup = render({
+    isSharing: true,
+    isShareLive: true,
+    shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
+    shareRoomRenewalWarning: true,
+  });
+
+  // 续期失败不影响当前观看，所以不清 LIVE；但要提前告诉主控链接会过期。
+  assert.match(markup, /正在共享/);
+  assert.match(markup, /分享链接续期失败，到期后观众将无法再加入/);
+});
+
+test('信令未就绪时不叠续期提示：那一刻更该说的是链接暂时不可用', () => {
+  const markup = render({
+    isSharing: true,
+    isShareLive: false,
+    isPeerReady: false,
+    shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
+    shareRoomRenewalWarning: true,
+  });
+
+  assert.match(markup, /信令中断，新观众暂时无法加入/);
+  assert.doesNotMatch(markup, /分享链接续期失败/);
 });
 
 test('未开始时保留引导头部与开始按钮', () => {
