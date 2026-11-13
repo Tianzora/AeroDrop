@@ -188,7 +188,7 @@ test('planSessionAdmission is read-only and asks for rotation only for bound ses
       incomingSecretHash: secretHash,
       now: 1_000,
     }),
-    { allowed: true, needsRotation: true, boundSecretHash: secretHash }
+    { allowed: true, needsRotation: true, boundSecretHash: secretHash, expectedProofHash: null }
   );
   assert.equal(firstBind.writes().length, 0, 'planning must not write');
 
@@ -199,7 +199,12 @@ test('planSessionAdmission is read-only and asks for rotation only for bound ses
     incomingProofHash: undefined,
     now: 500,
   });
-  assert.deepEqual(boundPlan, { allowed: true, needsRotation: true, boundSecretHash: secretHash });
+  assert.deepEqual(boundPlan, {
+    allowed: true,
+    needsRotation: true,
+    boundSecretHash: secretHash,
+    expectedProofHash: proofHash,
+  });
   assert.equal(bound.writes().length, 0, 'a later quota/slot failure must not invalidate the old proof');
 });
 
@@ -559,7 +564,12 @@ test('appendPendingSessionProof lets the delivered proof reconnect after a faile
   // 掉线的客户端手里只有新 proof：判定必须放行，否则这条会话永远回不来。
   assert.deepEqual(
     planSessionAdmission(fake.sql, { peerId: 'peer-1', incomingProofHash: nextProofHash, now: 6_000 }),
-    { allowed: true, needsRotation: true, boundSecretHash: secretHash }
+    {
+      allowed: true,
+      needsRotation: true,
+      boundSecretHash: secretHash,
+      expectedProofHash: proofHash,
+    }
   );
 
   const stored = fake.bindings.get('peer-1');

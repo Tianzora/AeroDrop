@@ -106,6 +106,7 @@ import {
   classifySignalingSessionRace,
   planSignalingRegistration,
 } from '../services/signaling/registrationPlan';
+import { executeRegistrationPlan } from '../services/signaling/registrationExecutor';
 import {
   rendezvousShardIndex,
   resolveSignalingShardCount,
@@ -860,7 +861,12 @@ type SessionBindingAdmission =
        * 等待落库的轮换。proof 已经在 registered 帧里交给客户端，落库必须晚于「确认能投递」，
        * 否则帧丢失 + 超出 proof 宽限期会让客户端永久 4010。
        */
-      pending?: { proofHash: string; boundSecretHash: string | null };
+      pending?: {
+        proofHash: string;
+        boundSecretHash: string | null;
+        /** 判定时绑定行里的权威 proof 摘要；commit 用它做 CAS，避免迟到写入覆盖接管者。 */
+        expectedProofHash: string | null;
+      };
     };
 
 export class SignalingHub extends DurableObject<Env> {
@@ -914,7 +920,8 @@ export class SignalingHub extends DurableObject<Env> {
       this.sessionsByPeer.set(attachment.peerId, ws);
       this.peerBySocket.set(ws, attachment.peerId);
       this.clientBySocket.set(ws, attachment.clientKey || 'ip:unknown');
-      this.sessionLimiter.tryAcquire(attachment.clientKey || 'ip:unknown');
+      // 恢复已有 socket 必须计数（不判上限）：漏计等于把每 IP 上限悄悄翻倍。
+      this.sessionLimiter.restore(attachment.clientKey || 'ip:unknown');
       if (attachment.slotId) {
         this.slotBySocket.set(ws, attachment.slotId);
         this.slotOwnerSocket.set(attachment.slotId, ws);
@@ -964,20 +971,20 @@ export class SignalingHub extends DurableObject<Env> {
     }
     const clientKey = resolveSignalingClientKey(request.headers);
     const remoteLookup = this.shouldUseRemoteShareCodeLookup();
-    // 分片模式下每次注册要跨 DO 回源查口令，且发生在会话名额与消息节流之前；
-    // 先消耗 per-isolate 握手预算，别让未认证的握手放大成 DO 调用风暴。
-    // 预算只在分片模式生效，单例部署不经过这里。
-    if (remoteLookup) {
-      const budget = signalingHandshakeBudget.consume(clientKey, Date.now());
-      if (!budget.allowed) {
-        signalingTelemetry.record('signal_handshake_budget_exhausted', {
-          retryAfterMs: budget.retryAfterMs,
-        });
-        return new Response('Too Many Requests', {
-          status: 429,
-          headers: { 'Retry-After': String(getSignalingHandshakeRetryAfterSeconds(budget.retryAfterMs)) },
-        });
-      }
+    // 握手预算：每次注册都可能换来一次绑定判定（分片模式下是跨 DO RPC），而且发生在
+    // 会话名额与消息节流之前。单例模式下它同样有意义——未认证的垃圾握手会直接打到全局
+    // 唯一的 DO 上，先把它们挡在 acceptWebSocket 之前。预算按出口 IP 计，正常页面
+    // （一次传输 + 一次分享）远低于阈值；超限返回 429 + Retry-After，客户端按可重试处理。
+    const budget = signalingHandshakeBudget.consume(clientKey, Date.now());
+    if (!budget.allowed) {
+      signalingTelemetry.record('signal_handshake_budget_exhausted', {
+        retryAfterMs: budget.retryAfterMs,
+        shardCount: this.getSignalingShardCount(),
+      });
+      return new Response('Too Many Requests', {
+        status: 429,
+        headers: { 'Retry-After': String(getSignalingHandshakeRetryAfterSeconds(budget.retryAfterMs)) },
+      });
     }
 
     const codeParam = url.searchParams.get('code');
@@ -1129,164 +1136,141 @@ export class SignalingHub extends DurableObject<Env> {
       return new Response(null, { status: 101, webSocket: client });
     };
 
-    for (const action of actions) {
-      switch (action.kind) {
-        case 'reject-conflict': {
-          // 拒绝路径不改 sessionsByPeer / limiter：被拒的连接本来就没有建立，动 map 会把
-          // 正在服务的那条挤成幽灵连接。
-          this.sendSessionConflict(server, peerId, now);
-          return new Response(null, { status: 101, webSocket: client });
-        }
-        case 'reserve-global-slot': {
-          // 分片后「每客户端 12 会话」必须全局计数：每个片各算一次会把上限放大成 12×N。
-          // 权威计数在 shard 0（与 ice-config 全局计数同处），只有分片 > 1 时才启用；
-          // 单例模式完全走原来的内存计数，行为不变。
-          // 接管时复用旧槽位（reserve 会原地续期并转移归属）。先释放再领取的话，
-          // 一旦领取失败，旧会话的名额就白丢了；反复尝试可以把全局上限压到 0。
-          const slotId =
-            isTakeover && existingAttachment?.slotId
-              ? existingAttachment.slotId
-              : crypto.randomUUID();
-          if (!(await this.reserveSignalingSessionSlot(slotId, clientKey))) {
-            signalingTelemetry.record('signal_session_slot_rejected', {
-              shardCount: this.getSignalingShardCount(),
-            });
-            server.send(
-              JSON.stringify({
-                type: 'error',
-                code: 'rate-limited',
-                message: 'Too many signaling sessions',
-              } satisfies SignalingEnvelope)
-            );
-            server.close(4029, 'Too many sessions');
-            return new Response(null, { status: 101, webSocket: client });
-          }
-          sessionSlotId = slotId;
-          this.slotBySocket.set(server, slotId);
-          const raced = await rejectRaced();
-          if (raced) return raced;
-          break;
-        }
-        case 'reserve-seat': {
-          // transfer：席位此刻记在旧 socket 上，接管块会把它从 clientBySocket 摘除
-          // （旧 socket 关闭时不再释放），所以直接转移，不 release 也不 tryAcquire。
-          if (action.mode !== 'acquire') break;
-          if (!this.sessionLimiter.tryAcquire(clientKey)) {
-            await rollbackQuota();
-            server.send(
-              JSON.stringify({
-                type: 'error',
-                code: 'rate-limited',
-                message: 'Too many signaling sessions',
-              } satisfies SignalingEnvelope)
-            );
-            server.close(4029, 'Too many sessions');
-            return new Response(null, { status: 101, webSocket: client });
-          }
-          seatAcquired = true;
-          const raced = await rejectRaced();
-          if (raced) return raced;
-          break;
-        }
-        case 'eject-existing': {
-          const raced = await rejectRaced();
-          if (raced) return raced;
-          if (existing) {
-            this.sessionsByPeer.delete(peerId);
-            this.peerBySocket.delete(existing);
-            this.clientBySocket.delete(existing);
-            if (existingClientKey !== undefined && existingClientKey !== clientKey) {
-              this.sessionLimiter.release(existingClientKey);
-            }
-            try {
-              existing.send(
-                JSON.stringify({
-                  type: 'error',
-                  code: 'unavailable-id',
-                  message: 'Peer ID taken over by a newer connection',
-                } satisfies SignalingEnvelope)
-              );
-            } catch (error) {
-              // 旧 socket 可能已经断开；记录而不是静默吞掉，否则排障时看不到接管失败。
-              console.warn('Failed to notify replaced signaling session', { peerId, error });
-            } finally {
-              // 通知失败也必须关掉旧会话，否则它会以「已注册」的假象继续占着 peerId。
-              try {
-                existing.close(4011, 'Peer ID taken over by a newer connection');
-              } catch (error) {
-                console.warn('Failed to close replaced signaling session', { peerId, error });
-              }
-            }
-          }
-          break;
-        }
-        case 'send-registered': {
-          const raced = await rejectRaced();
-          if (raced) return raced;
-          this.sessionsByPeer.set(peerId, server);
-          this.peerBySocket.set(server, peerId);
-          this.clientBySocket.set(server, clientKey);
-          // 摘要要跨 proof 轮换保留：绑定 24h 过期后，attachment 是唯一的兜底依据，
-          // 不能因为「这次只带了 proof」就把已有摘要抹掉。
-          const attachmentSecretHash = sessionSecretHash ?? existingAttachment?.sessionSecretHash;
-          if (sessionSlotId || attachmentSecretHash) {
-            // 名额 id 必须进 attachment：DO 休眠恢复后仍能按 socket 释放。
-            server.serializeAttachment({
-              clientKey,
-              peerId,
-              ...(attachmentSecretHash ? { sessionSecretHash: attachmentSecretHash } : {}),
-              ...(sessionSlotId ? { slotId: sessionSlotId } : {}),
-            } satisfies SessionAttachment);
-          }
-          if (sessionSlotId) {
-            this.slotOwnerSocket.set(sessionSlotId, server);
-            this.slotRefreshedAt.set(server, now);
-          }
-          // proof 明文只在这一帧出现一次，绑定表里存的是它的 SHA-256 摘要。
-          // 轮换落库必须在 registered 之后：帧丢了客户端手里只有旧 proof，先落库会在宽限期后
-          // 让旧 proof 失效，重连直接 4010。helper 会把「投递失败 → 不落库」钉死成顺序契约；
-          // 落库重试仍失败时由 recover 把新 proof 挂进历史，客户端下次带新 proof 仍能进。
-          await deliverRegisteredThenCommit({
-            sendRegistered: () => {
-              server.send(
-                JSON.stringify({
-                  type: 'registered',
-                  peerId,
-                  ...(admission.allowed && admission.proof
-                    ? { sessionProof: admission.proof }
-                    : {}),
-                } satisfies SignalingEnvelope)
-              );
-            },
-            commit: () => this.finalizeSignalingSessionAdmission(peerId, admission),
-            onCommitAttemptFailed: (error, attempt) => {
-              console.warn('Signaling session-binding commit attempt failed', { attempt, error });
-            },
-            onCommitError: (error, attempts) => {
-              signalingTelemetry.record('signal_session_binding_commit_failed', {
-                shardCount: this.getSignalingShardCount(),
-                attempt: attempts,
-              });
-              console.warn('Signaling session-binding commit failed', { peerId, error });
-            },
-            recover: () => this.recoverSignalingSessionAdmission(peerId, admission),
-            onRecoverError: (error) => {
-              signalingTelemetry.record('signal_session_binding_commit_failed', {
-                shardCount: this.getSignalingShardCount(),
-                attempt: SESSION_COMMIT_ATTEMPTS,
-                recovery: 'pending-proof-failed',
-              });
-              console.warn('Signaling pending-proof fallback failed', { peerId, error });
-            },
+    const execution = await executeRegistrationPlan(actions, {
+      rejectConflict: async () => {
+        this.sendSessionConflict(server, peerId, now);
+        return new Response(null, { status: 101, webSocket: client });
+      },
+      reserveGlobalSlot: async () => {
+        // 接管时复用旧槽位（reserve 会原地续期并转移归属）。先释放再领取的话，一旦领取
+        // 失败，旧会话的名额就白丢了；反复尝试可以把全局上限压到 0。
+        const slotId =
+          isTakeover && existingAttachment?.slotId
+            ? existingAttachment.slotId
+            : crypto.randomUUID();
+        if (!(await this.reserveSignalingSessionSlot(slotId, clientKey))) {
+          signalingTelemetry.record('signal_session_slot_rejected', {
+            shardCount: this.getSignalingShardCount(),
           });
-          break;
+          return null;
         }
-        case 'commit-binding':
-          // 与 send-registered 成对执行：顺序契约只住在 deliverRegisteredThenCommit 里，
-          // 不在这里再排一次。
-          break;
-      }
-    }
+        sessionSlotId = slotId;
+        this.slotBySocket.set(server, slotId);
+        return slotId;
+      },
+      acquireSeat: () => {
+        if (!this.sessionLimiter.tryAcquire(clientKey)) return false;
+        seatAcquired = true;
+        return true;
+      },
+      rollbackQuota,
+      rejectRaced,
+      ejectExisting: () => {
+        if (!existing) return;
+        // 只删「确实是这条旧 socket」的映射：await 期间 map 可能已被更晚的连接改写，
+        // 无条件 delete 会把刚接管的赢家从表里抹掉（它已经收到 registered，成了幽灵）。
+        if (this.sessionsByPeer.get(peerId) === existing) this.sessionsByPeer.delete(peerId);
+        if (this.peerBySocket.get(existing) === peerId) this.peerBySocket.delete(existing);
+        if (this.clientBySocket.get(existing) === existingClientKey) {
+          this.clientBySocket.delete(existing);
+        }
+        if (existingClientKey !== undefined && existingClientKey !== clientKey) {
+          this.sessionLimiter.release(existingClientKey);
+        }
+        try {
+          existing.send(
+            JSON.stringify({
+              type: 'error',
+              code: 'unavailable-id',
+              message: 'Peer ID taken over by a newer connection',
+            } satisfies SignalingEnvelope)
+          );
+        } catch (error) {
+          // 旧 socket 可能已经断开；记录而不是静默吞掉，否则排障时看不到接管失败。
+          console.warn('Failed to notify replaced signaling session', { peerId, error });
+        } finally {
+          // 通知失败也必须关掉旧会话，否则它会以「已注册」的假象继续占着 peerId。
+          try {
+            existing.close(4011, 'Peer ID taken over by a newer connection');
+          } catch (error) {
+            console.warn('Failed to close replaced signaling session', { peerId, error });
+          }
+        }
+      },
+      sendRegistered: async () => {
+        this.sessionsByPeer.set(peerId, server);
+        this.peerBySocket.set(server, peerId);
+        this.clientBySocket.set(server, clientKey);
+        // 摘要要跨 proof 轮换保留：绑定 24h 过期后，attachment 是唯一的兜底依据，不能因为
+        // 「这次只带了 proof」就把已有摘要抹掉。
+        const attachmentSecretHash = sessionSecretHash ?? existingAttachment?.sessionSecretHash;
+        if (sessionSlotId || attachmentSecretHash) {
+          // 名额 id 必须进 attachment：DO 休眠恢复后仍能按 socket 释放。
+          server.serializeAttachment({
+            clientKey,
+            peerId,
+            ...(attachmentSecretHash ? { sessionSecretHash: attachmentSecretHash } : {}),
+            ...(sessionSlotId ? { slotId: sessionSlotId } : {}),
+          } satisfies SessionAttachment);
+        }
+        if (sessionSlotId) {
+          this.slotOwnerSocket.set(sessionSlotId, server);
+          this.slotRefreshedAt.set(server, now);
+        }
+        // proof 明文只在这一帧出现一次，绑定表里存的是它的 SHA-256 摘要。轮换落库必须在
+        // registered 之后：帧丢了客户端手里只有旧 proof，先落库会在宽限期后让旧 proof
+        // 失效，重连直接 4010。helper 把「投递失败 → 不落库」钉死成顺序契约；落库重试仍
+        // 失败时由 recover 把新 proof 挂进历史，客户端下次带新 proof 仍能进。
+        await deliverRegisteredThenCommit({
+          sendRegistered: () => {
+            server.send(
+              JSON.stringify({
+                type: 'registered',
+                peerId,
+                ...(admission.allowed && admission.proof
+                  ? { sessionProof: admission.proof }
+                  : {}),
+              } satisfies SignalingEnvelope)
+            );
+          },
+          commit: () => this.finalizeSignalingSessionAdmission(peerId, admission),
+          onCommitAttemptFailed: (error, attempt) => {
+            console.warn('Signaling session-binding commit attempt failed', { attempt, error });
+          },
+          onCommitError: (error, attempts) => {
+            signalingTelemetry.record('signal_session_binding_commit_failed', {
+              shardCount: this.getSignalingShardCount(),
+              attempt: attempts,
+            });
+            console.warn('Signaling session-binding commit failed', { peerId, error });
+          },
+          recover: () => this.recoverSignalingSessionAdmission(peerId, admission),
+          onRecoverError: (error) => {
+            signalingTelemetry.record('signal_session_binding_commit_failed', {
+              shardCount: this.getSignalingShardCount(),
+              attempt: SESSION_COMMIT_ATTEMPTS,
+              recovery: 'pending-proof-failed',
+            });
+            console.warn('Signaling pending-proof fallback failed', { peerId, error });
+          },
+        });
+      },
+      sendRateLimited: () => {
+        server.send(
+          JSON.stringify({
+            type: 'error',
+            code: 'rate-limited',
+            message: 'Too many signaling sessions',
+          } satisfies SignalingEnvelope)
+        );
+        server.close(4029, 'Too many sessions');
+        return new Response(null, { status: 101, webSocket: client });
+      },
+    });
+    return execution.kind === 'respond'
+      ? execution.response
+      : new Response(null, { status: 101, webSocket: client });
+
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -1561,7 +1545,15 @@ export class SignalingHub extends DurableObject<Env> {
     // finalizeSignalingSessionAdmission 在确认投递之后完成。
     const proof = createSessionProof();
     const proofHash = await hashSessionProof(proof);
-    return { allowed: true, proof, pending: { proofHash, boundSecretHash: plan.boundSecretHash ?? null } };
+    return {
+      allowed: true,
+      proof,
+      pending: {
+        proofHash,
+        boundSecretHash: plan.boundSecretHash ?? null,
+        expectedProofHash: plan.expectedProofHash ?? null,
+      },
+    };
   }
 
   /**
@@ -1573,18 +1565,29 @@ export class SignalingHub extends DurableObject<Env> {
     admission: SessionBindingAdmission
   ): Promise<void> {
     if (!admission.allowed || !admission.pending) return;
-    const { proofHash, boundSecretHash } = admission.pending;
+    const { proofHash, boundSecretHash, expectedProofHash } = admission.pending;
     const now = Date.now();
     if (this.isShardZero()) {
-      commitSessionBindingRotation(this.getSql(), {
+      const result = commitSessionBindingRotation(this.getSql(), {
         peerId,
         now,
         proofHash,
         boundSecretHash,
+        expectedProofHash,
         graceMs: SESSION_SECRET_HASH_GRACE_MS,
         proofGraceMs: SESSION_PROOF_GRACE_MS,
         ttlMs: SIGNALING_SESSION_BINDING_MS,
       });
+      if (result.superseded) {
+        // 这次注册在 await 期间被同 peerId 的后续注册接管：对方已经收到并落库了新的
+        // 权威 proof，迟到写入会把它覆盖掉，接管者随后 4010 锁死。这里只记账，不重试。
+        signalingTelemetry.record('signal_session_binding_commit_superseded', {
+          shardCount: this.getSignalingShardCount(),
+        });
+        console.warn('Signaling session-binding commit superseded by a newer registration', {
+          peerId,
+        });
+      }
       return;
     }
     const response = await this.signalingStub(signalingShardName(0)).fetch(
@@ -1597,6 +1600,7 @@ export class SignalingHub extends DurableObject<Env> {
           now,
           proofHash,
           boundSecretHash,
+          expectedProofHash,
         }),
       })
     );
@@ -1674,16 +1678,26 @@ export class SignalingHub extends DurableObject<Env> {
       if (!proofHash || proofHash === '__invalid__' || boundSecretHash === '__invalid__') {
         return json({ committed: false }, { status: 400 });
       }
-      commitSessionBindingRotation(this.getSql(), {
+      // expectedProofHash 缺失/null 都参与 CAS：null 表示「判定时还没有绑定行」，
+      // 若此刻已经有别的注册写入了权威 proof，这次迟到提交必须放弃。
+      const expectedProofHash =
+        body?.expectedProofHash === null || body?.expectedProofHash === undefined
+          ? null
+          : pickHash(body.expectedProofHash);
+      if (expectedProofHash === '__invalid__') {
+        return json({ committed: false }, { status: 400 });
+      }
+      const result = commitSessionBindingRotation(this.getSql(), {
         peerId,
         now,
         proofHash,
         boundSecretHash: boundSecretHash ?? null,
+        expectedProofHash,
         graceMs: SESSION_SECRET_HASH_GRACE_MS,
         proofGraceMs: SESSION_PROOF_GRACE_MS,
         ttlMs: SIGNALING_SESSION_BINDING_MS,
       });
-      return json({ committed: true });
+      return json({ committed: !result.superseded, superseded: result.superseded });
     }
 
     // 轮换落库最终失败后的自愈：把已下发的新 proof 挂进历史（分片模式下由持有 socket

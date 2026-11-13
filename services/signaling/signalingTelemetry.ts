@@ -29,6 +29,8 @@ export type SignalingTelemetryEvent =
   | 'signal_session_binding_unavailable'
   /** proof 轮换已在 registered 之后签发，但落库失败（帧已发，无法回滚）。 */
   | 'signal_session_binding_commit_failed'
+  /** 迟到的 proof 轮换落库发现绑定已被更晚的注册接管，放弃写入（CAS 失配）。 */
+  | 'signal_session_binding_commit_superseded'
   /** 口令查询未命中（含全局未知码预算耗尽）：只记标量，不记码/peerId。 */
   | 'share_code_lookup_miss';
 

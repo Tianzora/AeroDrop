@@ -132,3 +132,22 @@ test('never evicts still-blocked buckets when the bucket table is full', () => {
   const stillBlocked = limiter.recordOfferAttempt({ clientKey: 'ip:blocked', now: 2_000 });
   assert.equal(stillBlocked.allowed, false);
 });
+
+test('restored sockets are counted even past the cap, so hibernation cannot widen the limit', () => {
+  const limiter = createSignalingSessionLimiter(2);
+
+  limiter.restore('ip:a');
+  limiter.restore('ip:a');
+  limiter.restore('ip:a');
+
+  // 恢复的三条本来就活着，计数必须是 3；否则上限会被悄悄放宽成「3 + 2」。
+  assert.equal(limiter.getActiveSessionCount(), 3);
+  assert.equal(limiter.tryAcquire('ip:a'), false, '计数已超上限时新 socket 必须被拒');
+  assert.equal(limiter.tryAcquire('ip:b'), true, '按 clientKey 分桶，别的出口不受影响');
+
+  limiter.release('ip:a');
+  assert.equal(limiter.getActiveSessionCount(), 3);
+  assert.equal(limiter.tryAcquire('ip:a'), false);
+  limiter.release('ip:a');
+  assert.equal(limiter.tryAcquire('ip:a'), true, '降到上限以下后恢复准入');
+});

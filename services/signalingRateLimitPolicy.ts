@@ -92,6 +92,13 @@ export const MAX_ACTIVE_SIGNALING_SESSIONS_PER_CLIENT = 12;
 
 export type SignalingSessionLimiter = {
   tryAcquire(clientKey: string): boolean;
+  /**
+   * 统计一条已经存在的 socket（DO 休眠恢复时用）。
+   *
+   * 恢复的 socket 早于本次实例出生、也无法回收，所以这里只计数不判上限：漏计会让上限
+   * 被悄悄放宽（恢复 12 条后还能再进 12 条），而拒绝计数并不会少接一条连接。
+   */
+  restore(clientKey: string): void;
   release(clientKey: string): void;
   getActiveSessionCount(): number;
 };
@@ -108,6 +115,9 @@ export const createSignalingSessionLimiter = (
 
       activeSessions.set(clientKey, active + 1);
       return true;
+    },
+    restore(clientKey: string): void {
+      activeSessions.set(clientKey, (activeSessions.get(clientKey) || 0) + 1);
     },
     release(clientKey: string): void {
       const active = activeSessions.get(clientKey) || 0;

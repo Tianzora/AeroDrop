@@ -34,11 +34,20 @@ const HOUR = 60 * 60 * 1000;
  */
 const createSqlite = (db: DatabaseSync): SqlLike => ({
   exec<T = Record<string, unknown>>(text: string, ...params: unknown[]) {
+    // Durable Object 的 exec 一次只执行一条语句；多语句在这里静默成功，会让迁移脚本在
+    // 生产里变成不可见的「半条执行」。
+    const withoutTrailing = text.trim().replace(/;+$/, '');
+    if (withoutTrailing.includes(';')) {
+      throw new Error(`sqlite test adapter only executes a single statement: ${text}`);
+    }
     const statement = db.prepare(text);
     const returnsRows = /^\s*(SELECT|PRAGMA|WITH)/i.test(text) || /\bRETURNING\b/i.test(text);
     if (returnsRows) {
       const rows = statement.all(...(params as SQLInputValue[])) as T[];
-      return { toArray: () => rows, rowsWritten: rows.length };
+      // DO 的 rowsWritten 语义是实际写入行数（= changes），不是 RETURNING 的行数：
+      // ON CONFLICT DO NOTHING 时两者会分叉，用 rows.length 会掩盖「什么都没写」。
+      const changes = db.prepare('SELECT changes() AS count').get() as { count: number };
+      return { toArray: () => rows, rowsWritten: Number(changes.count) };
     }
     const info = statement.run(...(params as SQLInputValue[]));
     return { toArray: () => [] as T[], rowsWritten: Number(info.changes) };
@@ -256,5 +265,114 @@ test('口令表：RETURNING 语义、延迟注销与墓碑在真实库上成立'
     '过期的口令不能被当成活跃口令返回'
   );
   assert.equal(countRows(db, 'share_codes'), 0);
+  db.close();
+});
+
+
+test('旧部署的 share_codes 表会补上 revoke_after 列，已有行不受影响', () => {
+  const db = new DatabaseSync(':memory:');
+  db.exec(
+    'CREATE TABLE share_codes (' +
+      'code TEXT PRIMARY KEY, peer_id TEXT NOT NULL, secret_hash TEXT NOT NULL, ' +
+      'expires_at INTEGER NOT NULL, created_at INTEGER NOT NULL)'
+  );
+  db.prepare('INSERT INTO share_codes VALUES (?, ?, ?, ?, ?)').run(
+    'ABC123',
+    'peer-old',
+    'b'.repeat(64),
+    9_999_999_999_999,
+    1
+  );
+
+  const sql = createSqlite(db);
+  initializeShareCodeSchema(sql);
+  initializeShareCodeSchema(sql);
+
+  const columns = db
+    .prepare("PRAGMA table_info('share_codes')")
+    .all()
+    .map((column) => String((column as { name: string }).name));
+  assert.ok(columns.includes('revoke_after'), '旧库必须能自动补列');
+  const row = db
+    .prepare("SELECT peer_id, revoke_after FROM share_codes WHERE code = 'ABC123'")
+    .get() as { peer_id: string; revoke_after: number | null };
+  assert.equal(row.peer_id, 'peer-old');
+  assert.equal(row.revoke_after, null);
+  db.close();
+});
+
+test('RETURNING 写入的 rowsWritten 取 changes，而不是返回的行数', () => {
+  const db = new DatabaseSync(':memory:');
+  const sql = createSqlite(db);
+  initializeSessionSlotSchema(sql);
+  const reserve = (clientKey: string, now: number) =>
+    applySessionSlotReserve(sql, {
+      slotId: 'slot-a',
+      clientKey,
+      now,
+      maxSessions: 12,
+      ttlMs: 60_000,
+    });
+  assert.equal(reserve('client-1', 1_000), true);
+  // 同 slot 的原地转移只写一行；若 rowsWritten 用 rows.length 而不是 changes，
+  // 「没写进去」也会被当成成功。
+  assert.equal(reserve('client-2', 2_000), true);
+  db.close();
+});
+
+test('适配器拒绝一次执行多条语句（与 DO 的 exec 语义一致）', () => {
+  const db = new DatabaseSync(':memory:');
+  const sql = createSqlite(db);
+  assert.throws(
+    () => sql.exec('CREATE TABLE a (x INTEGER); CREATE TABLE b (y INTEGER)'),
+    /single statement/
+  );
+  db.close();
+});
+
+
+test('迟到的轮换提交不会覆盖接管者刚写入的权威 proof（CAS）', () => {
+  const db = new DatabaseSync(':memory:');
+  const sql = createSqlite(db);
+  initializeSessionBindingSchema(sql);
+  const base = {
+    peerId: 'peer-cas',
+    graceMs: 10 * 60 * 1000,
+    proofGraceMs: 10 * 60 * 1000,
+    ttlMs: HOUR,
+  };
+  const first = commitSessionBindingRotation(sql, {
+    ...base,
+    now: 1_000,
+    proofHash: 'a'.repeat(64),
+    boundSecretHash: secretHash,
+    expectedProofHash: null,
+  });
+  assert.equal(first.superseded, false);
+
+  // 接管者判定时读到的是 a，落库 b。
+  const takeover = commitSessionBindingRotation(sql, {
+    ...base,
+    now: 2_000,
+    proofHash: 'b'.repeat(64),
+    expectedProofHash: 'a'.repeat(64),
+  });
+  assert.equal(takeover.superseded, false);
+
+  // 迟到的那次提交仍然以为 a 是权威值：必须放弃写入，否则接管者的 b 会被挤进历史、
+  // 十分钟后失效，接管者永久 4010。
+  const late = commitSessionBindingRotation(sql, {
+    ...base,
+    now: 3_000,
+    proofHash: 'c'.repeat(64),
+    expectedProofHash: 'a'.repeat(64),
+  });
+  assert.equal(late.superseded, true);
+
+  const stored = db
+    .prepare("SELECT proof_hash, recent_hashes FROM signaling_session_bindings WHERE peer_id = 'peer-cas'")
+    .get() as { proof_hash: string; recent_hashes: string };
+  assert.equal(stored.proof_hash, 'b'.repeat(64), '权威 proof 必须还是接管者的');
+  assert.equal(stored.recent_hashes.includes('c'.repeat(64)), false, '被放弃的轮换不能进历史');
   db.close();
 });

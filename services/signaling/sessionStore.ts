@@ -63,6 +63,12 @@ export type SessionAdmissionPlan =
       needsRotation: true;
       /** 判定时看到的绑定摘要；commit 时绑定行可能已被改写，用它兜底。 */
       boundSecretHash: string | null;
+      /**
+       * 判定时绑定行里的 proof 摘要（没有绑定行为 null）。commit 用它做 CAS：
+       * 一次注册可能在 await 期间被同 peerId 的后续注册接管，迟到的 commit 如果把
+       * 自己的 proof 写回去，就会覆盖接管者刚签发的权威 proof。
+       */
+      expectedProofHash: string | null;
     };
 
 /** 历史 proof 是 JSON 文本列；解析失败按「没有历史」处理，绝不让坏数据变成放行。 */
@@ -201,7 +207,12 @@ export const planSessionAdmission = (
   if (binding === null && boundSecretHash === undefined) {
     return { allowed: true, needsRotation: false };
   }
-  return { allowed: true, needsRotation: true, boundSecretHash: boundSecretHash ?? null };
+  return {
+    allowed: true,
+    needsRotation: true,
+    boundSecretHash: boundSecretHash ?? null,
+    expectedProofHash: binding?.proofHash ?? null,
+  };
 };
 
 export type SessionBindingRotation = {
@@ -253,6 +264,11 @@ export const resolveSessionBindingRotation = (input: {
  * 轮换是读改写：await 期间另一条注册可能已经换过 proof。用判定时的旧快照构造历史会把
  * 对方刚签发的那份挤掉，所以落库前重读。
  */
+export type SessionBindingCommitResult = SessionBindingRotation & {
+  /** true 表示本次轮换已被更晚的注册接管，什么都没写。 */
+  superseded: boolean;
+};
+
 export const commitSessionBindingRotation = (
   sql: SqlLike,
   input: {
@@ -260,12 +276,26 @@ export const commitSessionBindingRotation = (
     now: number;
     proofHash: string;
     boundSecretHash?: string | null;
+    /** 判定时看到的 proof 摘要；传入即开启 CAS，不一致时放弃写入。 */
+    expectedProofHash?: string | null;
     graceMs: number;
     proofGraceMs: number;
     ttlMs: number;
   }
-): SessionBindingRotation => {
+): SessionBindingCommitResult => {
   const snapshot = findSessionBinding(sql, input.peerId, input.now);
+  if (input.expectedProofHash !== undefined) {
+    const current = snapshot?.proofHash?.toLowerCase() ?? null;
+    const expected = input.expectedProofHash?.toLowerCase() ?? null;
+    if (current !== expected) {
+      return {
+        secretHash: snapshot?.secretHash ?? input.boundSecretHash ?? null,
+        secretHashExpiresAt: snapshot?.secretHashExpiresAt ?? 0,
+        secretHashCleared: snapshot === null,
+        superseded: true,
+      };
+    }
+  }
   const rotation = resolveSessionBindingRotation({
     current: snapshot,
     fallbackSecretHash: input.boundSecretHash,
@@ -286,7 +316,7 @@ export const commitSessionBindingRotation = (
     now: input.now,
     ttlMs: input.ttlMs,
   });
-  return rotation;
+  return { ...rotation, superseded: false };
 };
 
 /**
