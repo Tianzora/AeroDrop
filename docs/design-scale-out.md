@@ -260,7 +260,7 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 
 | 设计项 | 代码 | 说明 |
 | --- | --- | --- |
-| 会话凭证从静态 bearer 改为可轮换 proof（正文 §2.3 的前提） | `services/signaling/sessionBinding.ts`、`services/peerRuntime.ts`、`src/worker.ts` | 首次注册用 `sessionSecretHash` 绑定，服务端签发 `sessionProof`（32 字节 hex，明文只出现在 `registered` 帧一次，库里只存 SHA-256）；之后每次注册只带 proof 并轮换，旧 proof 留 2 分钟宽限期，避免「新 proof 未送达就断线」误拒合法客户端。静态摘要只在首次绑定后 10 分钟内兜底（`registered` 帧可能丢），过期后必须用 proof；轮换是读改写，落库前重读绑定，避免并发注册把对方刚签发的 proof 挤出。绑定持久化在 `signaling_session_bindings`（24h），因此 socket 断开期间 peerId 也不能被无凭证抢注。 |
+| 会话凭证从静态 bearer 改为可轮换 proof（正文 §2.3 的前提） | `services/signaling/sessionBinding.ts`、`services/peerRuntime.ts`、`src/worker.ts` | 首次注册用 `sessionSecretHash` 绑定，服务端签发 `sessionProof`（32 字节 hex，明文只出现在 `registered` 帧一次，库里只存 SHA-256）；之后每次注册只带 proof 并轮换，旧 proof 留 10 分钟宽限期（`SESSION_PROOF_GRACE_MS`），避免「新 proof 未送达就断线」误拒合法客户端。静态摘要只在首次绑定后 10 分钟内兜底（`registered` 帧可能丢），过期后必须用 proof；轮换是读改写，落库前重读绑定，避免并发注册把对方刚签发的 proof 挤出。绑定持久化在 `signaling_session_bindings`（24h），因此 socket 断开期间 peerId 也不能被无凭证抢注。 |
 | 分片键与片名（§2.2） | `services/signaling/shardRouting.ts` | `rendezvousShardIndex(peerId, shardCount)`；shard 0 沿用 `global-signaling-hub`，新片 `signaling-shard-<i>`；`SIGNALING_SHARD_COUNT` 未设置时恒为 1，行为与单例一致。 |
 | WS 路由与跨片投递（§2.2/§2.5 的过渡形态） | `src/worker.ts` | `/ws-signaling` 按 rendezvous 选片；DO 内 `deliverSignaling` 发现目标不在本片时 POST `/internal/deliver-signaling`，查不到回 `peer-unavailable`；同一 socket 的投递按 Promise 链串行，避免 await RPC 时后续帧插队（ICE 先于 offer 到达）。 |
 | 口令仍只在 shard 0（§2.3） | `src/worker.ts` | 非 0 片注册先经 `/internal/lookup-share-codes` 回源取记录，再交给同步的 `resolveShareCodeRegistration`；回源失败按查不到处理（fail closed）。 |

@@ -36,7 +36,8 @@ export const collectTestFiles = (targets) => {
       return;
     }
 
-    if (resolvedPath.endsWith('.test.ts')) {
+    // .test.tsx 也要收：UI 测试用 JSX 写在 .tsx 里，只收 .test.ts 会让它们静默不跑。
+    if (resolvedPath.endsWith('.test.ts') || resolvedPath.endsWith('.test.tsx')) {
       discovered.add(resolvedPath);
     }
   };
