@@ -176,7 +176,10 @@ let inflightCfIceConfig: Promise<IceConfigPayload | null> | null = null;
 const SIGNALING_DO_NAME = 'global-signaling-hub';
 
 // Workers Logs 就是这个进程的指标管道：一行一个 JSON，按 event 计数即可。
-const signalingTelemetry = createSignalingTelemetry((line) => console.log(line));
+// 前缀不能省：Workers Logs 会把「整行是合法 JSON」的日志拆成结构化属性，message 列为空，
+// 而告警的 SQL 过滤器只能查 message 这类字符串列（自定义属性不是可查询列）。加一个普通词
+// 让整行不再是合法 JSON，指标文本就会原样落到 message 里，`message LIKE '%<event>%'` 才命中。
+const signalingTelemetry = createSignalingTelemetry((line) => console.log(`signaling_metric ${line}`));
 const SIGNALING_PATH = '/ws-signaling';
 // 分片之间的内部投递与口令回源查询；只由 worker/其它 DO 调用，不对公网暴露。
 const SIGNALING_DELIVER_DO_PATH = '/internal/deliver-signaling';
