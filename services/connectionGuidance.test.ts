@@ -15,6 +15,10 @@ test('信令错误文案区分「连不上」「消息超限」「被占用」�
     SIGNALING_MESSAGE_TOO_LARGE_MESSAGE,
   );
   assert.equal(getPeerRuntimeErrorMessage('unavailable-id'), '该口令已被占用，请换一个');
+  assert.equal(
+    getPeerRuntimeErrorMessage('session-conflict'),
+    '分享会话已被其他连接占用，请重新开始共享',
+  );
   assert.equal(getPeerRuntimeErrorMessage('unauthorized'), '口令或凭证已失效，请让发送端重新分享');
   assert.equal(getPeerRuntimeErrorMessage('invalid-id'), '口令无效，请确认后重试');
   assert.equal(getPeerRuntimeErrorMessage('something-new'), '连接错误: something-new');

@@ -23,6 +23,8 @@ export const getPeerRuntimeErrorMessage = (type: string): string => {
       return '网络连接中断，请检查网络后重试';
     case 'unauthorized':
       return '口令或凭证已失效，请让发送端重新分享';
+    case 'session-conflict':
+      return '分享会话已被其他连接占用，请重新开始共享';
     case 'unavailable-id':
       return '该口令已被占用，请换一个';
     case 'invalid-id':

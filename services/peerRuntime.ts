@@ -186,6 +186,10 @@ const TERMINAL_SIGNALING_CLOSE_CODES = new Map<number, { type: PeerRuntimeErrorT
   // 「请求过多」——那会把真正的原因藏起来。
   [1009, { type: 'message-too-large', message: 'Signaling message exceeded server limit' }],
   [4029, { type: 'rate-limited', message: 'Too many signaling sessions from this network' }],
+  // 4010/4011 是本项目自定义的「别再重连」信号：4010=同 peerId 的会话密钥不匹配，
+  // 4011=被新连接顶替。继续重连只会互踢或反复被拒。
+  [4010, { type: 'session-conflict', message: 'Signaling session secret does not match' }],
+  [4011, { type: 'unavailable-id', message: 'Peer ID taken over by a newer connection' }],
 ]);
 
 const createRuntimeError = (

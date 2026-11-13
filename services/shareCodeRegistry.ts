@@ -7,6 +7,9 @@ export const SHARE_CODE_SPAN = 900000;
 export const SHARE_CODE_PATTERN = /^\d{6}$/;
 export const SHARE_CODE_TTL_MS = 60 * 60 * 1000;
 /** 发送方可以要求更长的有效期（10m / 1h / 1d），但服务端最多给 24 小时。 */
+export const clampShareCodeTtlSeconds = (seconds: number): number =>
+  Math.min(SHARE_CODE_MAX_TTL_MS / 1000, Math.max(SHARE_CODE_MIN_TTL_MS / 1000, Math.round(seconds)));
+
 export const SHARE_CODE_MIN_TTL_MS = 60 * 1000;
 export const SHARE_CODE_MAX_TTL_MS = 24 * 60 * 60 * 1000;
 

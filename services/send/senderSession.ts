@@ -3,6 +3,7 @@ import { P2P_PROTOCOL_VERSION, type FileMetadata } from '../../types';
 import { NO_TURN_WARNING_MESSAGE, getPeerRuntimeErrorMessage } from '../connectionGuidance';
 import { loadPeerRuntime, type Peer } from '../peerRuntime';
 import { createSessionActivityTracker } from '../sessionActivityTracker';
+import { clampShareCodeTtlSeconds } from '../shareCodeRegistry';
 import {
   isValidShareCode,
   requestShareCode,
@@ -156,10 +157,6 @@ export class SenderSession {
     this.deps = { ...defaultDeps, ...deps };
   }
 
-  getRegistration(): SenderShareRegistration | null {
-    return this.registration;
-  }
-
   /** 当前分享活动的令牌：信令回调用它判断自己是否已过期。 */
   getActivityToken(): number {
     return this.activity.current();
@@ -277,9 +274,8 @@ export class SenderSession {
     );
 
     // 口令有效期跟随用户选择（服务端上限 24h）；「永久」按上限登记并在分享期间自动续期。
-    const shareTtlSeconds = Math.min(
-      86_400,
-      Math.max(60, Math.round((EXPIRY_DURATIONS[input.expiryOption] ?? 86_400_000) / 1000)),
+    const shareTtlSeconds = clampShareCodeTtlSeconds(
+      Math.round((EXPIRY_DURATIONS[input.expiryOption] ?? 86_400_000) / 1000),
     );
 
     let senderPeerId: string;
@@ -300,7 +296,7 @@ export class SenderSession {
       if (registration.status !== 'ok') {
         if (!this.isActivityCurrent(token)) return;
         const message = registration.status === 'taken'
-          ? '该口令已被占用，请换一个 6 位口令'
+          ? getPeerRuntimeErrorMessage('unavailable-id')
           : registration.status === 'rate-limited'
             ? '创建口令过于频繁，请稍后再试'
             : '创建分享口令失败，请重试';
@@ -405,7 +401,7 @@ export class SenderSession {
     if (err.type === 'unavailable-id') {
       this.clearCountdown();
       this.host.markConnectionFailure('code_unavailable');
-      this.host.setPhase('configuring', '该口令已被占用，请换一个');
+      this.host.setPhase('configuring', getPeerRuntimeErrorMessage('unavailable-id'));
     } else if (err.type === 'rate-limited' || err.type === 'message-too-large') {
       // 信令层已被服务端明确拒绝（每 IP 会话数超限 / 消息超限），重连不会自愈，
       // 给用户一个可操作的提示，不要在后台继续重连。
@@ -562,6 +558,12 @@ export class SenderSession {
     if (resumed) return;
     // 窗口已过或码已被回收：不要再让 UI 展示一个连不上的分享。
     if (this.registration !== registration) return;
+    // 有在途传输时绝不能走 onSessionLost：那条路径会 stopSharing 并广播
+    // TRANSFER_CANCELLED，把本来能自己跑完的传输直接掐断。
+    if (this.host.getActiveTransfers() > 0) {
+      this.host.notify('分享已失效，当前传输不受影响；需要继续分享请重新创建', 'info');
+      return;
+    }
     this.host.notify('分享已失效，请重新创建', 'error');
     this.host.onSessionLost();
   }

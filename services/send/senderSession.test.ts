@@ -285,7 +285,7 @@ test('登记被占用时不建信令 peer，直接给出可操作文案', async 
   await session.start({ metadata, expiryOption: '1h' });
 
   assert.equal(log.phase(), 'error');
-  assert.equal(log.phases[log.phases.length - 1].message, '该口令已被占用，请换一个 6 位口令');
+  assert.equal(log.phases[log.phases.length - 1].message, '该口令已被占用，请换一个');
   assert.equal(peer(), null);
   assert.equal(FakePeer.instances.length, peersBefore);
 });
@@ -371,6 +371,28 @@ test('pause 发出延迟注销 beacon，resume 失败时提示并回传 onSessio
   assert.equal(resumeAttempts, 1);
   assert.deepEqual(log.notifications.map((entry) => entry.message), ['分享已失效，请重新创建']);
   assert.equal(log.sessionLost, 1);
+});
+
+test('resume 失败但仍有在途传输时不走 onSessionLost', async () => {
+  const { host, log, peer, setActiveTransfers } = createHost();
+  const { deps } = createDeps({ resumeShareSession: async () => false });
+  const session = createSenderSession(host, deps);
+
+  await session.start({ metadata, expiryOption: '1h' });
+  peer()?.emit('open');
+  setActiveTransfers(1);
+
+  session.pause();
+  await session.resume();
+
+  // 走 onSessionLost 会触发 stopSharing 并广播 TRANSFER_CANCELLED，把还能跑完的
+  // 传输直接掐断；延迟注销窗口过期只应该影响「新观众还能不能加入」。
+  assert.deepEqual(log.notifications.map((entry) => entry.message), [
+    '分享已失效，当前传输不受影响；需要继续分享请重新创建',
+  ]);
+  assert.equal(log.notifications[0].type, 'info');
+  assert.equal(log.sessionLost, 0);
+  assert.equal(peer()?.destroyed, false);
 });
 
 test('暂停期间页面恢复且 resume 成功时不打扰用户', async () => {

@@ -1112,7 +1112,10 @@ export class SignalingHub extends DurableObject {
             message: 'Session is bound to another connection',
           } satisfies SignalingEnvelope)
         );
-        server.close(4009, 'Signaling session conflict');
+        // 被拒说明有人拿着分享链接但拿不到会话密钥：留一条日志，便于区分
+        // 「用户重装/换浏览器」与「真的在顶号」。
+        console.warn('Rejected signaling session replacement without matching secret', { peerId });
+        server.close(4010, 'Signaling session conflict');
         return new Response(null, { status: 101, webSocket: client });
       }
     }
@@ -1155,7 +1158,7 @@ export class SignalingHub extends DurableObject {
       } finally {
         // 通知失败也必须关掉旧会话，否则它会以「已注册」的假象继续占着 peerId。
         try {
-          existing.close(4009, 'Peer ID taken over by a newer connection');
+          existing.close(4011, 'Peer ID taken over by a newer connection');
         } catch (error) {
           console.warn('Failed to close replaced signaling session', { peerId, error });
         }

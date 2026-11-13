@@ -3,6 +3,7 @@ import assert from 'node:assert/strict';
 
 import {
   SHARE_CODE_TTL_MS,
+  clampShareCodeTtlSeconds,
   allocateShareCode,
   computeShareCodeSecretHash,
   createShareCodeRecord,
@@ -459,4 +460,13 @@ test('only the original secret may rebind a peer id, even after revoke', () => {
     }),
     true
   );
+});
+
+test('clampShareCodeTtlSeconds 与登记接口共用同一区间（60s..24h）', () => {
+  assert.equal(clampShareCodeTtlSeconds(0), 60);
+  assert.equal(clampShareCodeTtlSeconds(30), 60);
+  assert.equal(clampShareCodeTtlSeconds(3600), 3600);
+  assert.equal(clampShareCodeTtlSeconds(86_400), 86_400);
+  assert.equal(clampShareCodeTtlSeconds(999_999), 86_400);
+  assert.equal(clampShareCodeTtlSeconds(1.6), 60);
 });

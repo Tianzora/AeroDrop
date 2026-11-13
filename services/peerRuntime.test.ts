@@ -306,6 +306,59 @@ test('服务端用终态 close code 关闭信令时停止重连，并把原因�
   }
 });
 
+test('4010（会话密钥不匹配）是终态：不重连', async () => {
+  FakeWebSocket.instances.length = 0;
+
+  const { scheduledTimeouts, restore } = installFakeTimers();
+
+  try {
+    const { default: WorkerSignaledPeer } = await import('./peerRuntime.ts');
+    const peer = new WorkerSignaledPeer({ debug: 0 });
+    const peerErrors: string[] = [];
+    peer.on('error', (error) => {
+      peerErrors.push(error.type);
+    });
+
+    FakeWebSocket.instances[0].close(4010, 'Signaling session conflict');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    // 4010 是分享端自定义的「这次接管被拒」信号：继续重连只会反复被拒或互踢。
+    assert.deepEqual(peerErrors, ['session-conflict']);
+    assert.equal(scheduledTimeouts.length, 0);
+    assert.equal(FakeWebSocket.instances.length, 1);
+
+    peer.destroy();
+  } finally {
+    restore();
+  }
+});
+
+test('4011（被新连接顶替）是终态：不重连', async () => {
+  FakeWebSocket.instances.length = 0;
+
+  const { scheduledTimeouts, restore } = installFakeTimers();
+
+  try {
+    const { default: WorkerSignaledPeer } = await import('./peerRuntime.ts');
+    const peer = new WorkerSignaledPeer({ debug: 0 });
+    const peerErrors: string[] = [];
+    peer.on('error', (error) => {
+      peerErrors.push(error.type);
+    });
+
+    FakeWebSocket.instances[0].close(4011, 'Peer ID taken over');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    assert.deepEqual(peerErrors, ['unavailable-id']);
+    assert.equal(scheduledTimeouts.length, 0);
+    assert.equal(FakeWebSocket.instances.length, 1);
+
+    peer.destroy();
+  } finally {
+    restore();
+  }
+});
+
 test('1008（消息过多）是瞬态拥塞，仍按退避重连', async () => {
   FakeWebSocket.instances.length = 0;
 

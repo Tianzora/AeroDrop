@@ -89,6 +89,11 @@ export const SCREEN_SHARE_LIMITS = {
   MAX_VIEWERS: 6,
 } as const;
 
+// 观众 call 已 answer、但 ICE 迟迟连不上时的回收时间。没有这道闸门，一条永远停在
+// connecting 的 call 会一直占着 MAX_VIEWERS 名额，直到分享结束（观众自己断开不一定
+// 会触发 close）。
+export const SCREEN_SHARE_VIEWER_CONNECT_TIMEOUT_MS = 20_000;
+
 // 接收端存储阈值与归档内存上限。
 export const RECEIVE_STORAGE = {
   IOS_MEMORY_WARN_BYTES: 500 * 1024 * 1024,
