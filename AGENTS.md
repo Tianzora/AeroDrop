@@ -36,6 +36,7 @@ npm run deploy                        # 手动发布（能生效，但绕过 Git
 - TURN 用 Cloudflare 短期凭证，Worker 端签发；前端不持有长期凭证，未配置时回退 STUN-only。
 - 信令分片路由只在 `services/signaling/shardRouting.ts` 判定（`SIGNALING_SHARD_COUNT` 未设置=单例 DO，行为不变）；
   同一 peerId 必须永远映射到同一片，口令表仍只在 shard 0，跨片注册要回源查询而不是本地放行。
+  分片模式（>1）下「每客户端 12 会话」改由 shard 0 的全局名额表计数，不能让每个片各算一遍。
 - 传输协议版本改动要同时改 sender/receiver 两侧与 `types/`，不能只改一端。
 - 控制面消息（METADATA 等）的大小上限与分片统一走 `constants/transfer.ts` 的 `METADATA_CHUNKING`：分片发送在 `services/send/routeHandshake.ts`，单条消息不得超过 `MAX_MESSAGE_BYTES`（SCTP 单消息硬上限约 256 KiB）。改动分片格式要同时改两端的重组逻辑。
 

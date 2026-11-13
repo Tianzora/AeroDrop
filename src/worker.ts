@@ -166,6 +166,10 @@ const SIGNALING_PATH = '/ws-signaling';
 // 分片之间的内部投递与口令回源查询；只由 worker/其它 DO 调用，不对公网暴露。
 const SIGNALING_DELIVER_DO_PATH = '/internal/deliver-signaling';
 const SIGNALING_SHARE_CODE_LOOKUP_PATH = '/internal/lookup-share-code';
+const SIGNALING_SESSION_SLOT_PATH = '/internal/session-slot';
+// 会话名额的兜底 TTL：正常路径由 socket 关闭时释放；进程被杀/DO 迁移可能漏掉释放，
+// 超过这个时间没有心跳的槽位在下次领取时被清掉，避免一次故障永久占满出口 IP 的名额。
+const SIGNALING_SESSION_SLOT_TTL_MS = 6 * 60 * 60 * 1000;
 
 // Per-isolate budget for TURN credential issuance; see iceConfigRateLimitPolicy.
 const iceConfigRateLimiter = createIceConfigRateLimiter();
@@ -1005,6 +1009,8 @@ type SessionAttachment = {
   // 分享会话绑定的密钥摘要。只有分享端会带；文件传输会话不带，接管行为保持原样。
   // 必须进 attachment：DO 休眠后用 deserializeAttachment 恢复，内存里的判定要靠它。
   sessionSecretHash?: string;
+  // 分片模式下的全局会话名额 id（见 SIGNALING_SESSION_SLOT_PATH）；单例模式不写。
+  slotId?: string;
 };
 
 /**
@@ -1057,17 +1063,23 @@ export class SignalingHub extends DurableObject<Env> {
   private lastConflictLogAt = new Map<string, number>();
   // 全局 /api/ice-config 限流计数（住在单例 DO 里，跨 colo 共享）。
   private iceConfigGlobalLimiter = createIceConfigGlobalLimiter();
+  // 分片模式下的全局会话名额：socket -> slotId，关闭时按 id 释放。
+  private slotBySocket = new Map<WebSocket, string>();
+  private maxSignalingSessions: number;
 
   constructor(ctx: DurableObjectState, env: Env) {
     super(ctx, env);
 
     // 同一出口 IP 的并发信令上限；CGNAT 场景下可由部署方调高。
-    this.sessionLimiter = createSignalingSessionLimiter(
-      parsePositiveInt(env.SIGNALING_MAX_SESSIONS_PER_CLIENT, MAX_ACTIVE_SIGNALING_SESSIONS_PER_CLIENT)
+    this.maxSignalingSessions = parsePositiveInt(
+      env.SIGNALING_MAX_SESSIONS_PER_CLIENT,
+      MAX_ACTIVE_SIGNALING_SESSIONS_PER_CLIENT
     );
+    this.sessionLimiter = createSignalingSessionLimiter(this.maxSignalingSessions);
 
     this.initializeShareCodeSchema();
     this.initializeSessionBindingSchema();
+    this.initializeSessionSlotSchema();
 
     for (const ws of this.ctx.getWebSockets()) {
       const attachment = ws.deserializeAttachment() as SessionAttachment | null;
@@ -1076,6 +1088,9 @@ export class SignalingHub extends DurableObject<Env> {
       this.peerBySocket.set(ws, attachment.peerId);
       this.clientBySocket.set(ws, attachment.clientKey || 'ip:unknown');
       this.sessionLimiter.tryAcquire(attachment.clientKey || 'ip:unknown');
+      if (attachment.slotId) {
+        this.slotBySocket.set(ws, attachment.slotId);
+      }
     }
   }
 
@@ -1092,6 +1107,9 @@ export class SignalingHub extends DurableObject<Env> {
     }
     if (url.pathname === SIGNALING_SHARE_CODE_LOOKUP_PATH) {
       return this.handleShareCodeLookupRequest(request);
+    }
+    if (url.pathname === SIGNALING_SESSION_SLOT_PATH) {
+      return this.handleSessionSlotRequest(request);
     }
 
     const upgradeHeader = request.headers.get('Upgrade');
@@ -1202,7 +1220,36 @@ export class SignalingHub extends DurableObject<Env> {
       this.sessionLimiter.release(clientKey);
     }
 
+    // 分片后「每客户端 12 会话」必须全局计数：每个片各算一次会把上限放大成 12×N。
+    // 权威计数在 shard 0（与 ice-config 全局计数同处），只有分片 > 1 时才启用；
+    // 单例模式完全走原来的内存计数，行为不变。
+    let sessionSlotId: string | undefined;
+    if (this.getSignalingShardCount() > 1) {
+      sessionSlotId = crypto.randomUUID();
+      const existingSlotId = existingAttachment?.slotId;
+      if (isTakeover && existingSlotId) {
+        // 接管同一个 peerId 时先释放旧槽位，否则「已满 + 重连」会被自己的旧连接挡住。
+        await this.releaseSignalingSessionSlot(existingSlotId);
+      }
+      if (!(await this.reserveSignalingSessionSlot(sessionSlotId, clientKey))) {
+        server.send(
+          JSON.stringify({
+            type: 'error',
+            code: 'rate-limited',
+            message: 'Too many signaling sessions',
+          } satisfies SignalingEnvelope)
+        );
+        server.close(4029, 'Too many sessions');
+        return new Response(null, { status: 101, webSocket: client });
+      }
+      this.slotBySocket.set(server, sessionSlotId);
+    }
+
     if (!this.sessionLimiter.tryAcquire(clientKey)) {
+      if (sessionSlotId) {
+        this.slotBySocket.delete(server);
+        await this.releaseSignalingSessionSlot(sessionSlotId);
+      }
       server.send(
         JSON.stringify({
           type: 'error',
@@ -1245,6 +1292,15 @@ export class SignalingHub extends DurableObject<Env> {
     this.sessionsByPeer.set(peerId, server);
     this.peerBySocket.set(server, peerId);
     this.clientBySocket.set(server, clientKey);
+    if (sessionSlotId) {
+      // 名额 id 必须进 attachment：DO 休眠恢复后仍能按 socket 释放。
+      server.serializeAttachment({
+        clientKey,
+        peerId,
+        ...(sessionSecretHash ? { sessionSecretHash } : {}),
+        slotId: sessionSlotId,
+      } satisfies SessionAttachment);
+    }
     // 绑定过密钥的会话在每次成功注册后轮换 proof：客户端下一次重连只带 proof，静态
     // 分享密钥摘要不再出现在 WS URL 上。明文 proof 只在这一帧里出现一次，落库的是摘要。
     let issuedProof: string | undefined;
@@ -1381,6 +1437,13 @@ export class SignalingHub extends DurableObject<Env> {
 
   private unregisterSocket(ws: WebSocket): void {
     this.messageWindows.delete(ws);
+
+    const slotId = this.slotBySocket.get(ws);
+    if (slotId) {
+      this.slotBySocket.delete(ws);
+      // 释放是尽力而为：计数失败最多让名额晚一点回收（有 TTL 兜底），不能影响关闭流程。
+      this.ctx.waitUntil(this.releaseSignalingSessionSlot(slotId));
+    }
 
     const clientKey = this.clientBySocket.get(ws);
     if (clientKey) {
@@ -1646,6 +1709,113 @@ export class SignalingHub extends DurableObject<Env> {
     } catch (error) {
       console.warn('signaling cross-shard delivery failed', error);
       return false;
+    }
+  }
+
+  private initializeSessionSlotSchema(): void {
+    this.ctx.storage.sql.exec(
+      'CREATE TABLE IF NOT EXISTS signaling_session_slots (' +
+        'slot_id TEXT PRIMARY KEY, ' +
+        'client_key TEXT NOT NULL, ' +
+        'expires_at INTEGER NOT NULL)'
+    );
+    this.ctx.storage.sql.exec(
+      'CREATE INDEX IF NOT EXISTS idx_signaling_session_slots_client ' +
+        'ON signaling_session_slots(client_key)'
+    );
+  }
+
+  /** 原子语义的近似：先清过期槽位，再数一次、插一条。DO 内单线程执行，无并发窗口。 */
+  private applySessionSlotReserve(slotId: string, clientKey: string, now: number): boolean {
+    this.ctx.storage.sql.exec('DELETE FROM signaling_session_slots WHERE expires_at <= ?', now);
+    const rows = this.ctx.storage.sql
+      .exec<{ count: number }>(
+        'SELECT COUNT(*) AS count FROM signaling_session_slots WHERE client_key = ?',
+        clientKey
+      )
+      .toArray();
+    if (Number(rows[0]?.count ?? 0) >= this.maxSignalingSessions) {
+      return false;
+    }
+    this.ctx.storage.sql.exec(
+      'INSERT OR REPLACE INTO signaling_session_slots (slot_id, client_key, expires_at) VALUES (?, ?, ?)',
+      slotId,
+      clientKey,
+      now + SIGNALING_SESSION_SLOT_TTL_MS
+    );
+    return true;
+  }
+
+  private applySessionSlotRelease(slotId: string): void {
+    this.ctx.storage.sql.exec('DELETE FROM signaling_session_slots WHERE slot_id = ?', slotId);
+  }
+
+  private async handleSessionSlotRequest(request: Request): Promise<Response> {
+    if (request.method !== 'POST') {
+      return new Response('Method Not Allowed', { status: 405 });
+    }
+    let body: { action?: unknown; slotId?: unknown; clientKey?: unknown; now?: unknown } | null = null;
+    try {
+      body = (await request.json()) as { action?: unknown; slotId?: unknown; clientKey?: unknown; now?: unknown };
+    } catch {
+      body = null;
+    }
+    const slotId = typeof body?.slotId === 'string' ? body.slotId : '';
+    if (!slotId) {
+      return json({ granted: false, released: false }, { status: 400 });
+    }
+    if (body?.action === 'release') {
+      this.applySessionSlotRelease(slotId);
+      return json({ released: true });
+    }
+    if (body?.action !== 'reserve') {
+      return json({ granted: false, released: false }, { status: 400 });
+    }
+    const clientKey = typeof body?.clientKey === 'string' && body.clientKey ? body.clientKey : 'ip:unknown';
+    const now = typeof body?.now === 'number' && Number.isFinite(body.now) ? body.now : Date.now();
+    return json({ granted: this.applySessionSlotReserve(slotId, clientKey, now) });
+  }
+
+  /**
+   * 领取一个全局会话名额。计数在 shard 0；本片就是 shard 0 时直接走本地表。
+   * 计数服务不可用时放行：名额是防滥用，不是身份校验，不能因为计数故障让信令整体不可用。
+   */
+  private async reserveSignalingSessionSlot(slotId: string, clientKey: string): Promise<boolean> {
+    if (this.getSignalingShardCount() <= 1) return true;
+    if (this.isShardZero()) return this.applySessionSlotReserve(slotId, clientKey, Date.now());
+    try {
+      const response = await this.signalingStub(signalingShardName(0)).fetch(
+        new Request(`https://signaling.internal${SIGNALING_SESSION_SLOT_PATH}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'reserve', slotId, clientKey, now: Date.now() }),
+        })
+      );
+      if (!response.ok) return true;
+      const body = (await response.json()) as { granted?: unknown } | null;
+      return body?.granted !== false;
+    } catch (error) {
+      console.warn('signaling session slot reserve failed', error);
+      return true;
+    }
+  }
+
+  private async releaseSignalingSessionSlot(slotId: string): Promise<void> {
+    if (this.getSignalingShardCount() <= 1) return;
+    if (this.isShardZero()) {
+      this.applySessionSlotRelease(slotId);
+      return;
+    }
+    try {
+      await this.signalingStub(signalingShardName(0)).fetch(
+        new Request(`https://signaling.internal${SIGNALING_SESSION_SLOT_PATH}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'release', slotId }),
+        })
+      );
+    } catch (error) {
+      console.warn('signaling session slot release failed', error);
     }
   }
 
