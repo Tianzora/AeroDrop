@@ -65,6 +65,12 @@ export const shouldAcceptSessionReplacement = (input: {
 export const SESSION_PROOF_GRACE_MS = 120_000;
 
 /**
+ * 首次绑定用静态摘要的兜底窗口。`registered` 帧可能丢、页面可能被挂起，客户端此时
+ * 还没有 proof；只在这段时间内接受摘要，过期后必须用 proof，避免静态 bearer 复活。
+ */
+export const SESSION_SECRET_HASH_GRACE_MS = 10 * 60 * 1000;
+
+/**
  * 宽限期内旧 proof 的保留条数。连续抖动时客户端可能还没收到新 proof 就再次断线，
  * 只留一条会被第二次轮换覆盖，导致合法客户端被自己拒掉；4 条足以覆盖 120s 内的抖动。
  */
@@ -89,6 +95,8 @@ export const shouldAcceptSessionAdmission = (input: {
   storedProofHash?: string | null;
   /** 宽限期内仍可使用的历史 proof 摘要。 */
   recentProofHashes?: ReadonlyArray<SessionProofHistoryEntry> | null;
+  /** 首次绑定摘要还能冒充凭证到什么时候（毫秒时间戳，0 表示不可用）。 */
+  secretHashGraceExpiresAt?: number | null;
   incomingSecretHash?: string | null;
   incomingProofHash?: string | null;
   now: number;
@@ -104,14 +112,29 @@ export const shouldAcceptSessionAdmission = (input: {
   if (!isValidSessionProof(storedProofHash)) return 'reject';
 
   const incomingProofHash = input.incomingProofHash;
-  if (!isValidSessionProof(incomingProofHash)) return 'reject';
-  const normalizedIncoming = incomingProofHash.toLowerCase();
-  if (constantTimeEqual(normalizedIncoming, storedProofHash.toLowerCase())) return 'allow';
+  if (isValidSessionProof(incomingProofHash)) {
+    const normalizedIncoming = incomingProofHash.toLowerCase();
+    if (constantTimeEqual(normalizedIncoming, storedProofHash.toLowerCase())) return 'allow';
 
-  for (const entry of input.recentProofHashes ?? []) {
-    if (!entry || !isValidSessionProof(entry.proofHash)) continue;
-    if (!Number.isFinite(entry.expiresAt) || entry.expiresAt <= input.now) continue;
-    if (constantTimeEqual(normalizedIncoming, entry.proofHash.toLowerCase())) return 'allow';
+    for (const entry of input.recentProofHashes ?? []) {
+      if (!entry || !isValidSessionProof(entry.proofHash)) continue;
+      if (!Number.isFinite(entry.expiresAt) || entry.expiresAt <= input.now) continue;
+      if (constantTimeEqual(normalizedIncoming, entry.proofHash.toLowerCase())) return 'allow';
+    }
+  }
+
+  // 兜底：首次注册时服务端已经落库了摘要，但 `registered` 帧（唯一一次下发 proof
+  // 的地方）丢失，客户端只能拿摘要重连。只在这个短窗口内放行；否则等于把静态
+  // bearer 永久保留下来。
+  const graceExpiresAt = input.secretHashGraceExpiresAt;
+  if (
+    isValidSessionSecretHash(input.boundSecretHash) &&
+    isValidSessionSecretHash(input.incomingSecretHash) &&
+    Number.isFinite(graceExpiresAt) &&
+    (graceExpiresAt as number) > input.now &&
+    constantTimeEqual(input.boundSecretHash.toLowerCase(), input.incomingSecretHash.toLowerCase())
+  ) {
+    return 'allow';
   }
   return 'reject';
 };

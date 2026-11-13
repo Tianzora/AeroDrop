@@ -41,6 +41,7 @@ import {
 } from '../services/turnCredentials';
 import {
   SESSION_PROOF_GRACE_MS,
+  SESSION_SECRET_HASH_GRACE_MS,
   buildNextSessionProofHistory,
   createSessionProof,
   hashSessionProof,
@@ -174,6 +175,8 @@ const SIGNALING_SESSION_SLOT_PATH = '/internal/session-slot';
 // 会话名额的兜底 TTL：正常路径由 socket 关闭时释放；进程被杀/DO 迁移可能漏掉释放，
 // 超过这个时间没有心跳的槽位在下次领取时被清掉，避免一次故障永久占满出口 IP 的名额。
 const SIGNALING_SESSION_SLOT_TTL_MS = 6 * 60 * 60 * 1000;
+/** 常驻连接每 30 分钟续一次名额 TTL；ping 每 5s 一次，不节流会变成写热点。 */
+const SIGNALING_SESSION_SLOT_REFRESH_MS = 30 * 60 * 1000;
 
 // Per-isolate budget for TURN credential issuance; see iceConfigRateLimitPolicy.
 const iceConfigRateLimiter = createIceConfigRateLimiter();
@@ -1026,6 +1029,7 @@ type SessionAttachment = {
  */
 type SessionBindingRecord = {
   secretHash: string | null;
+  secretHashExpiresAt: number;
   proofHash: string;
   recentProofHashes: SessionProofHistoryEntry[];
 };
@@ -1072,6 +1076,12 @@ export class SignalingHub extends DurableObject<Env> {
   private iceConfigGlobalLimiter = createIceConfigGlobalLimiter();
   // 分片模式下的全局会话名额：socket -> slotId，关闭时按 id 释放。
   private slotBySocket = new Map<WebSocket, string>();
+  /** 同一个槽位在接管时会转给新 socket；旧 socket 退出时不能把新会话的名额释放掉。 */
+  private slotOwnerSocket = new Map<string, WebSocket>();
+  /** 槽位续期的节流时间：ping 很密，没必要每 5s 写一次 SQL。 */
+  private slotRefreshedAt = new Map<WebSocket, number>();
+  /** 同一 socket 的投递链，跨片 await 也不会打乱 offer/ICE 的顺序。 */
+  private deliveryChains = new Map<WebSocket, Promise<void>>();
   private maxSignalingSessions: number;
 
   constructor(ctx: DurableObjectState, env: Env) {
@@ -1097,6 +1107,7 @@ export class SignalingHub extends DurableObject<Env> {
       this.sessionLimiter.tryAcquire(attachment.clientKey || 'ip:unknown');
       if (attachment.slotId) {
         this.slotBySocket.set(ws, attachment.slotId);
+        this.slotOwnerSocket.set(attachment.slotId, ws);
       }
     }
   }
@@ -1168,7 +1179,13 @@ export class SignalingHub extends DurableObject<Env> {
     const tokenParam = url.searchParams.get('token');
     // share_codes 仍只住在 shard 0：本片不是 shard 0 时先回源取一次记录，再交给同步的
     // resolveShareCodeRegistration 判定。失败按「查不到」处理（fail closed），不放宽校验。
-    const prefetchedCode = remoteLookup && codeParam ? await this.lookupShareCodeRemotely('code', codeParam) : null;
+    // 本地判定会 normalize 口令，远端预取也必须用同一个值，否则分片模式下
+    // 「带首尾空白的码」会被误判成不存在（行为随分片数分裂）。
+    const normalizedCodeParam = normalizeShareCode(codeParam);
+    const prefetchedCode =
+      remoteLookup && normalizedCodeParam
+        ? await this.lookupShareCodeRemotely('code', normalizedCodeParam)
+        : null;
     const prefetchedByPeerId =
       remoteLookup && !codeParam ? await this.lookupShareCodeRemotely('peerId', peerId) : null;
     const registration = await resolveShareCodeRegistration({
@@ -1225,6 +1242,7 @@ export class SignalingHub extends DurableObject<Env> {
       boundSecretHash,
       storedProofHash: binding?.proofHash,
       recentProofHashes: binding?.recentProofHashes,
+      secretHashGraceExpiresAt: binding?.secretHashExpiresAt,
       incomingSecretHash: sessionSecretHash,
       incomingProofHash,
       now,
@@ -1244,12 +1262,10 @@ export class SignalingHub extends DurableObject<Env> {
     // 单例模式完全走原来的内存计数，行为不变。
     let sessionSlotId: string | undefined;
     if (this.getSignalingShardCount() > 1) {
-      sessionSlotId = crypto.randomUUID();
-      const existingSlotId = existingAttachment?.slotId;
-      if (isTakeover && existingSlotId) {
-        // 接管同一个 peerId 时先释放旧槽位，否则「已满 + 重连」会被自己的旧连接挡住。
-        await this.releaseSignalingSessionSlot(existingSlotId);
-      }
+      // 接管时复用旧槽位（reserve 会原地续期并转移归属）。先释放再领取的话，
+      // 一旦领取失败，旧会话的名额就白丢了；反复尝试可以把全局上限压到 0。
+      sessionSlotId =
+        isTakeover && existingAttachment?.slotId ? existingAttachment.slotId : crypto.randomUUID();
       if (!(await this.reserveSignalingSessionSlot(sessionSlotId, clientKey))) {
         server.send(
           JSON.stringify({
@@ -1311,27 +1327,41 @@ export class SignalingHub extends DurableObject<Env> {
     this.sessionsByPeer.set(peerId, server);
     this.peerBySocket.set(server, peerId);
     this.clientBySocket.set(server, clientKey);
-    if (sessionSlotId) {
+    // 摘要要跨 proof 轮换保留：绑定 24h 过期后，attachment 是唯一的兜底依据，
+    // 不能因为「这次只带了 proof」就把已有摘要抹掉。
+    const attachmentSecretHash = sessionSecretHash ?? existingAttachment?.sessionSecretHash;
+    if (sessionSlotId || attachmentSecretHash) {
       // 名额 id 必须进 attachment：DO 休眠恢复后仍能按 socket 释放。
       server.serializeAttachment({
         clientKey,
         peerId,
-        ...(sessionSecretHash ? { sessionSecretHash } : {}),
-        slotId: sessionSlotId,
+        ...(attachmentSecretHash ? { sessionSecretHash: attachmentSecretHash } : {}),
+        ...(sessionSlotId ? { slotId: sessionSlotId } : {}),
       } satisfies SessionAttachment);
+    }
+    if (sessionSlotId) {
+      this.slotOwnerSocket.set(sessionSlotId, server);
+      this.slotRefreshedAt.set(server, now);
     }
     // 绑定过密钥的会话在每次成功注册后轮换 proof：客户端下一次重连只带 proof，静态
     // 分享密钥摘要不再出现在 WS URL 上。明文 proof 只在这一帧里出现一次，落库的是摘要。
     let issuedProof: string | undefined;
     if (binding !== null || boundSecretHash !== undefined) {
       issuedProof = createSessionProof();
+      const issuedProofHash = await hashSessionProof(issuedProof);
+      // 轮换是读改写：await 期间另一条注册可能已经换过 proof。用旧快照构造历史会
+      // 把对方刚签发的那份挤出去，它的客户端下次就被 4010 拒掉，所以落库前重读。
+      const current = this.findSessionBinding(peerId, now) ?? binding;
+      const secretHash = current?.secretHash ?? boundSecretHash ?? null;
       this.saveSessionBinding({
         peerId,
-        secretHash: boundSecretHash ?? null,
-        proofHash: await hashSessionProof(issuedProof),
+        secretHash,
+        // 首次 registered 帧可能丢：摘要只在短窗口内兜底，过期后必须用 proof。
+        secretHashExpiresAt: secretHash ? now + SESSION_SECRET_HASH_GRACE_MS : 0,
+        proofHash: issuedProofHash,
         recentProofHashes: buildNextSessionProofHistory({
-          storedProofHash: binding?.proofHash,
-          recentProofHashes: binding?.recentProofHashes,
+          storedProofHash: current?.proofHash,
+          recentProofHashes: current?.recentProofHashes,
           now,
           graceMs: SESSION_PROOF_GRACE_MS,
         }),
@@ -1391,6 +1421,14 @@ export class SignalingHub extends DurableObject<Env> {
     }
 
     if (payload.type === 'ping') {
+      const activeSlotId = this.slotBySocket.get(ws);
+      if (activeSlotId) {
+        const now = Date.now();
+        if (now - (this.slotRefreshedAt.get(ws) ?? 0) >= SIGNALING_SESSION_SLOT_REFRESH_MS) {
+          this.slotRefreshedAt.set(ws, now);
+          this.ctx.waitUntil(this.renewSignalingSessionSlot(activeSlotId));
+        }
+      }
       ws.send(
         JSON.stringify({
           type: 'pong',
@@ -1434,16 +1472,15 @@ export class SignalingHub extends DurableObject<Env> {
       }
     }
 
-    const delivered = await this.deliverSignaling(
+    // 跨片投递要 await 一次 RPC，同一 socket 的后续帧会在这里插队（ICE 候选先于
+    // offer 投到对端就白丢了）。按 socket 串行化，保证「发送顺序 = 投递顺序」。
+    const deliveryError = payload as { connectionId?: string; kind?: 'data' | 'media' };
+    this.enqueueSignalingDelivery(
+      ws,
       payload.targetPeerId,
-      JSON.stringify({
-        ...payload,
-        sourcePeerId,
-      } satisfies SignalingEnvelope)
+      JSON.stringify({ ...payload, sourcePeerId } satisfies SignalingEnvelope),
+      deliveryError
     );
-    if (!delivered) {
-      this.sendError(ws, 'peer-unavailable', 'Target peer is unavailable', payload.connectionId, payload.targetPeerId, payload.kind);
-    }
   }
 
   webSocketClose(ws: WebSocket): void {
@@ -1457,11 +1494,17 @@ export class SignalingHub extends DurableObject<Env> {
   private unregisterSocket(ws: WebSocket): void {
     this.messageWindows.delete(ws);
 
+    this.deliveryChains.delete(ws);
+    this.slotRefreshedAt.delete(ws);
     const slotId = this.slotBySocket.get(ws);
     if (slotId) {
       this.slotBySocket.delete(ws);
-      // 释放是尽力而为：计数失败最多让名额晚一点回收（有 TTL 兜底），不能影响关闭流程。
-      this.ctx.waitUntil(this.releaseSignalingSessionSlot(slotId));
+      // 接管会把同一个槽位转给新 socket：旧 socket 退出时只清自己的映射。
+      if (this.slotOwnerSocket.get(slotId) === ws) {
+        this.slotOwnerSocket.delete(slotId);
+        // 释放是尽力而为：计数失败最多让名额晚一点回收（有 TTL 兜底），不能影响关闭流程。
+        this.ctx.waitUntil(this.releaseSignalingSessionSlot(slotId));
+      }
     }
 
     const clientKey = this.clientBySocket.get(ws);
@@ -1540,6 +1583,7 @@ export class SignalingHub extends DurableObject<Env> {
       'CREATE TABLE IF NOT EXISTS signaling_session_bindings (' +
         'peer_id TEXT PRIMARY KEY, ' +
         'secret_hash TEXT, ' +
+        'secret_hash_expires_at INTEGER NOT NULL DEFAULT 0, ' +
         'proof_hash TEXT NOT NULL, ' +
         "recent_hashes TEXT NOT NULL DEFAULT '[]', " +
         'updated_at INTEGER NOT NULL, ' +
@@ -1549,17 +1593,27 @@ export class SignalingHub extends DurableObject<Env> {
       'CREATE INDEX IF NOT EXISTS idx_signaling_session_bindings_expires ' +
         'ON signaling_session_bindings(expires_at)'
     );
+    // 老部署的表里没有这一列：ALTER 没有 IF NOT EXISTS，先查 PRAGMA 再补。
+    const columns = this.ctx.storage.sql
+      .exec<{ name: string }>("PRAGMA table_info('signaling_session_bindings')")
+      .toArray();
+    if (!columns.some((column) => column.name === 'secret_hash_expires_at')) {
+      this.ctx.storage.sql.exec(
+        'ALTER TABLE signaling_session_bindings ADD COLUMN secret_hash_expires_at INTEGER NOT NULL DEFAULT 0'
+      );
+    }
   }
 
   private findSessionBinding(peerId: string, now: number): SessionBindingRecord | null {
     const rows = this.ctx.storage.sql
       .exec<{
         secret_hash: string | null;
+        secret_hash_expires_at: number;
         proof_hash: string;
         recent_hashes: string | null;
         expires_at: number;
       }>(
-        'SELECT secret_hash, proof_hash, recent_hashes, expires_at ' +
+        'SELECT secret_hash, secret_hash_expires_at, proof_hash, recent_hashes, expires_at ' +
           'FROM signaling_session_bindings WHERE peer_id = ?',
         peerId
       )
@@ -1573,6 +1627,7 @@ export class SignalingHub extends DurableObject<Env> {
     }
     return {
       secretHash: row.secret_hash,
+      secretHashExpiresAt: Number(row.secret_hash_expires_at) || 0,
       proofHash: row.proof_hash,
       recentProofHashes: parseSessionProofHistory(row.recent_hashes),
     };
@@ -1581,6 +1636,7 @@ export class SignalingHub extends DurableObject<Env> {
   private saveSessionBinding(input: {
     peerId: string;
     secretHash?: string | null;
+    secretHashExpiresAt?: number;
     proofHash: string;
     recentProofHashes: SessionProofHistoryEntry[];
     now: number;
@@ -1592,16 +1648,18 @@ export class SignalingHub extends DurableObject<Env> {
     );
     this.ctx.storage.sql.exec(
       'INSERT INTO signaling_session_bindings ' +
-        '(peer_id, secret_hash, proof_hash, recent_hashes, updated_at, expires_at) ' +
-        'VALUES (?, ?, ?, ?, ?, ?) ' +
+        '(peer_id, secret_hash, secret_hash_expires_at, proof_hash, recent_hashes, updated_at, expires_at) ' +
+        'VALUES (?, ?, ?, ?, ?, ?, ?) ' +
         'ON CONFLICT(peer_id) DO UPDATE SET ' +
         'secret_hash = excluded.secret_hash, ' +
+        'secret_hash_expires_at = excluded.secret_hash_expires_at, ' +
         'proof_hash = excluded.proof_hash, ' +
         'recent_hashes = excluded.recent_hashes, ' +
         'updated_at = excluded.updated_at, ' +
         'expires_at = excluded.expires_at',
       input.peerId,
       input.secretHash ?? null,
+      input.secretHashExpiresAt ?? 0,
       input.proofHash,
       JSON.stringify(input.recentProofHashes),
       input.now,
@@ -1731,6 +1789,43 @@ export class SignalingHub extends DurableObject<Env> {
     }
   }
 
+  /**
+   * 按 socket 串行投递：跨片要走一次 RPC，若直接 await，同一 socket 的后续帧会插队，
+   * 对端可能先收到 ICE 再收到 offer。链尾留一份 Promise，等待期间的帧按到达顺序排队。
+   */
+  private enqueueSignalingDelivery(
+    ws: WebSocket,
+    targetPeerId: string,
+    message: string,
+    errorContext: { connectionId?: string; kind?: 'data' | 'media' }
+  ): void {
+    const previous = this.deliveryChains.get(ws) ?? Promise.resolve();
+    const next = previous
+      .catch(() => undefined)
+      .then(async () => {
+        const delivered = await this.deliverSignaling(targetPeerId, message);
+        if (!delivered) {
+          this.sendError(
+            ws,
+            'peer-unavailable',
+            'Target peer is unavailable',
+            errorContext.connectionId,
+            targetPeerId,
+            errorContext.kind
+          );
+        }
+      })
+      .catch((error) => {
+        console.warn('signaling delivery chain failed', error);
+      })
+      .finally(() => {
+        // 只有链尾是自己时才删除，否则会把后进队列的 Promise 丢掉。
+        if (this.deliveryChains.get(ws) === next) this.deliveryChains.delete(ws);
+      });
+    this.deliveryChains.set(ws, next);
+    this.ctx.waitUntil(next);
+  }
+
   private initializeSessionSlotSchema(): void {
     this.ctx.storage.sql.exec(
       'CREATE TABLE IF NOT EXISTS signaling_session_slots (' +
@@ -1744,9 +1839,25 @@ export class SignalingHub extends DurableObject<Env> {
     );
   }
 
-  /** 原子语义的近似：先清过期槽位，再数一次、插一条。DO 内单线程执行，无并发窗口。 */
+  /**
+   * 原子语义的近似：先清过期槽位，再数一次、插一条。DO 内单线程执行，无并发窗口。
+   * 同一个 slotId 已存在时是「接管续期」而不是新占名额：直接改归属与过期时间，
+   * 否则接管方要先释放再领取，领取失败就把旧会话的名额白白吃掉。
+   */
   private applySessionSlotReserve(slotId: string, clientKey: string, now: number): boolean {
     this.ctx.storage.sql.exec('DELETE FROM signaling_session_slots WHERE expires_at <= ?', now);
+    const existing = this.ctx.storage.sql
+      .exec<{ slot_id: string }>('SELECT slot_id FROM signaling_session_slots WHERE slot_id = ?', slotId)
+      .toArray();
+    if (existing.length > 0) {
+      this.ctx.storage.sql.exec(
+        'UPDATE signaling_session_slots SET client_key = ?, expires_at = ? WHERE slot_id = ?',
+        clientKey,
+        now + SIGNALING_SESSION_SLOT_TTL_MS,
+        slotId
+      );
+      return true;
+    }
     const rows = this.ctx.storage.sql
       .exec<{ count: number }>(
         'SELECT COUNT(*) AS count FROM signaling_session_slots WHERE client_key = ?',
@@ -1769,6 +1880,16 @@ export class SignalingHub extends DurableObject<Env> {
     this.ctx.storage.sql.exec('DELETE FROM signaling_session_slots WHERE slot_id = ?', slotId);
   }
 
+  /** 常驻连接续期；槽位已被清掉（例如 TTL 过期或被别人接管）时返回 false。 */
+  private applySessionSlotRenew(slotId: string, now: number): boolean {
+    const cursor = this.ctx.storage.sql.exec(
+      'UPDATE signaling_session_slots SET expires_at = ? WHERE slot_id = ?',
+      now + SIGNALING_SESSION_SLOT_TTL_MS,
+      slotId
+    );
+    return cursor.rowsWritten > 0;
+  }
+
   private async handleSessionSlotRequest(request: Request): Promise<Response> {
     if (request.method !== 'POST') {
       return new Response('Method Not Allowed', { status: 405 });
@@ -1787,11 +1908,14 @@ export class SignalingHub extends DurableObject<Env> {
       this.applySessionSlotRelease(slotId);
       return json({ released: true });
     }
+    const now = typeof body?.now === 'number' && Number.isFinite(body.now) ? body.now : Date.now();
+    if (body?.action === 'renew') {
+      return json({ renewed: this.applySessionSlotRenew(slotId, now) });
+    }
     if (body?.action !== 'reserve') {
       return json({ granted: false, released: false }, { status: 400 });
     }
     const clientKey = typeof body?.clientKey === 'string' && body.clientKey ? body.clientKey : 'ip:unknown';
-    const now = typeof body?.now === 'number' && Number.isFinite(body.now) ? body.now : Date.now();
     return json({ granted: this.applySessionSlotReserve(slotId, clientKey, now) });
   }
 
@@ -1816,6 +1940,26 @@ export class SignalingHub extends DurableObject<Env> {
     } catch (error) {
       console.warn('signaling session slot reserve failed', error);
       return true;
+    }
+  }
+
+  private async renewSignalingSessionSlot(slotId: string): Promise<void> {
+    if (this.getSignalingShardCount() <= 1) return;
+    if (this.isShardZero()) {
+      this.applySessionSlotRenew(slotId, Date.now());
+      return;
+    }
+    try {
+      await this.signalingStub(signalingShardName(0)).fetch(
+        new Request(`https://signaling.internal${SIGNALING_SESSION_SLOT_PATH}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'renew', slotId, now: Date.now() }),
+        })
+      );
+    } catch (error) {
+      // 续期失败不影响连接：名额 TTL 还在，下次 ping 会再试。
+      console.warn('signaling session slot renew failed', error);
     }
   }
 

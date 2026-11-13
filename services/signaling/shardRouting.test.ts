@@ -78,3 +78,21 @@ test('片数解析：空值/非法值回落到 1，超范围 clamp 到 64', () =
   assert.equal(resolveSignalingShardCount('9999'), MAX_SIGNALING_SHARDS);
   assert.equal(resolveSignalingShardCount(2.6), 2);
 });
+
+test('golden 值：固定 peerId 的分片下标不能被实现细节悄悄改掉', () => {
+  // 这些值一旦变化，已部署环境里同一 peerId 会落到别的 DO，等于强制全体重连。
+  const peerId = 'peer-11111111-1111-4111-8111-111111111111';
+  assert.deepEqual(
+    [2, 3, 4, 5, 8].map((count) => rendezvousShardIndex(peerId, count)),
+    [1, 1, 3, 3, 3]
+  );
+  const legacyId = 'AERO-ABCDEF';
+  assert.deepEqual(
+    [2, 3, 4, 5, 8].map((count) => rendezvousShardIndex(legacyId, count)),
+    [1, 1, 1, 1, 1]
+  );
+  // 默认单片时恒为 0，保证未配置分片的行为与单例完全一致。
+  for (const id of [peerId, legacyId, 'x']) {
+    assert.equal(rendezvousShardIndex(id, 1), 0);
+  }
+});

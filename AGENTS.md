@@ -38,6 +38,7 @@ npm run deploy                        # 手动发布（能生效，但绕过 Git
   同一 peerId 必须永远映射到同一片，口令表仍只在 shard 0，跨片注册要回源查询而不是本地放行。
   分片模式（>1）下「每客户端 12 会话」改由 shard 0 的全局名额表计数，不能让每个片各算一遍。
   分片模式下跨片回源查口令要先过 `services/signaling/handshakeBudget.ts` 的 per-isolate 握手预算。
+  会话凭证：绑定后只认可轮换的 `sessionProof`，静态摘要只在首次注册的 10 分钟兜底窗口内有效；proof 轮换落库前必须重读绑定（读改写竞态），否则并发注册会把对方刚签发的 proof 挤掉。
 - 传输协议版本改动要同时改 sender/receiver 两侧与 `types/`，不能只改一端。
 - 控制面消息（METADATA 等）的大小上限与分片统一走 `constants/transfer.ts` 的 `METADATA_CHUNKING`：分片发送在 `services/send/routeHandshake.ts`，单条消息不得超过 `MAX_MESSAGE_BYTES`（SCTP 单消息硬上限约 256 KiB）。改动分片格式要同时改两端的重组逻辑。
 

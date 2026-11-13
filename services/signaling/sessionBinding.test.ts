@@ -3,6 +3,7 @@ import test from 'node:test';
 
 import {
   SESSION_PROOF_GRACE_MS,
+  SESSION_SECRET_HASH_GRACE_MS,
   SESSION_PROOF_HISTORY_LIMIT,
   SESSION_SECRET_BYTES,
   buildNextSessionProofHistory,
@@ -239,4 +240,46 @@ test('轮换历史保留当前摘要、丢弃过期项并限制条数', () => {
   assert.equal(capped.some((entry) => entry.proofHash === current), true);
   // 首次绑定没有历史：只记录当前摘要。
   assert.deepEqual(buildNextSessionProofHistory({ storedProofHash: null, now }), []);
+});
+
+test('首次注册的摘要只在短窗口内兜底，过期后必须用 proof', () => {
+  const storedProofHash = 'c'.repeat(64);
+  const base = {
+    boundSecretHash: HASH_A,
+    storedProofHash,
+    incomingSecretHash: HASH_A,
+    now: 1_000,
+  } as const;
+
+  // registered 帧丢了：客户端还没有 proof，只能在窗口内用摘要重连。
+  assert.equal(
+    shouldAcceptSessionAdmission({ ...base, secretHashGraceExpiresAt: base.now + SESSION_SECRET_HASH_GRACE_MS }),
+    'allow'
+  );
+  // 窗口失效后静态 bearer 不能复活。
+  assert.equal(
+    shouldAcceptSessionAdmission({ ...base, secretHashGraceExpiresAt: base.now - 1 }),
+    'reject'
+  );
+  assert.equal(shouldAcceptSessionAdmission({ ...base, secretHashGraceExpiresAt: 0 }), 'reject');
+  assert.equal(shouldAcceptSessionAdmission({ ...base, secretHashGraceExpiresAt: undefined }), 'reject');
+  // 摘要对不上时，窗口本身不能当凭证用。
+  assert.equal(
+    shouldAcceptSessionAdmission({
+      ...base,
+      incomingSecretHash: HASH_B,
+      secretHashGraceExpiresAt: base.now + SESSION_SECRET_HASH_GRACE_MS,
+    }),
+    'reject'
+  );
+  // proof 仍然优先：窗口过期也不影响合法 proof。
+  assert.equal(
+    shouldAcceptSessionAdmission({
+      ...base,
+      incomingSecretHash: undefined,
+      incomingProofHash: storedProofHash,
+      secretHashGraceExpiresAt: 0,
+    }),
+    'allow'
+  );
 });
