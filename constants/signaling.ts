@@ -75,3 +75,18 @@ export const CF_TURN_CACHE_SAFETY_WINDOW_SECONDS = 60;
 
 /** 调用 Cloudflare TURN API 的超时。 */
 export const CF_TURN_FETCH_TIMEOUT_MS = 4000;
+
+/**
+ * proof 轮换落库的重试次数（含首次）与退避基数。
+ *
+ * 落库是 shard 0 的一次写入；瞬时失败率虽低，但失败后的形态很坏：客户端拿着新
+ * proof，服务端只有旧 proof，只能等 10 分钟宽限耗尽后把它拒成 4010。重试把这种
+ * 错位压到「两次写入之间」，仍失败时由 appendPendingSessionProof 兜底。
+ */
+export const SESSION_COMMIT_ATTEMPTS = 3;
+
+/** 第 n 次重试前等待 `SESSION_COMMIT_RETRY_DELAY_MS * n` 毫秒。 */
+export const SESSION_COMMIT_RETRY_DELAY_MS = 50;
+
+/** shard 0 绑定表不可达时，WS 升级返回 503 的 Retry-After（秒）。 */
+export const SIGNALING_BINDING_UNAVAILABLE_RETRY_AFTER_SECONDS = 5;

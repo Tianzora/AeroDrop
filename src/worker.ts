@@ -65,6 +65,7 @@ import {
   SHARE_CODE_TOMBSTONE_MS,
   SIGNALING_SESSION_BINDING_MS,
   SIGNALING_SESSION_SLOT_TTL_MS,
+  appendPendingSessionProof,
   applySessionSlotRelease,
   applySessionSlotRenew,
   applySessionSlotReserve,
@@ -95,8 +96,16 @@ import {
   createUnknownShareCodeBudget,
   type UnknownShareCodeBudget,
 } from '../services/signaling/unknownShareCodeBudget';
-import { deliverRegisteredThenCommit } from '../services/signaling/sessionAdmissionDelivery';
+import {
+  SESSION_COMMIT_ATTEMPTS,
+  deliverRegisteredThenCommit,
+} from '../services/signaling/sessionAdmissionDelivery';
 import { planSignalingSessionSeat } from '../services/signaling/sessionSeat';
+import {
+  SIGNALING_BINDING_UNAVAILABLE_RETRY_AFTER_SECONDS,
+  classifySignalingSessionRace,
+  planSignalingRegistration,
+} from '../services/signaling/registrationPlan';
 import {
   rendezvousShardIndex,
   resolveSignalingShardCount,
@@ -971,17 +980,6 @@ export class SignalingHub extends DurableObject<Env> {
       }
     }
 
-    const pair = new WebSocketPair();
-    const client = pair[0];
-    const server = pair[1];
-
-    server.serializeAttachment({
-      clientKey,
-      peerId,
-      ...(sessionSecretHash ? { sessionSecretHash } : {}),
-    } satisfies SessionAttachment);
-    this.ctx.acceptWebSocket(server);
-
     const codeParam = url.searchParams.get('code');
     const tokenParam = url.searchParams.get('token');
     // share_codes 仍只住在 shard 0：本片不是 shard 0 时先回源取一次记录，再交给同步的
@@ -1007,10 +1005,22 @@ export class SignalingHub extends DurableObject<Env> {
         ? () => prefetchedByPeerId
         : (candidate) => this.findActiveShareCodeByPeerId(candidate, Date.now()),
     });
+    // 认证先于绑定判定：非法口令/旧 peerId 的连接不该触发 shard 0 的绑定查询（分片模式
+    // 下是一次跨 DO RPC），更不该拿到一条已建立的 socket。这里先 accept 只是为了能按
+    // WebSocket 协议回一帧 error，然后立刻关闭。
     if (!registration.allowed) {
+      const rejectedPair = new WebSocketPair();
+      const rejectedClient = rejectedPair[0];
+      const rejectedServer = rejectedPair[1];
+      rejectedServer.serializeAttachment({
+        clientKey,
+        peerId,
+        ...(sessionSecretHash ? { sessionSecretHash } : {}),
+      } satisfies SessionAttachment);
+      this.ctx.acceptWebSocket(rejectedServer);
       const legacyPeerId = registration.reason === 'legacy-peer-id';
       const invalidPeerId = registration.reason === 'invalid-peer-id';
-      server.send(
+      rejectedServer.send(
         JSON.stringify({
           type: 'error',
           code: legacyPeerId || invalidPeerId ? 'invalid-id' : 'unauthorized',
@@ -1021,8 +1031,8 @@ export class SignalingHub extends DurableObject<Env> {
               : 'Share code or token is invalid',
         } satisfies SignalingEnvelope)
       );
-      server.close(4009, 'Signaling registration rejected');
-      return new Response(null, { status: 101, webSocket: client });
+      rejectedServer.close(4009, 'Signaling registration rejected');
+      return new Response(null, { status: 101, webSocket: rejectedClient });
     }
 
     // peerId 冲突：同一个 peerId 只应有一条活着的信令连接。旧实现直接拒绝新连接，但旧
@@ -1033,7 +1043,7 @@ export class SignalingHub extends DurableObject<Env> {
     // 同一个 peerId 的新连接接管旧连接（抖动后的重连会复用 peerId）。名额必须先领取
     // 再驱逐：否则新连接因出口 IP 满额被 4029 时，旧会话已经被关掉，双方都没人服务。
     const existing = this.sessionsByPeer.get(peerId);
-    const isTakeover = existing !== undefined && existing !== server;
+    const isTakeover = existing !== undefined;
     const existingAttachment = isTakeover
       ? (existing.deserializeAttachment() as SessionAttachment | null)
       : null;
@@ -1050,121 +1060,233 @@ export class SignalingHub extends DurableObject<Env> {
       incomingProofHash,
       now,
     });
-    if (!admission.allowed) {
-      this.sendSessionConflict(server, peerId, now);
-      return new Response(null, { status: 101, webSocket: client });
+    // 绑定权威副本不可达：升级必须在 accept 之前就结束（503 + Retry-After）。先 accept 再
+    // 发 error 会给客户端留下一条「已建立」的连接，而服务端既没有名额可回收也没有对象可关。
+    if (admission === null) {
+      return new Response('Signaling temporarily unavailable', {
+        status: 503,
+        headers: { 'Retry-After': String(SIGNALING_BINDING_UNAVAILABLE_RETRY_AFTER_SECONDS) },
+      });
     }
+
+    const pair = new WebSocketPair();
+    const client = pair[0];
+    const server = pair[1];
+
+    server.serializeAttachment({
+      clientKey,
+      peerId,
+      ...(sessionSecretHash ? { sessionSecretHash } : {}),
+    } satisfies SessionAttachment);
+    this.ctx.acceptWebSocket(server);
+
     const existingClientKey = isTakeover ? this.clientBySocket.get(existing) : undefined;
     // 同一出口 IP 的接管：名额此刻记在旧 socket 上。接管块会把旧 socket 从 clientBySocket
     // 摘除（旧 socket 关闭时不再释放），所以这里直接「转移」席位：既不 release 也不
     // tryAcquire。先 release 再 tryAcquire 的旧写法在 tryAcquire 失败时会留下计数 -1 的
     // 漂移，而且这条路径提前 return，旧 socket 也没被关掉。
     const seatPlan = planSignalingSessionSeat({ isTakeover, existingClientKey, clientKey });
+    // 判定是 await（分片模式下是回源 RPC），这期间同一 peerId 可能已经有别的连接落定。
+    // 落定前重读一次 map：输了竞争就按冲突拒绝，否则会把对方刚写进 map 的 socket 顶掉，
+    // 而对方已经收到 registered，就成了没有归属的幽灵连接。动作序列由 plan 决定，
+    // 「拒绝先于领名额」「先领名额再驱逐旧 socket」这些顺序在单测里钉死。
+    const actions = planSignalingRegistration({
+      existingSession: isTakeover ? 'takeover' : 'none',
+      race: classifySignalingSessionRace({
+        planned: existing,
+        current: this.sessionsByPeer.get(peerId),
+      }),
+      admission: admission.allowed ? 'allowed' : 'rejected',
+      seat: seatPlan,
+      shardCount: this.getSignalingShardCount(),
+      pendingRotation: admission.allowed && admission.pending !== undefined,
+    });
 
     // 分片后「每客户端 12 会话」必须全局计数：每个片各算一次会把上限放大成 12×N。
     // 权威计数在 shard 0（与 ice-config 全局计数同处），只有分片 > 1 时才启用；
     // 单例模式完全走原来的内存计数，行为不变。
     let sessionSlotId: string | undefined;
-    if (this.getSignalingShardCount() > 1) {
-      // 接管时复用旧槽位（reserve 会原地续期并转移归属）。先释放再领取的话，
-      // 一旦领取失败，旧会话的名额就白丢了；反复尝试可以把全局上限压到 0。
-      sessionSlotId =
-        isTakeover && existingAttachment?.slotId ? existingAttachment.slotId : crypto.randomUUID();
-      if (!(await this.reserveSignalingSessionSlot(sessionSlotId, clientKey))) {
-        signalingTelemetry.record('signal_session_slot_rejected', {
-          shardCount: this.getSignalingShardCount(),
-        });
-        server.send(
-          JSON.stringify({
-            type: 'error',
-            code: 'rate-limited',
-            message: 'Too many signaling sessions',
-          } satisfies SignalingEnvelope)
-        );
-        server.close(4029, 'Too many sessions');
-        return new Response(null, { status: 101, webSocket: client });
-      }
-      this.slotBySocket.set(server, sessionSlotId);
-    }
-
-    if (seatPlan.kind === 'acquire' && !this.sessionLimiter.tryAcquire(clientKey)) {
+    let seatAcquired = false;
+    // 被拒的连接没有归属的 socket 状态可回收：名额必须在这里还回去，否则一次失败的重连
+    // 会永久吃掉一个全局名额（回收只发生在 socket 关闭事件里）。
+    const rollbackQuota = async (): Promise<void> => {
       if (sessionSlotId) {
         this.slotBySocket.delete(server);
         await this.releaseSignalingSessionSlot(sessionSlotId);
       }
-      server.send(
-        JSON.stringify({
-          type: 'error',
-          code: 'rate-limited',
-          message: 'Too many signaling sessions',
-        } satisfies SignalingEnvelope)
-      );
-      server.close(4029, 'Too many sessions');
+      if (seatAcquired) this.sessionLimiter.release(clientKey);
+    };
+    // 领名额是 await；落定前再判一次竞争。输了就连刚刚领到的名额一起回滚，绝不覆盖
+    // 对方的 map 归属。
+    const rejectRaced = async (): Promise<Response | null> => {
+      const race = classifySignalingSessionRace({
+        planned: existing,
+        current: this.sessionsByPeer.get(peerId),
+      });
+      if (race !== 'different') return null;
+      await rollbackQuota();
+      this.sendSessionConflict(server, peerId, now);
       return new Response(null, { status: 101, webSocket: client });
-    }
+    };
 
-    if (isTakeover) {
-      this.sessionsByPeer.delete(peerId);
-      this.peerBySocket.delete(existing);
-      this.clientBySocket.delete(existing);
-      if (existingClientKey !== undefined && existingClientKey !== clientKey) {
-        this.sessionLimiter.release(existingClientKey);
-      }
-      try {
-        existing.send(
-          JSON.stringify({
-            type: 'error',
-            code: 'unavailable-id',
-            message: 'Peer ID taken over by a newer connection',
-          } satisfies SignalingEnvelope)
-        );
-      } catch (error) {
-        // 旧 socket 可能已经断开；记录而不是静默吞掉，否则排障时看不到接管失败。
-        console.warn('Failed to notify replaced signaling session', { peerId, error });
-      } finally {
-        // 通知失败也必须关掉旧会话，否则它会以「已注册」的假象继续占着 peerId。
-        try {
-          existing.close(4011, 'Peer ID taken over by a newer connection');
-        } catch (error) {
-          console.warn('Failed to close replaced signaling session', { peerId, error });
+    for (const action of actions) {
+      switch (action.kind) {
+        case 'reject-conflict': {
+          // 拒绝路径不改 sessionsByPeer / limiter：被拒的连接本来就没有建立，动 map 会把
+          // 正在服务的那条挤成幽灵连接。
+          this.sendSessionConflict(server, peerId, now);
+          return new Response(null, { status: 101, webSocket: client });
         }
+        case 'reserve-global-slot': {
+          // 分片后「每客户端 12 会话」必须全局计数：每个片各算一次会把上限放大成 12×N。
+          // 权威计数在 shard 0（与 ice-config 全局计数同处），只有分片 > 1 时才启用；
+          // 单例模式完全走原来的内存计数，行为不变。
+          // 接管时复用旧槽位（reserve 会原地续期并转移归属）。先释放再领取的话，
+          // 一旦领取失败，旧会话的名额就白丢了；反复尝试可以把全局上限压到 0。
+          const slotId =
+            isTakeover && existingAttachment?.slotId
+              ? existingAttachment.slotId
+              : crypto.randomUUID();
+          if (!(await this.reserveSignalingSessionSlot(slotId, clientKey))) {
+            signalingTelemetry.record('signal_session_slot_rejected', {
+              shardCount: this.getSignalingShardCount(),
+            });
+            server.send(
+              JSON.stringify({
+                type: 'error',
+                code: 'rate-limited',
+                message: 'Too many signaling sessions',
+              } satisfies SignalingEnvelope)
+            );
+            server.close(4029, 'Too many sessions');
+            return new Response(null, { status: 101, webSocket: client });
+          }
+          sessionSlotId = slotId;
+          this.slotBySocket.set(server, slotId);
+          const raced = await rejectRaced();
+          if (raced) return raced;
+          break;
+        }
+        case 'reserve-seat': {
+          // transfer：席位此刻记在旧 socket 上，接管块会把它从 clientBySocket 摘除
+          // （旧 socket 关闭时不再释放），所以直接转移，不 release 也不 tryAcquire。
+          if (action.mode !== 'acquire') break;
+          if (!this.sessionLimiter.tryAcquire(clientKey)) {
+            await rollbackQuota();
+            server.send(
+              JSON.stringify({
+                type: 'error',
+                code: 'rate-limited',
+                message: 'Too many signaling sessions',
+              } satisfies SignalingEnvelope)
+            );
+            server.close(4029, 'Too many sessions');
+            return new Response(null, { status: 101, webSocket: client });
+          }
+          seatAcquired = true;
+          const raced = await rejectRaced();
+          if (raced) return raced;
+          break;
+        }
+        case 'eject-existing': {
+          const raced = await rejectRaced();
+          if (raced) return raced;
+          if (existing) {
+            this.sessionsByPeer.delete(peerId);
+            this.peerBySocket.delete(existing);
+            this.clientBySocket.delete(existing);
+            if (existingClientKey !== undefined && existingClientKey !== clientKey) {
+              this.sessionLimiter.release(existingClientKey);
+            }
+            try {
+              existing.send(
+                JSON.stringify({
+                  type: 'error',
+                  code: 'unavailable-id',
+                  message: 'Peer ID taken over by a newer connection',
+                } satisfies SignalingEnvelope)
+              );
+            } catch (error) {
+              // 旧 socket 可能已经断开；记录而不是静默吞掉，否则排障时看不到接管失败。
+              console.warn('Failed to notify replaced signaling session', { peerId, error });
+            } finally {
+              // 通知失败也必须关掉旧会话，否则它会以「已注册」的假象继续占着 peerId。
+              try {
+                existing.close(4011, 'Peer ID taken over by a newer connection');
+              } catch (error) {
+                console.warn('Failed to close replaced signaling session', { peerId, error });
+              }
+            }
+          }
+          break;
+        }
+        case 'send-registered': {
+          const raced = await rejectRaced();
+          if (raced) return raced;
+          this.sessionsByPeer.set(peerId, server);
+          this.peerBySocket.set(server, peerId);
+          this.clientBySocket.set(server, clientKey);
+          // 摘要要跨 proof 轮换保留：绑定 24h 过期后，attachment 是唯一的兜底依据，
+          // 不能因为「这次只带了 proof」就把已有摘要抹掉。
+          const attachmentSecretHash = sessionSecretHash ?? existingAttachment?.sessionSecretHash;
+          if (sessionSlotId || attachmentSecretHash) {
+            // 名额 id 必须进 attachment：DO 休眠恢复后仍能按 socket 释放。
+            server.serializeAttachment({
+              clientKey,
+              peerId,
+              ...(attachmentSecretHash ? { sessionSecretHash: attachmentSecretHash } : {}),
+              ...(sessionSlotId ? { slotId: sessionSlotId } : {}),
+            } satisfies SessionAttachment);
+          }
+          if (sessionSlotId) {
+            this.slotOwnerSocket.set(sessionSlotId, server);
+            this.slotRefreshedAt.set(server, now);
+          }
+          // proof 明文只在这一帧出现一次，绑定表里存的是它的 SHA-256 摘要。
+          // 轮换落库必须在 registered 之后：帧丢了客户端手里只有旧 proof，先落库会在宽限期后
+          // 让旧 proof 失效，重连直接 4010。helper 会把「投递失败 → 不落库」钉死成顺序契约；
+          // 落库重试仍失败时由 recover 把新 proof 挂进历史，客户端下次带新 proof 仍能进。
+          await deliverRegisteredThenCommit({
+            sendRegistered: () => {
+              server.send(
+                JSON.stringify({
+                  type: 'registered',
+                  peerId,
+                  ...(admission.allowed && admission.proof
+                    ? { sessionProof: admission.proof }
+                    : {}),
+                } satisfies SignalingEnvelope)
+              );
+            },
+            commit: () => this.finalizeSignalingSessionAdmission(peerId, admission),
+            onCommitAttemptFailed: (error, attempt) => {
+              console.warn('Signaling session-binding commit attempt failed', { attempt, error });
+            },
+            onCommitError: (error, attempts) => {
+              signalingTelemetry.record('signal_session_binding_commit_failed', {
+                shardCount: this.getSignalingShardCount(),
+                attempt: attempts,
+              });
+              console.warn('Signaling session-binding commit failed', { peerId, error });
+            },
+            recover: () => this.recoverSignalingSessionAdmission(peerId, admission),
+            onRecoverError: (error) => {
+              signalingTelemetry.record('signal_session_binding_commit_failed', {
+                shardCount: this.getSignalingShardCount(),
+                attempt: SESSION_COMMIT_ATTEMPTS,
+                recovery: 'pending-proof-failed',
+              });
+              console.warn('Signaling pending-proof fallback failed', { peerId, error });
+            },
+          });
+          break;
+        }
+        case 'commit-binding':
+          // 与 send-registered 成对执行：顺序契约只住在 deliverRegisteredThenCommit 里，
+          // 不在这里再排一次。
+          break;
       }
     }
-
-    this.sessionsByPeer.set(peerId, server);
-    this.peerBySocket.set(server, peerId);
-    this.clientBySocket.set(server, clientKey);
-    // 摘要要跨 proof 轮换保留：绑定 24h 过期后，attachment 是唯一的兜底依据，
-    // 不能因为「这次只带了 proof」就把已有摘要抹掉。
-    const attachmentSecretHash = sessionSecretHash ?? existingAttachment?.sessionSecretHash;
-    if (sessionSlotId || attachmentSecretHash) {
-      // 名额 id 必须进 attachment：DO 休眠恢复后仍能按 socket 释放。
-      server.serializeAttachment({
-        clientKey,
-        peerId,
-        ...(attachmentSecretHash ? { sessionSecretHash: attachmentSecretHash } : {}),
-        ...(sessionSlotId ? { slotId: sessionSlotId } : {}),
-      } satisfies SessionAttachment);
-    }
-    if (sessionSlotId) {
-      this.slotOwnerSocket.set(sessionSlotId, server);
-      this.slotRefreshedAt.set(server, now);
-    }
-    // proof 明文只在这一帧出现一次，绑定表里存的是它的 SHA-256 摘要。
-    // 轮换落库必须在 registered 之后：帧丢了客户端手里只有旧 proof，先落库会在宽限期后
-    // 让旧 proof 失效，重连直接 4010。helper 会把「投递失败 → 不落库」钉死成顺序契约。
-    await deliverRegisteredThenCommit({
-      sendRegistered: () => {
-        server.send(
-          JSON.stringify({
-            type: 'registered',
-            peerId,
-            ...(admission.proof ? { sessionProof: admission.proof } : {}),
-          } satisfies SignalingEnvelope)
-        );
-      },
-      commit: () => this.finalizeSignalingSessionAdmission(peerId, admission),
-    });
     return new Response(null, { status: 101, webSocket: client });
   }
 
@@ -1392,7 +1514,7 @@ export class SignalingHub extends DurableObject<Env> {
    */
   private async admitSignalingSession(
     input: SessionBindingAdmissionInput & { isTakeover: boolean }
-  ): Promise<SessionBindingAdmission> {
+  ): Promise<SessionBindingAdmission | null> {
     if (this.isShardZero()) {
       return this.applySessionBindingAdmission(input);
     }
@@ -1414,8 +1536,10 @@ export class SignalingHub extends DurableObject<Env> {
     } catch (error) {
       signalingTelemetry.record('signal_session_binding_unavailable', {});
       console.warn('signaling session-binding lookup failed', error);
-      // 接管必须有权威绑定才放行（fail closed）；全新注册没有可夺的会话，放行以保可用性。
-      return { allowed: !input.isTakeover };
+      // 回源不可用一律 fail closed（null）。旧实现对接管放行、对全新注册也放行：那等于
+      // 告诉攻击者「让 shard 0 超时即可跳过绑定判定」，而且放行的注册还带着一份未确认
+      // 的轮换。调用方在 accept 之前把 null 变成 503 + Retry-After，客户端退避后重试。
+      return null;
     }
   }
 
@@ -1441,8 +1565,8 @@ export class SignalingHub extends DurableObject<Env> {
   }
 
   /**
-   * registered 帧发出后落库 proof 轮换。失败只记指标：帧已经交给客户端，无法回滚，
-   * 但内存里的旧摘要仍是有效凭证（宽限期 + proof 历史），最坏是少轮换一次。
+   * registered 帧发出后落库 proof 轮换。失败向上抛：重试、记账与自愈都由
+   * `deliverRegisteredThenCommit` 统一负责（只有那里知道「帧已经投递」这个前提）。
    */
   private async finalizeSignalingSessionAdmission(
     peerId: string,
@@ -1451,39 +1575,67 @@ export class SignalingHub extends DurableObject<Env> {
     if (!admission.allowed || !admission.pending) return;
     const { proofHash, boundSecretHash } = admission.pending;
     const now = Date.now();
-    try {
-      if (this.isShardZero()) {
-        commitSessionBindingRotation(this.getSql(), {
+    if (this.isShardZero()) {
+      commitSessionBindingRotation(this.getSql(), {
+        peerId,
+        now,
+        proofHash,
+        boundSecretHash,
+        graceMs: SESSION_SECRET_HASH_GRACE_MS,
+        proofGraceMs: SESSION_PROOF_GRACE_MS,
+        ttlMs: SIGNALING_SESSION_BINDING_MS,
+      });
+      return;
+    }
+    const response = await this.signalingStub(signalingShardName(0)).fetch(
+      new Request(`https://signaling.internal${SIGNALING_SESSION_BINDING_PATH}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'commit',
           peerId,
           now,
           proofHash,
           boundSecretHash,
-          graceMs: SESSION_SECRET_HASH_GRACE_MS,
-          proofGraceMs: SESSION_PROOF_GRACE_MS,
-          ttlMs: SIGNALING_SESSION_BINDING_MS,
-        });
-        return;
-      }
-      const response = await this.signalingStub(signalingShardName(0)).fetch(
-        new Request(`https://signaling.internal${SIGNALING_SESSION_BINDING_PATH}`, {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            action: 'commit',
-            peerId,
-            now,
-            proofHash,
-            boundSecretHash,
-          }),
-        })
-      );
-      if (!response.ok) throw new Error(`binding commit status ${response.status}`);
-    } catch (error) {
-      signalingTelemetry.record('signal_session_binding_commit_failed', {
-        shardCount: this.getSignalingShardCount(),
+        }),
+      })
+    );
+    if (!response.ok) throw new Error(`binding commit status ${response.status}`);
+  }
+
+  /**
+   * 轮换落库最终失败时的自愈：把已经发给客户端的新 proof 摘要挂进绑定行的历史。
+   *
+   * 客户端拿到 proof 之后不再发静态摘要，所以「服务端只有旧 proof、客户端只有新 proof」
+   * 是一条死路：连接一断，新 proof 不被接受，旧 proof 过了宽限期也作废。挂进历史后，
+   * 判定按「历史里未过期的 hash」放行，等价于这次轮换其实成功了。
+   */
+  private async recoverSignalingSessionAdmission(
+    peerId: string,
+    admission: SessionBindingAdmission
+  ): Promise<void> {
+    if (!admission.allowed || !admission.pending) return;
+    const { proofHash } = admission.pending;
+    const now = Date.now();
+    if (this.isShardZero()) {
+      // 有效期取绑定本身的 TTL（24h）：要覆盖客户端重连与页面刷新窗口，不是一次宽限期。
+      appendPendingSessionProof(this.getSql(), {
+        peerId,
+        proofHash,
+        now,
+        proofTtlMs: SIGNALING_SESSION_BINDING_MS,
+        bindingTtlMs: SIGNALING_SESSION_BINDING_MS,
       });
-      console.warn('signaling session-binding commit failed', error);
+      return;
     }
+    const response = await this.signalingStub(signalingShardName(0)).fetch(
+      new Request(`https://signaling.internal${SIGNALING_SESSION_BINDING_PATH}`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'pending', peerId, now, proofHash }),
+      })
+    );
+    if (!response.ok) throw new Error(`binding pending status ${response.status}`);
   }
 
   private async handleSessionBindingRequest(request: Request): Promise<Response> {
@@ -1532,6 +1684,24 @@ export class SignalingHub extends DurableObject<Env> {
         ttlMs: SIGNALING_SESSION_BINDING_MS,
       });
       return json({ committed: true });
+    }
+
+    // 轮换落库最终失败后的自愈：把已下发的新 proof 挂进历史（分片模式下由持有 socket
+    // 的那片回源请求）。判定只看 hash 是否在未过期的历史里，所以这里只收摘要。
+    if (body?.action === 'pending') {
+      const proofHash = pickHash(body?.proofHash);
+      if (!proofHash || proofHash === '__invalid__') {
+        return json({ appended: false }, { status: 400 });
+      }
+      return json({
+        appended: appendPendingSessionProof(this.getSql(), {
+          peerId,
+          proofHash,
+          now,
+          proofTtlMs: SIGNALING_SESSION_BINDING_MS,
+          bindingTtlMs: SIGNALING_SESSION_BINDING_MS,
+        }),
+      });
     }
 
     const result = await this.applySessionBindingAdmission({

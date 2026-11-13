@@ -9,6 +9,8 @@ import {
   applySessionSlotRelease,
   applySessionSlotRenew,
   applySessionSlotReserve,
+  appendPendingSessionProof,
+  buildPendingSessionProofHistory,
   commitSessionBindingRotation,
   findActiveShareCode,
   findSessionBinding,
@@ -494,4 +496,109 @@ test('insertShareCode reports a code collision instead of overwriting', () => {
     false
   );
   assert.ok(collided.calls[0].sql.includes('ON CONFLICT(code) DO NOTHING'));
+});
+
+/* ------------------------------------------------------------------ */
+/* 落库失败后的 pending proof 自愈                                      */
+/* ------------------------------------------------------------------ */
+
+test('buildPendingSessionProofHistory keeps the live entries and appends the delivered proof', () => {
+  const current = {
+    secretHash,
+    secretHashExpiresAt: 2_000,
+    proofHash,
+    recentProofHashes: [
+      { proofHash: 'e'.repeat(64), expiresAt: 900 }, // 已过期
+      { proofHash: 'f'.repeat(64), expiresAt: 8_000 },
+    ],
+  };
+
+  const history = buildPendingSessionProofHistory({
+    current,
+    proofHash: nextProofHash.toUpperCase(),
+    now: 1_000,
+    ttlMs: SIGNALING_SESSION_BINDING_MS,
+  });
+
+  assert.deepEqual(history, [
+    { proofHash: 'f'.repeat(64), expiresAt: 8_000 },
+    // 统一小写：判定侧按 lowercase 比较，写进历史的大小写不能成为第二个分支。
+    { proofHash: nextProofHash, expiresAt: 1_000 + SIGNALING_SESSION_BINDING_MS },
+  ]);
+});
+
+test('buildPendingSessionProofHistory replaces a re-appended proof instead of duplicating it', () => {
+  const history = buildPendingSessionProofHistory({
+    current: {
+      secretHash,
+      secretHashExpiresAt: 0,
+      proofHash,
+      recentProofHashes: [{ proofHash: nextProofHash, expiresAt: 2_000 }],
+    },
+    proofHash: nextProofHash,
+    now: 1_000,
+    ttlMs: SIGNALING_SESSION_BINDING_MS,
+  });
+
+  assert.deepEqual(history, [{ proofHash: nextProofHash, expiresAt: 1_000 + SIGNALING_SESSION_BINDING_MS }]);
+});
+
+test('appendPendingSessionProof lets the delivered proof reconnect after a failed commit', () => {
+  const fake = createBindingSql([row()]);
+  assert.equal(
+    appendPendingSessionProof(fake.sql, {
+      peerId: 'peer-1',
+      proofHash: nextProofHash,
+      now: 5_000,
+      proofTtlMs: SIGNALING_SESSION_BINDING_MS,
+      bindingTtlMs: SIGNALING_SESSION_BINDING_MS,
+    }),
+    true
+  );
+
+  // 掉线的客户端手里只有新 proof：判定必须放行，否则这条会话永远回不来。
+  assert.deepEqual(
+    planSessionAdmission(fake.sql, { peerId: 'peer-1', incomingProofHash: nextProofHash, now: 6_000 }),
+    { allowed: true, needsRotation: true, boundSecretHash: secretHash }
+  );
+
+  const stored = fake.bindings.get('peer-1');
+  // 当前 proof 仍是权威值：这次轮换从未落库，回滚会让双方都丢掉已知有效的凭证。
+  assert.equal(stored?.proof_hash, proofHash);
+  assert.equal(stored?.secret_hash, secretHash);
+  assert.equal(stored?.expires_at, 5_000 + SIGNALING_SESSION_BINDING_MS);
+  assert.deepEqual(parseSessionProofHistory(stored?.recent_hashes ?? null), [
+    { proofHash: nextProofHash, expiresAt: 5_000 + SIGNALING_SESSION_BINDING_MS },
+  ]);
+});
+
+test('appendPendingSessionProof is a no-op when the rotation already landed', () => {
+  const fake = createBindingSql([row({ proof_hash: nextProofHash })]);
+  assert.equal(
+    appendPendingSessionProof(fake.sql, {
+      peerId: 'peer-1',
+      proofHash: nextProofHash,
+      now: 5_000,
+      proofTtlMs: SIGNALING_SESSION_BINDING_MS,
+      bindingTtlMs: SIGNALING_SESSION_BINDING_MS,
+    }),
+    true
+  );
+  // 只读：重试虽然超时了，但写入其实已经生效，再挂一份历史等于给攻击面多加一个 hash。
+  assert.deepEqual(fake.writes(), []);
+});
+
+test('appendPendingSessionProof reports false without a binding row', () => {
+  const fake = createBindingSql();
+  assert.equal(
+    appendPendingSessionProof(fake.sql, {
+      peerId: 'peer-1',
+      proofHash: nextProofHash,
+      now: 5_000,
+      proofTtlMs: SIGNALING_SESSION_BINDING_MS,
+      bindingTtlMs: SIGNALING_SESSION_BINDING_MS,
+    }),
+    false
+  );
+  assert.deepEqual(fake.writes(), []);
 });

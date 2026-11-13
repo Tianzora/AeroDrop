@@ -1,4 +1,5 @@
 import {
+  SESSION_PROOF_HISTORY_LIMIT,
   SHARE_CODE_TOMBSTONE_MS,
   SIGNALING_SESSION_BINDING_MS,
   SIGNALING_SESSION_SLOT_TTL_MS,
@@ -286,6 +287,71 @@ export const commitSessionBindingRotation = (
     ttlMs: input.ttlMs,
   });
   return rotation;
+};
+
+/**
+ * 轮换落库失败时的自愈计划：把已经下发的新 proof 摘要追加进历史列表。
+ *
+ * 客户端已经收到 `registered` 里的新 proof，且「拿到 proof 后不再发静态摘要」——
+ * 如果服务端只留旧 proof，新 proof 又不在历史里，这条连接一旦断开就再也连不回来
+ * （旧 proof 在宽限期后作废、静态摘要早已不认）。所以把新 proof 当成「待生效摘要」
+ * 追加进历史：判定只看 hash 是否在列表里且未过期，效果等价于轮换成功。
+ *
+ * 不覆盖当前的 proof_hash：写回的轮换从未成功，此刻旧 proof 仍是权威值，回滚会让
+ * 客户端与服务端都失去一个已知有效的凭证。
+ */
+export const buildPendingSessionProofHistory = (input: {
+  current: SessionBindingRecord;
+  proofHash: string;
+  now: number;
+  ttlMs: number;
+}): SessionProofHistoryEntry[] => {
+  const normalized = input.proofHash.toLowerCase();
+  const history = input.current.recentProofHashes.filter(
+    (entry) => entry.expiresAt > input.now && entry.proofHash.toLowerCase() !== normalized
+  );
+  history.push({ proofHash: normalized, expiresAt: input.now + input.ttlMs });
+  return history.slice(-SESSION_PROOF_HISTORY_LIMIT);
+};
+
+/**
+ * 尽力写回上面的自愈计划。返回绑定行是否已经能接受新 proof。
+ *
+ * 没有绑定行时返回 false：那是「首次注册就没有静态摘要」的会话，历史无处可挂，
+ * 它本来也不需要这条路径（下次注册会重新轮换）。
+ */
+export const appendPendingSessionProof = (
+  sql: SqlLike,
+  input: {
+    peerId: string;
+    proofHash: string;
+    now: number;
+    /** 新 proof 在历史里的有效期：要覆盖客户端重连窗口，不只是一次宽限期。 */
+    proofTtlMs: number;
+    /** 绑定行本身的续期，与正常轮换落库保持一致（避免把 24h 绑定缩成几分钟）。 */
+    bindingTtlMs: number;
+  }
+): boolean => {
+  const current = findSessionBinding(sql, input.peerId, input.now);
+  if (current === null) return false;
+  // 重试虽然超时了，但写入其实已经生效：无需再挂一份历史。
+  if (current.proofHash.toLowerCase() === input.proofHash.toLowerCase()) return true;
+
+  saveSessionBinding(sql, {
+    peerId: input.peerId,
+    secretHash: current.secretHash,
+    secretHashExpiresAt: current.secretHashExpiresAt,
+    proofHash: current.proofHash,
+    recentProofHashes: buildPendingSessionProofHistory({
+      current,
+      proofHash: input.proofHash,
+      now: input.now,
+      ttlMs: input.proofTtlMs,
+    }),
+    now: input.now,
+    ttlMs: input.bindingTtlMs,
+  });
+  return true;
 };
 
 /* ------------------------------------------------------------------ */
