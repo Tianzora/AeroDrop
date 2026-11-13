@@ -34,6 +34,34 @@ export const resolveBitrateCap = (
 };
 
 /**
+ * 分享端所有观众共享的上行预算。星形 mesh 里每个观众一条独立 PeerConnection、
+ * 一份独立编码，所以只有 per-PC 上限时，6 个人各 8Mbps 就是 48Mbps 的上行——
+ * 住宅/移动网络会在开播瞬间被打满，表现为「所有人都卡」。文件传输的
+ * FLOW_CONTROL.TOTAL_UPLINK_BUFFER_BYTES 也是同一个思路。
+ */
+export const SCREEN_SHARE_AGGREGATE_UPLINK_BPS = 16_000_000;
+
+/**
+ * 单人观看时仍然舒服的码率，用来推导「建议观看人数」：预算除它得到人数，
+ * 不把硬上限 MAX_VIEWERS 当成画质承诺。
+ */
+export const SCREEN_SHARE_COMFORTABLE_VIEWER_BPS = 4_000_000;
+
+/**
+ * 按当前观众数把聚合上行预算均分，再与画质档位/中继上限取小。观众数变化后，
+ * 已有连接的监控循环会以「期望上限」不匹配为依据重新应用，最多 2 秒收敛。
+ */
+export const resolvePerViewerBitrateCap = (
+  level: ScreenShareQualityLevel,
+  isRelay = false,
+  viewerCount = 1,
+): number => {
+  const count = Number.isFinite(viewerCount) ? Math.max(1, Math.floor(viewerCount)) : 1;
+  const budgetShare = Math.floor(SCREEN_SHARE_AGGREGATE_UPLINK_BPS / count);
+  return Math.max(1, Math.min(resolveBitrateCap(level, isRelay), budgetShare));
+};
+
+/**
  * 分享端胶囊展示“大多数观看者”的画质，而不是最差的那个：单个弱网 viewer
  * 由它自己的降档处理，不应该让整个分享端看起来一直在降级。
  * 偶数个观看者取偏高的中位（上中位），避免两个 viewer 一高一低时被较差的那个决定。

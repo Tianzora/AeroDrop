@@ -76,6 +76,14 @@ export const CONNECTION_TIMINGS = {
   SCREEN_SHARE_RECONNECT_BASE_DELAY_MS: 2_000,
   SCREEN_SHARE_RECONNECT_MAX_DELAY_MS: 10_000,
   SCREEN_SHARE_HEARTBEAT_INTERVAL_MS: 3_000,
+  /**
+   * 观看者心跳的判定阈值。后台标签页会把 setInterval 节流到分钟级，纯按时间判死
+   * 会把「还连着、只是没发心跳」的观众踢掉；判定逻辑在
+   * services/screenShare/viewerHeartbeatPolicy.ts，传输健康时无视心跳缺失。
+   */
+  SCREEN_SHARE_VIEWER_HEARTBEAT_TIMEOUT_MS: 30_000,
+  SCREEN_SHARE_VIEWER_HARD_HEARTBEAT_TIMEOUT_MS: 5 * 60 * 1000,
+  SCREEN_SHARE_VIEWER_HEARTBEAT_CHECK_INTERVAL_MS: 5_000,
   SCREEN_SHARE_BANDWIDTH_MONITOR_INTERVAL_MS: 2_000,
   SCREEN_SHARE_BANDWARMUP_MS: 8_000,
   // 观看端冻帧检测的采样间隔：5 秒内累计 2 次以上冻帧就认为画面已经卡死。
@@ -85,9 +93,15 @@ export const CONNECTION_TIMINGS = {
 // 屏幕共享走 P2P mesh：每个 viewer 一条独立 PC 和独立编码，发送端上行是 N 份。
 // 这里不引入 SFU，只做纯客户端的上行预算与人数上限，避免住宅/移动网络被瞬间打满。
 export const SCREEN_SHARE_LIMITS = {
-  // 同时观看人数上限。超过后由分享端直接关闭新 call，而不是让信令 12 会话/IP 的隐式上限兜底。
+  // 硬上限：超过后由分享端直接关闭新 call。这是「拒绝了也不会崩」的容量上限，
+  // 不是画质承诺——每多一个观众就多一份独立编码上行，实际可看人数由上行预算
+  // （services/screenShare/bitratePolicy.ts 的聚合预算）推导出的建议值决定。
   MAX_VIEWERS: 6,
 } as const;
+
+// 屏幕共享房号在服务端登记（/api/share-code，与文件传输的分享口令同一套 HMAC+TTL
+// 登记）的有效期。服务端上限 24h；分享期间按 SHARE_CODE_RENEWAL_INTERVAL_MS 续期。
+export const SCREEN_SHARE_ROOM_TTL_SECONDS = 24 * 60 * 60;
 
 // 观众 call 已 answer、但 ICE 迟迟连不上时的回收时间。没有这道闸门，一条永远停在
 // connecting 的 call 会一直占着 MAX_VIEWERS 名额，直到分享结束（观众自己断开不一定

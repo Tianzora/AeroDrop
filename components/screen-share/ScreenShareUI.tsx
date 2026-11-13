@@ -1,5 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Monitor, StopCircle, Play, Pause, AlertCircle, Copy, Check, Share2, Eye, Loader2, RefreshCw, X, MonitorUp, Maximize, Minimize, Volume2, VolumeX, PictureInPicture } from 'lucide-react';
+import { Monitor, StopCircle, Play, Pause, AlertCircle, Copy, Check, Share2, Eye, Loader2, RefreshCw, X, MonitorUp, Maximize, Minimize, Volume2, VolumeX, PictureInPicture, AlertTriangle } from 'lucide-react';
+import { shouldWarnViewerCapacity } from '../../services/screenShare/viewerCapacity';
 
 export type ScreenShareViewerConnectingStage = 'fetching_ice' | 'connecting_signaling' | 'connecting_media' | 'waiting_stream' | '';
 
@@ -23,6 +24,12 @@ interface ScreenShareUIProps {
   copyShareLink: () => void;
   copied: boolean;
   isPeerReady: boolean;
+  /** 绿色「正在共享」的唯一条件：已登记且信令健康。 */
+  isShareLive: boolean;
+  sharerFailure: { reason: 'signaling_failed'; message: string } | null;
+  dismissSharerFailure: () => void;
+  recommendedViewerCount: number;
+  maxViewerCount: number;
   viewerCount: number;
   qualityLevel: 'high' | 'medium' | 'low';
   sharerVideoRef: React.RefObject<HTMLVideoElement | null>;
@@ -50,7 +57,11 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   shareLink,
   copyShareLink,
   copied,
-  isPeerReady,
+  isShareLive,
+  sharerFailure,
+  dismissSharerFailure,
+  recommendedViewerCount,
+  maxViewerCount,
   viewerCount,
   qualityLevel,
   sharerVideoRef,
@@ -238,6 +249,12 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                 与其他设备实时共享您的屏幕内容
               </p>
             )}
+            {!isConnecting && (
+              /* 6 人是信令/编码的硬上限，不是画质承诺：按聚合上行预算给建议值。 */
+              <p className="mt-1 text-xs text-slate-400 dark:text-night-500">
+                建议 {recommendedViewerCount} 人同时观看（依网络），最多 {maxViewerCount} 人
+              </p>
+            )}
           </div>
         )}
 
@@ -407,6 +424,39 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
         {!isViewing && !isConnecting && (
           <>
 
+            {sharerFailure && !isSharing && (
+              /* 信令终态：不能只弹 toast。绿色 LIVE 消失、预览停止、链接作废，
+                 这里说明原因并给一条重新开始的路。 */
+              <div className="mb-4 rounded-card border border-red-200 bg-red-50 p-4 dark:border-red-500/30 dark:bg-red-500/10">
+                <div className="flex items-start gap-3">
+                  <AlertTriangle size={20} className="mt-0.5 shrink-0 text-red-500" />
+                  <div className="min-w-0">
+                    <p className="text-sm font-semibold text-red-700 dark:text-red-300">共享已中断</p>
+                    <p className="mt-1 break-words text-sm text-red-700/90 dark:text-red-300/90">{sharerFailure.message}</p>
+                    <p className="mt-1 text-xs text-red-600/80 dark:text-red-400/80">
+                      此前分享的链接已失效，观众无法再加入。
+                    </p>
+                    <div className="mt-3 flex flex-wrap gap-2">
+                      <button
+                        onClick={startScreenShare}
+                        className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-brand-600 px-4 text-sm font-medium text-white transition-colors hover:bg-brand-700"
+                      >
+                        <Play size={16} fill="currentColor" />
+                        重新开始共享
+                      </button>
+                      <button
+                        onClick={dismissSharerFailure}
+                        className="inline-flex h-9 items-center justify-center gap-2 rounded-full border border-slate-300 px-4 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 dark:border-night-700 dark:text-night-300 dark:hover:bg-night-750"
+                      >
+                        <X size={16} />
+                        关闭
+                      </button>
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
             {isSharing && shareLink && (
               <div className="mb-4 rounded-card border border-slate-200 dark:border-night-750 bg-slate-50 dark:bg-night-900/50 px-3 py-2.5">
                 <div className="mb-1 flex items-center justify-between gap-2">
@@ -427,15 +477,21 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                     href={shareLink}
                     target="_blank"
                     rel="noopener noreferrer"
-                    className="flex-1 min-w-0 text-sm font-mono text-brand-600 dark:text-brand-400 hover:underline truncate"
+                    aria-disabled={!isShareLive}
+                    className={`flex-1 min-w-0 text-sm font-mono truncate ${
+                      isShareLive
+                        ? 'text-brand-600 dark:text-brand-400 hover:underline'
+                        : 'text-slate-400 dark:text-night-500 pointer-events-none'
+                    }`}
                     title={shareLink}
                   >
                     {shareLink}
                   </a>
                   <button
                     onClick={copyShareLink}
-                    className="inline-flex min-w-11 min-h-11 shrink-0 items-center justify-center rounded-control text-slate-500 dark:text-night-400 hover:bg-slate-200/70 dark:hover:bg-night-750/70 hover:text-slate-700 dark:hover:text-night-200 transition-colors"
-                    title="复制分享链接"
+                    disabled={!isShareLive}
+                    className="inline-flex min-w-11 min-h-11 shrink-0 items-center justify-center rounded-control text-slate-500 transition-colors hover:bg-slate-200/70 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-night-400 dark:hover:bg-night-750/70 dark:hover:text-night-200"
+                    title={isShareLive ? '复制分享链接' : '分享链接已失效'}
                     aria-label="复制分享链接"
                   >
                     {copied ? (
@@ -446,13 +502,27 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                   </button>
                   <button
                     onClick={shareLinkToApps}
-                    className="inline-flex min-w-11 min-h-11 shrink-0 items-center justify-center rounded-control text-slate-500 dark:text-night-400 hover:bg-slate-200/70 dark:hover:bg-night-750/70 hover:text-slate-700 dark:hover:text-night-200 transition-colors"
-                    title="分享链接"
+                    disabled={!isShareLive}
+                    className="inline-flex min-w-11 min-h-11 shrink-0 items-center justify-center rounded-control text-slate-500 transition-colors hover:bg-slate-200/70 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-night-400 dark:hover:bg-night-750/70 dark:hover:text-night-200"
+                    title={isShareLive ? '分享链接' : '分享链接已失效'}
                     aria-label="分享链接"
                   >
                     <Share2 size={18} />
                   </button>
                 </div>
+                {!isShareLive && (
+                  <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+                    信令中断，新观众暂时无法加入
+                  </p>
+                )}
+                <p className="mt-1.5 text-xs text-slate-400 dark:text-night-500">
+                  建议 {recommendedViewerCount} 人同时观看（依网络），最多 {maxViewerCount} 人
+                </p>
+                {shouldWarnViewerCapacity(viewerCount, recommendedViewerCount) && (
+                  <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+                    当前 {viewerCount} 人已超过建议人数，部分观众画质可能下降
+                  </p>
+                )}
               </div>
             )}
 
@@ -470,26 +540,27 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                     现在改为画面内的 LIVE 徽标，右上角只保留画质胶囊；观看人数放到
                     链接卡片的标题行（那本来就是链接/观看者语义），避免窄屏挤爆。 */}
                 <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/60 via-black/25 to-transparent p-2.5">
-                  <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-sm">
-                    <span className="relative flex h-2 w-2">
-                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
-                      <span className="relative inline-flex h-2 w-2 rounded-full bg-green-400"></span>
+                  {isShareLive ? (
+                    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-sm">
+                      <span className="relative flex h-2 w-2">
+                        <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
+                        <span className="relative inline-flex h-2 w-2 rounded-full bg-green-400"></span>
+                      </span>
+                      正在共享
                     </span>
-                    正在共享
-                  </span>
+                  ) : (
+                    /* 采集在跑但信令不通：绿色 LIVE 会骗人，改成 amber 的连接态。 */
+                    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-amber-500/90 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-sm">
+                      <Loader2 size={16} className="animate-spin" />
+                      正在连接服务器...
+                    </span>
+                  )}
                   <span className="flex flex-wrap items-center justify-end gap-1.5">
                     <span className="inline-flex items-center gap-1 rounded-full bg-black/55 px-2 py-1 text-xs font-medium text-white backdrop-blur-sm">
                       画质 {qualityLabels[qualityLevel]}
                     </span>
                   </span>
                 </div>
-
-                {!isPeerReady && (
-                  <div className="pointer-events-none absolute bottom-2.5 left-2.5 inline-flex items-center gap-1.5 rounded-full bg-amber-500/90 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-sm">
-                    <Loader2 size={16} className="animate-spin" />
-                    正在连接服务器...
-                  </div>
-                )}
 
               </div>
             )}

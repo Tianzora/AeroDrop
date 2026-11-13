@@ -10,9 +10,15 @@ import {
   writeScreenShareViewSession,
 } from '../services/screenShareViewerSession';
 import { ScreenShareUI, ScreenShareViewerConnectingStage } from './screen-share/ScreenShareUI';
-import { createSessionSecretHash } from '../services/signaling/sessionBinding';
 import { logDebug } from '../services/diagnostics';
-import { SIGNALING_UNREACHABLE_MESSAGE, getPeerRuntimeErrorMessage } from '../services/connectionGuidance';
+import {
+  SHARER_RECONNECT_EXHAUSTED_MESSAGE,
+  SIGNALING_SESSION_REJECTED_MESSAGE,
+  SIGNALING_UNREACHABLE_MESSAGE,
+  getMediaConnectionErrorMessage,
+  getPeerRuntimeErrorMessage,
+  getShareFullMessage,
+} from '../services/connectionGuidance';
 import { canAdmitViewer } from '../services/screenShare/viewerAdmission';
 import { VIEWER_DISCONNECT_GRACE_MS, decideViewerConnection } from '../services/screenShare/viewerConnectionPolicy';
 import {
@@ -24,10 +30,20 @@ import {
   SCREEN_SHARE_CAPTURE_PRESETS,
   resolveAggregateQuality,
   resolveBitrateCap,
+  resolvePerViewerBitrateCap,
   shouldDowngradeQuality,
   shouldUpgradeQuality,
   type ScreenShareQualityLevel,
 } from '../services/screenShare/bitratePolicy';
+import { decideViewerHeartbeat } from '../services/screenShare/viewerHeartbeatPolicy';
+import { describeViewerCapacity } from '../services/screenShare/viewerCapacity';
+import {
+  createScreenSharePeerId,
+  registerScreenShareRoom,
+  renewScreenShareRoom,
+  revokeScreenShareRoom,
+  type ScreenShareRoom,
+} from '../services/screenShare/shareRoomRegistration';
 
 interface ScreenShareProps {
   onNotification: (message: string, type: 'success' | 'info' | 'error') => void;
@@ -152,6 +168,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const [isPeerReady, setIsPeerReady] = useState(false);
   // 信令层自己退避耗尽后不会再触发 isPeerReady 变化，用它把恢复 effect 再唤醒一次。
   const [sharerRecoveryTick, setSharerRecoveryTick] = useState(0);
+  // 终态：信令/房号登记彻底失败，分享无法继续。它与「暂时连不上」不同——链接已失效、
+  // 预览已停，UI 必须显示红色终态而不是绿色 LIVE。
+  const [sharerFailure, setSharerFailure] = useState<{
+    reason: 'signaling_failed';
+    message: string;
+  } | null>(null);
+  // 已登记到服务端的房号（peerId + 口令 + secret）。同一分享内的所有重建复用它。
+  const [shareRoom, setShareRoom] = useState<ScreenShareRoom | null>(null);
   const [copied, setCopied] = useState(false);
   const [viewerCount, setViewerCount] = useState(0);
   const [targetSharerId, setTargetSharerId] = useState<string | null>(null);
@@ -220,12 +244,17 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const viewerConnectAttemptRef = useRef(0);
   // 分享会话令牌：停止分享后让仍在 await 中的 initializePeer 作废，避免迟到注册占住会话名额。
   const peerSessionTokenRef = useRef(0);
-  // 分享会话的密钥摘要：每次开始分享生成一次；同一分享内的信令重连复用同一个，
-  // 避免把「自己」认成顶替者。停止分享即清空，下次分享换新身份。
-  const sharerSessionSecretHashRef = useRef<string | null>(null);
-  // conflict 时要在 error 回调里停下整个分享（清链接与密钥），但那个回调创建在
-  // stopScreenShare 定义之前，用 ref 取最新实现。
-  const stopScreenShareRef = useRef<() => void>(() => {});
+  // 服务端登记的房号：每次开始分享登记一次；信令重建复用同一 peerId + code + secret，
+  // 这样已发出去的链接不会失效，服务端也认这是同一会话（同 secretHash 才允许接管）。
+  const shareRoomRef = useRef<ScreenShareRoom | null>(null);
+  // 信令是否已经「坏到需要恢复」：只有它为真时恢复 effect 才会重试，避免刚点开始共享
+  // （peer 正在握手）就被当成故障去重建。
+  const sharerSignalingBrokenRef = useRef(false);
+  // 终态只落一次：并发的 error/disconnected 回调不能重复收尾。
+  const sharerFailureHandledRef = useRef(false);
+  // conflict/终态要在 error 回调里停下整个分享，但那个回调创建在 failSharerSession
+  // 定义之前，用 ref 取最新实现。
+  const failSharerSessionRef = useRef<(message: string) => void>(() => {});
   // 正在 answer 途中、还没进 activeCalls 的观众：提前占住名额，避免并发超员。
   const pendingViewerPeersRef = useRef<Set<string>>(new Set());
 
@@ -257,6 +286,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     medium: '高清',
     low: '流畅',
   }), []);
+
+  // 「支持 6 人」不是承诺：建议人数由聚合上行预算推导，超过建议值只提示画质可能下降。
+  const viewerCapacity = useMemo(
+    () => describeViewerCapacity(SCREEN_SHARE_LIMITS.MAX_VIEWERS),
+    [],
+  );
+  // 绿色 LIVE 只由「已登记 + 信令健康」驱动；isSharing 单独为真只代表还在采集与重连。
+  const isShareLive = isSharing && isPeerReady;
 
   const browserProfile = useMemo(
     () =>
@@ -508,6 +545,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   }, [isConnecting]);
 
 
+  const getUniqueViewerCount = useCallback(() => {
+    return new Set(activeCallsRef.current.map((c) => c.peer)).size;
+  }, []);
+
   const startBandwidthMonitoring = useCallback((call: MediaConnection) => {
     const pc = call.peerConnection;
     if (!pc) return;
@@ -529,7 +570,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     const BANDWIDTH_WARMUP_MS = SCREEN_SHARE_BANDWARMUP_MS;
 
     const applyLevel = async (level: 'high' | 'medium' | 'low') => {
-      const cap = resolveBitrateCap(level, peerRelayRef.current.get(call.peer) ?? false);
+      // 每个观众独立编码：上限 = min(画质/中继上限, 聚合上行预算 / 当前观众数)。
+      const cap = resolvePerViewerBitrateCap(
+        level,
+        peerRelayRef.current.get(call.peer) ?? false,
+        getUniqueViewerCount(),
+      );
       // 只有 setParameters 真正成功才记录，否则限流失败后会被误判为「已应用」。
       const applied = await applyBitrateConstraints(pc, level, cap);
       if (applied) {
@@ -640,7 +686,13 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         // 这一步必须在预热返回之前执行——否则中继的前 8 秒会按 P2P 的 100M 上限
         // 发送，恰好是 TURN 流量最贵、也最容易把上行打满的起播阶段。
         const relay = peerRelayRef.current.get(call.peer) ?? false;
-        if (peerAppliedCapRef.current.get(call.peer) !== resolveBitrateCap(currentQuality, relay)) {
+        // 观众人数变化后预算份额随之变化，2 秒内通过这里重新下发上限。
+        const expectedCap = resolvePerViewerBitrateCap(
+          currentQuality,
+          relay,
+          getUniqueViewerCount(),
+        );
+        if (peerAppliedCapRef.current.get(call.peer) !== expectedCap) {
           await applyLevel(currentQuality);
         }
 
@@ -702,7 +754,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     void monitor();
     const timer = setInterval(monitor, SCREEN_SHARE_BANDWIDTH_MONITOR_INTERVAL_MS);
     bandwidthMonitorsRef.current.set(call.peer, { timer, pc });
-  }, [applyBitrateConstraints, notifyQualityChange, setPeerQualityLevel]);
+  }, [applyBitrateConstraints, getUniqueViewerCount, notifyQualityChange, setPeerQualityLevel]);
 
 
   const stopBandwidthMonitoring = useCallback((peerId?: string) => {
@@ -721,10 +773,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     bandwidthMonitorsRef.current.clear();
     peerRelayRef.current.clear();
     peerAppliedCapRef.current.clear();
-  }, []);
-
-  const getUniqueViewerCount = useCallback(() => {
-    return new Set(activeCallsRef.current.map((c) => c.peer)).size;
   }, []);
 
   const syncViewerCount = useCallback(() => {
@@ -767,40 +815,51 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   }, [syncViewerCount, stopBandwidthMonitoring, syncAggregateQualityLevel]);
 
 
-  const generatePeerId = useCallback(() => {
-    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-    const randomValues = new Uint32Array(6);
-    crypto.getRandomValues(randomValues);
-    let id = '';
-    for (let i = 0; i < 6; i++) {
-      id += chars.charAt(randomValues[i] % chars.length);
-    }
-    return `AERO-${id}`;
-  }, []);
-
-
   const initializePeer = useCallback(async () => {
     const sessionToken = peerSessionTokenRef.current;
     if (peerRef.current) {
       peerRef.current.destroy();
+      peerRef.current = null;
     }
+    sharerSignalingBrokenRef.current = false;
 
     const iceConfig = await getIceConfig();
     const { default: PeerRuntime } = await loadPeerRuntime();
     // 用户可能在拉配置期间停止共享；此时再注册会留下一个空信令会话占用每 IP 名额。
     if (peerSessionTokenRef.current !== sessionToken) return;
-    // 会话密钥摘要只生成一次：重建 peer / 信令重连复用同一个，服务端才认这是同一会话。
-    const sessionSecretHash =
-      sharerSessionSecretHashRef.current ?? (await createSessionSecretHash());
-    if (peerSessionTokenRef.current !== sessionToken) return;
-    sharerSessionSecretHashRef.current = sessionSecretHash;
-    const id = generatePeerId();
+
+    // 房号必须先到服务端登记：没有登记就拿不到口令与 secret，信令 WS 会被拒；
+    // 观众链接也只在登记后才有意义（TTL 到期/撤销后不可再用）。
+    let room = shareRoomRef.current;
+    if (!room) {
+      const registration = await registerScreenShareRoom({ peerId: createScreenSharePeerId() });
+      if (peerSessionTokenRef.current !== sessionToken) {
+        if (registration.status === 'ok') void revokeScreenShareRoom(registration.room);
+        return;
+      }
+      if (registration.status !== 'ok') {
+        logDebug('warn', 'Screen share room registration failed:', registration.message);
+        setIsPeerReady(false);
+        // 交给恢复 effect 退避重试；预算耗尽后由它落终态。
+        sharerSignalingBrokenRef.current = true;
+        setSharerRecoveryTick((tick) => tick + 1);
+        return;
+      }
+      room = registration.room;
+      shareRoomRef.current = room;
+      setShareRoom(room);
+    }
+
+    const id = room.peerId;
     const useSecurePeerServer = window.location.protocol === 'https:';
     const peer = new PeerRuntime(id, {
       debug: 0,
       secure: useSecurePeerServer,
       pingInterval: 5000, // 缩短心跳间隔以保持 VPN 隧道活跃
-      sessionSecretHash,
+      // 与服务端登记一致的凭证：握手期校验 HMAC，同 peerId 重建凭同一 secretHash 才允许接管。
+      signalingCode: room.code,
+      signalingToken: room.secret,
+      sessionSecretHash: room.secretHash,
       config: {
         iceServers: iceConfig.iceServers,
         iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
@@ -813,6 +872,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         clearTimeout(sharerReconnectTimerRef.current);
         sharerReconnectTimerRef.current = null;
       }
+      sharerSignalingBrokenRef.current = false;
       sharerPeerOpenedAtRef.current = Date.now();
       setPeerId(openedId);
       setIsPeerReady(true);
@@ -1004,9 +1064,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
             const currentQuality = peerQualityLevelRef.current.get(call.peer) || 'high';
             // 首次 stats 之前还不知道是不是中继：先按中继上限起播，最多 2 秒后
             // 监控器会按真实候选类型放开。宁可晚 2 秒提速，也不要起播时把 TURN 打满。
-            const initialCap = resolveBitrateCap(
+            // 人数取 addActiveCall 之后的计数，新观众加入时预算份额立刻生效。
+            const initialCap = resolvePerViewerBitrateCap(
               currentQuality,
               peerRelayRef.current.get(call.peer) ?? true,
+              getUniqueViewerCount(),
             );
             applyBitrateConstraints(call.peerConnection, currentQuality, initialCap);
             // 某些浏览器在初始协商后才完全挂载 sender 参数，短延迟重复应用可减少前几秒模糊
@@ -1016,7 +1078,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
                 applyBitrateConstraints(
                   call.peerConnection,
                   quality,
-                  resolveBitrateCap(quality, peerRelayRef.current.get(call.peer) ?? true),
+                  resolvePerViewerBitrateCap(
+                    quality,
+                    peerRelayRef.current.get(call.peer) ?? true,
+                    getUniqueViewerCount(),
+                  ),
                 );
               }
             }, 1200);
@@ -1033,26 +1099,37 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     peer.on('error', (err) => {
       console.error('Peer error:', err);
-      if (err?.type === 'session-conflict') {
-        // 同 peerId 的已有会话不接受这次接管：要么本浏览器丢了会话密钥，要么有人拿着
-        // 分享链接顶号但拿不到密钥。重连只会反复被拒（两个方向互踢），交给用户重开。
-        // 先完整停掉分享（会清链接、密钥与 peer），再用通知提示；继续显示
-        // 「分享中」会让用户以为链接还能用，而这正是被顶号的状态。
+      const errorType = err?.type ?? '';
+      logDebug('warn', 'Screen share signaling error:', errorType);
+      // 这些类型重连不会好：服务端已经明确拒绝（占用/无效/未授权/限流/超限），
+      // 继续把它当成「暂时连不上」只会留下假共享。直接落终态。
+      const terminal =
+        errorType === 'session-conflict' ||
+        errorType === 'unavailable-id' ||
+        errorType === 'invalid-id' ||
+        errorType === 'unauthorized' ||
+        errorType === 'rate-limited' ||
+        errorType === 'message-too-large';
+      if (terminal) {
+        // session-conflict：同一会话不接受这次接管（本浏览器丢了会话凭证，或有人拿链接顶号）。
+        // 其它终端类型：房间/凭证已被服务端判死。两者都重开比反复重连更可解释。
         setIsPeerReady(false);
-        stopScreenShareRef.current();
-        onNotification(getPeerRuntimeErrorMessage('session-conflict'), 'error');
+        failSharerSessionRef.current(getPeerRuntimeErrorMessage(errorType));
         return;
       }
-      if (err?.type === 'disconnected') {
+      if (errorType === 'disconnected' || errorType === 'network' || errorType === 'socket-error') {
         // 信令重连预算耗尽：peerRuntime 自己不会再发 disconnected 事件，靠 tick 让恢复
-        // effect 再跑一次，由它决定重建 peer 还是放弃。
+        // effect 再跑一次，由它决定重连、重建 peer 还是放弃。
         setError(SIGNALING_UNREACHABLE_MESSAGE);
         setIsPeerReady(false);
+        sharerSignalingBrokenRef.current = true;
         setSharerRecoveryTick((tick) => tick + 1);
         return;
       }
-      setError(`PeerJS 错误: ${err.message}`);
+      setError(getPeerRuntimeErrorMessage(errorType));
       setIsPeerReady(false);
+      sharerSignalingBrokenRef.current = true;
+      setSharerRecoveryTick((tick) => tick + 1);
     });
 
     peer.on('disconnected', () => {
@@ -1060,48 +1137,147 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       // 不在这里直调 peer.reconnect()：那会绕过指数退避，把「握手成功即被关」放大成
       // 每秒一次的重连风暴。退避与重建由下面的 recovery effect 统一负责。
       setIsPeerReady(false);
+      sharerSignalingBrokenRef.current = true;
+      setSharerRecoveryTick((tick) => tick + 1);
     });
 
     peerRef.current = peer;
     return peer;
-  }, [generatePeerId, onNotification, applyBitrateConstraints, startBandwidthMonitoring, addActiveCall, removeActiveCall, preferVideoCodecs, sendQualityToViewer, syncAggregateQualityLevel, setPeerQualityLevel]);
+  }, [onNotification, applyBitrateConstraints, startBandwidthMonitoring, getUniqueViewerCount, addActiveCall, removeActiveCall, preferVideoCodecs, sendQualityToViewer, syncAggregateQualityLevel, setPeerQualityLevel]);
 
 
-  // 分享者端：定期检查观看者心跳，移除断开的连接
+  // 分享者端：定期检查观看者心跳，移除断开的连接。
+  // 判定本身在 viewerHeartbeatPolicy：传输健康时无视心跳缺失（后台标签页会把观看端的
+  // 3 秒心跳节流到分钟级），只有传输也不健康时才按 30s 软超时 / 5min 硬超时收尾。
   useEffect(() => {
     if (!isSharing) return;
 
     const checkInterval = setInterval(() => {
       const now = Date.now();
-      const timeoutThreshold = 10000; // 10秒未收到心跳视为断开
-
       const deadPeers: string[] = [];
 
       // 检查所有活跃的数据连接
-      activeDataConnectionsRef.current.forEach(conn => {
-        const lastHeartbeat = viewerHeartbeatsRef.current[conn.peer];
-        if (lastHeartbeat && now - lastHeartbeat > timeoutThreshold) {
-          logDebug('log', `Viewer ${conn.peer} timed out, closing connection`);
+      activeDataConnectionsRef.current.forEach((conn) => {
+        const call = activeCallsRef.current.find((item) => item.peer === conn.peer);
+        const verdict = decideViewerHeartbeat({
+          lastHeartbeatAt: viewerHeartbeatsRef.current[conn.peer],
+          now,
+          connectionState: call?.peerConnection?.connectionState,
+          dataChannelOpen: conn.open,
+          tabHidden: document.hidden,
+        });
+        if (verdict.action === 'close') {
+          logDebug('log', `Viewer ${conn.peer} removed (${verdict.reason})`);
           deadPeers.push(conn.peer);
-          conn.close();
+          try { conn.close(); } catch {}
+          return;
+        }
+        if (verdict.refresh) {
+          viewerHeartbeatsRef.current[conn.peer] = now;
         }
       });
 
       if (deadPeers.length > 0) {
         // 关闭对应的媒体连接
-        activeCallsRef.current.forEach(call => {
+        activeCallsRef.current.forEach((call) => {
           if (deadPeers.includes(call.peer)) {
-            call.close();
+            removeActiveCall(call);
+            try { call.close(); } catch {}
           }
         });
 
         // 兜底同步，避免极端情况下 close 事件丢失导致观看人数未更新
         syncViewerCount();
       }
-    }, 5000); // 每5秒检查一次
+    }, CONNECTION_TIMINGS.SCREEN_SHARE_VIEWER_HEARTBEAT_CHECK_INTERVAL_MS);
 
     return () => clearInterval(checkInterval);
-  }, [isSharing, syncViewerCount]);
+  }, [isSharing, removeActiveCall, syncViewerCount]);
+
+  const broadcastShareEnded = useCallback((reason: 'stopped' | 'window_closed' = 'stopped') => {
+    activeDataConnectionsRef.current.forEach((conn) => {
+      if (!conn.open) return;
+      try {
+        conn.send({ type: 'share-ended', reason });
+      } catch {
+        // Ignore best-effort notify errors.
+      }
+    });
+  }, []);
+
+  // 信令彻底失败：停掉采集与预览、撤销房号、清掉链接，并留下红色终态卡片。
+  // 旧实现只弹一条 toast 就 return，而 isSharing 仍为 true、链接仍可复制，
+  // 观众打开却是「找不到分享者」——这就是「假共享」。终态必须收干净。
+  const failSharerSession = useCallback((message: string) => {
+    if (sharerFailureHandledRef.current) return;
+    sharerFailureHandledRef.current = true;
+    logDebug('warn', 'Screen share session failed:', message);
+
+    // 让仍在 await 的 initializePeer 作废，别在终态之后又注册一个新会话。
+    peerSessionTokenRef.current += 1;
+    const room = shareRoomRef.current;
+    shareRoomRef.current = null;
+    setShareRoom(null);
+    if (room) void revokeScreenShareRoom(room);
+
+    broadcastShareEnded('stopped');
+    if (sharerReconnectTimerRef.current) {
+      clearTimeout(sharerReconnectTimerRef.current);
+      sharerReconnectTimerRef.current = null;
+    }
+    sharerReconnectAttemptsRef.current = 0;
+    sharerPeerRebuildsRef.current = 0;
+    sharerPeerOpenedAtRef.current = null;
+    sharerSignalingBrokenRef.current = false;
+
+    if (streamRef.current) {
+      streamRef.current.getTracks().forEach((track) => track.stop());
+      streamRef.current = null;
+    }
+
+    activeDataConnectionsRef.current.forEach((conn) => { try { conn.close(); } catch {} });
+    activeDataConnectionsRef.current = [];
+    viewerHeartbeatsRef.current = {};
+
+    activeCallsRef.current.forEach((call) => { try { call.close(); } catch {} });
+    activeCallsRef.current = [];
+    setViewerCount(0);
+    peerQualityLevelRef.current.clear();
+    setQualityLevel('high');
+    qualityLevelRef.current = 'high';
+    stopBandwidthMonitoring();
+
+    if (peerRef.current) {
+      peerRef.current.destroy();
+      peerRef.current = null;
+    }
+    if (videoRef.current) {
+      videoRef.current.srcObject = null;
+    }
+
+    setIsSharing(false);
+    setIsPeerReady(false);
+    setPeerId(null);
+    setCopied(false);
+    setError(null);
+    setSharerFailure({ reason: 'signaling_failed', message });
+    onNotification(message, 'error');
+  }, [broadcastShareEnded, onNotification, stopBandwidthMonitoring]);
+
+  // 首连看门狗：登记成功但信令一直没 open 时，不能永远停在「正在连接服务器」。
+  // 到点后标记故障并唤醒恢复 effect；重试预算耗尽由它落终态。
+  useEffect(() => {
+    if (!isSharing || isPeerReady) return;
+    const timer = window.setTimeout(() => {
+      if (sharerFailureHandledRef.current) return;
+      logDebug('warn', 'Screen share signaling not ready after connect timeout');
+      setError(SIGNALING_UNREACHABLE_MESSAGE);
+      setIsPeerReady(false);
+      sharerSignalingBrokenRef.current = true;
+      setSharerRecoveryTick((tick) => tick + 1);
+    }, SCREEN_SHARE_CONNECT_TIMEOUT_MS);
+    return () => window.clearTimeout(timer);
+  }, [isSharing, isPeerReady, sharerRecoveryTick]);
 
   useEffect(() => {
     if (!isSharing) {
@@ -1112,6 +1288,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       sharerReconnectAttemptsRef.current = 0;
       sharerPeerOpenedAtRef.current = null;
       sharerPeerRebuildsRef.current = 0;
+      sharerSignalingBrokenRef.current = false;
       return;
     }
 
@@ -1132,8 +1309,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       return;
     }
 
-    // Recover only after we had a valid sharer peer id once.
-    if (!peerId) return;
+    // 只有明确判定过故障（握手报错/断开/看门狗超时）才进入恢复流程：刚点「开始共享」
+    // 时的正常握手中状态不该被当成故障去重建。
+    if (!sharerSignalingBrokenRef.current) return;
     if (sharerReconnectTimerRef.current) return;
 
     // 上一轮连接活够久再断：视为新故障，重新给一轮重试预算。
@@ -1152,8 +1330,34 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     const delay = Math.min(1000 * Math.pow(2, attempt - 1), SCREEN_SHARE_RECONNECT_MAX_DELAY_MS);
     sharerReconnectTimerRef.current = setTimeout(async () => {
       sharerReconnectTimerRef.current = null;
+      if (!isSharing) return;
+
       const currentPeer = peerRef.current;
-      if (!currentPeer || currentPeer.destroyed || !isSharing) return;
+
+      // 房号都还没登记成功：没有可复用的会话，直接重试完整初始化（含登记）。
+      // 超过重试预算说明服务端明确不能用（限流/网络），落终态而不是无限重试。
+      if (!shareRoomRef.current) {
+        if (attempt > MAX_RECONNECT_ATTEMPTS) {
+          failSharerSession(SIGNALING_UNREACHABLE_MESSAGE);
+          return;
+        }
+        await initializePeer();
+        return;
+      }
+
+      if (!currentPeer || currentPeer.destroyed) {
+        // peer 对象没了但房号还在：重建，已发出去的链接仍然有效。
+        if (sharerPeerRebuildsRef.current >= SCREEN_SHARE_MAX_PEER_REBUILDS) {
+          failSharerSession(SHARER_RECONNECT_EXHAUSTED_MESSAGE);
+          return;
+        }
+        sharerPeerRebuildsRef.current += 1;
+        onNotification('信令连接恢复失败，正在重建共享连接...', 'info');
+        await initializePeer();
+        sharerReconnectAttemptsRef.current = 0;
+        sharerPeerOpenedAtRef.current = null;
+        return;
+      }
 
       // retrySignaling() 返回 false 也可能只是「WS 本来就 OPEN / 正在 CONNECTING」。
       // 只有明确救不回来的状态才值得销毁 peer：销毁会换掉 peerId 并关掉所有 viewer
@@ -1168,17 +1372,17 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         recovery = currentPeer.signalingRecoveryState();
       }
 
-      // 'rejected' 多是不可用的 id / 限流，换一个 peerId 也救不回来，反而会让所有
-      // 已分享出去的链接失效。只有重连预算耗尽或对象已销毁才值得重建。
+      // 'rejected' 多是服务端明确拒绝（占用/未授权/限流）：同一个房号重试不会好，
+      // 继续留着只会让用户以为链接还能用，直接落终态并撤销房号。
       if (recovery === 'rejected') {
-        onNotification('信令服务拒绝了当前会话，请稍后重试', 'error');
+        failSharerSession(SIGNALING_SESSION_REJECTED_MESSAGE);
         return;
       }
       const shouldRebuild = recovery === 'exhausted' || recovery === 'destroyed';
       if (!shouldRebuild) return;
 
       if (sharerPeerRebuildsRef.current >= SCREEN_SHARE_MAX_PEER_REBUILDS) {
-        onNotification('信令连接持续失败，请刷新页面后重新开始共享', 'error');
+        failSharerSession(SHARER_RECONNECT_EXHAUSTED_MESSAGE);
         return;
       }
       sharerPeerRebuildsRef.current += 1;
@@ -1189,26 +1393,36 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         // Ignore destroy errors.
       }
       if (isSharing) {
-        onNotification('信令连接恢复失败，正在重建共享连接 ID...', 'info');
+        onNotification('信令连接恢复失败，正在重建共享连接...', 'info');
         await initializePeer();
         sharerReconnectAttemptsRef.current = 0;
         sharerPeerOpenedAtRef.current = null;
       }
     }, delay);
-  }, [isSharing, isPeerReady, peerId, sharerRecoveryTick, onNotification, initializePeer]);
+  }, [
+    isSharing,
+    isPeerReady,
+    peerId,
+    sharerRecoveryTick,
+    onNotification,
+    initializePeer,
+    failSharerSession,
+  ]);
 
+  // 房号续期：长时间分享时用同 peerId + 同 secret 重新登记，只延长 TTL 不换口令，
+  // 已发出去的链接因此不会在中途过期。单次失败不影响当前会话（TTL 有 24 小时余量）。
+  useEffect(() => {
+    if (!isSharing || !shareRoom) return;
+    const timer = window.setInterval(() => {
+      const currentRoom = shareRoomRef.current;
+      if (!currentRoom) return;
+      void renewScreenShareRoom(currentRoom).then((renewed) => {
+        logDebug(renewed ? 'log' : 'warn', 'Screen share room renewal:', renewed);
+      });
+    }, CONNECTION_TIMINGS.SHARE_CODE_RENEWAL_INTERVAL_MS);
+    return () => window.clearInterval(timer);
+  }, [isSharing, shareRoom]);
 
-
-  const broadcastShareEnded = useCallback((reason: 'stopped' | 'window_closed' = 'stopped') => {
-    activeDataConnectionsRef.current.forEach((conn) => {
-      if (!conn.open) return;
-      try {
-        conn.send({ type: 'share-ended', reason });
-      } catch {
-        // Ignore best-effort notify errors.
-      }
-    });
-  }, []);
 
 
   const stopViewing = useCallback((isManual = true) => {
@@ -1398,7 +1612,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         if (data && data.type === 'share-full') {
           // 达到观看人数上限：明确告知并停止自动重连，避免把「人数满」误判成网络问题。
           remoteShareFullRef.current = true;
-          setError(`分享人数已满（上限 ${SCREEN_SHARE_LIMITS.MAX_VIEWERS} 人），请稍后再试`);
+          setError(getShareFullMessage(SCREEN_SHARE_LIMITS.MAX_VIEWERS));
           setIsConnecting(false);
           onNotification('分享人数已满，请稍后再试', 'info');
           stopViewing(false);
@@ -1654,9 +1868,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         if (!isManualStopRef.current) {
           stopViewing(false);
           // 这里也可以触发重连，逻辑同上
-          setError(`连接发生错误: ${err.message}`);
+          setError(getMediaConnectionErrorMessage(err));
         } else {
-          setError(`连接失败: ${err.message}`);
+          setError(getMediaConnectionErrorMessage(err));
           setIsConnecting(false);
         }
       });
@@ -1693,9 +1907,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       }
 
       if (err.type === 'peer-unavailable') {
-        setError('找不到该分享者，请确认连接 ID 是否正确或分享者仍在共享');
+        setError(getPeerRuntimeErrorMessage('peer-unavailable'));
       } else {
-        setError(`连接错误: ${err.message}`);
+        setError(getMediaConnectionErrorMessage(err));
       }
       setIsConnecting(false);
     });
@@ -1958,8 +2172,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       attachSharePreviewStream(stream, 'Share preview playback failed');
       peerSessionTokenRef.current += 1;
+      // 新分享是全新会话：清掉上一次的终态标记与重试预算。
+      sharerFailureHandledRef.current = false;
+      sharerSignalingBrokenRef.current = false;
+      sharerReconnectAttemptsRef.current = 0;
+      sharerPeerRebuildsRef.current = 0;
+      setSharerFailure(null);
       setIsSharing(true);
-      initializePeer();
+      void initializePeer();
       onNotification(`屏幕共享已开始${getScreenShareAudioSuffix(stream)}`, 'success');
     } catch (err) {
       const failure = describeScreenCaptureFailure(err);
@@ -2010,14 +2230,21 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const stopScreenShare = () => {
     // 让仍在 await 的 initializePeer 作废，避免停止后又有新 peer 注册。
     peerSessionTokenRef.current += 1;
-    // 分享结束即销毁会话密钥：下次分享必须是新身份，旧链接不能凭旧密钥接管。
-    sharerSessionSecretHashRef.current = null;
+    // 结束分享即撤销房号：旧链接（?view=<peerId>）之后不可再用，也不会被新会话复用。
+    const room = shareRoomRef.current;
+    shareRoomRef.current = null;
+    setShareRoom(null);
+    if (room) void revokeScreenShareRoom(room);
     broadcastShareEnded('stopped');
     if (sharerReconnectTimerRef.current) {
       clearTimeout(sharerReconnectTimerRef.current);
       sharerReconnectTimerRef.current = null;
     }
     sharerReconnectAttemptsRef.current = 0;
+    sharerPeerRebuildsRef.current = 0;
+    sharerSignalingBrokenRef.current = false;
+    sharerFailureHandledRef.current = false;
+    setSharerFailure(null);
 
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
@@ -2052,7 +2279,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   };
 
   useEffect(() => {
-    stopScreenShareRef.current = stopScreenShare;
+    failSharerSessionRef.current = failSharerSession;
   });
 
   return (
@@ -2092,6 +2319,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       copyShareLink={copyShareLink}
       copied={copied}
       isPeerReady={isPeerReady}
+      isShareLive={isShareLive}
+      sharerFailure={sharerFailure}
+      dismissSharerFailure={() => {
+        setSharerFailure(null);
+        sharerFailureHandledRef.current = false;
+      }}
+      recommendedViewerCount={viewerCapacity.recommended}
+      maxViewerCount={viewerCapacity.max}
       viewerCount={viewerCount}
       qualityLevel={qualityLevel}
       sharerVideoRef={videoRef}

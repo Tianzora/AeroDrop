@@ -26,6 +26,11 @@ const baseProps: React.ComponentProps<typeof ScreenShareUI> = {
   copyShareLink: () => {},
   copied: false,
   isPeerReady: true,
+  isShareLive: false,
+  sharerFailure: null,
+  dismissSharerFailure: () => {},
+  recommendedViewerCount: 4,
+  maxViewerCount: 6,
   viewerCount: 0,
   qualityLevel: 'high' as const,
   sharerVideoRef: { current: null },
@@ -54,7 +59,11 @@ test('观看态：状态与画质叠进播放器，使用自绘控件条', () =>
 });
 
 test('共享态：保留分享链接卡片与共享操作条', () => {
-  const markup = render({ isSharing: true, shareLink: 'https://example.com/#/screen-share?sharer=abc' });
+  const markup = render({
+    isSharing: true,
+    isShareLive: true,
+    shareLink: 'https://example.com/#/screen-share?sharer=abc',
+  });
 
   assert.match(markup, /屏幕共享/);
   assert.match(markup, /正在共享/);
@@ -63,6 +72,58 @@ test('共享态：保留分享链接卡片与共享操作条', () => {
   assert.doesNotMatch(markup, /在新窗口打开/);
   assert.match(markup, /停止共享/);
   assert.doesNotMatch(markup, /停止观看/);
+});
+
+test('共享中但信令未就绪：不显示绿色 LIVE，链接标注失效', () => {
+  const markup = render({
+    isSharing: true,
+    isShareLive: false,
+    isPeerReady: false,
+    shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
+  });
+
+  // 采集在跑但没注册上：绿色「正在共享」会骗人，只能显示连接态。
+  assert.match(markup, /正在连接服务器/);
+  assert.doesNotMatch(markup, /正在共享/);
+  assert.match(markup, /信令中断，新观众暂时无法加入/);
+  assert.match(markup, /disabled=""/);
+});
+
+test('信令终态：展示中断说明并提示旧链接已失效', () => {
+  const markup = render({
+    sharerFailure: {
+      reason: 'signaling_failed',
+      message: '无法连接信令服务器，请检查网络后重试',
+    },
+  });
+
+  assert.match(markup, /共享已中断/);
+  assert.match(markup, /无法连接信令服务器，请检查网络后重试/);
+  assert.match(markup, /此前分享的链接已失效/);
+  assert.match(markup, /重新开始共享/);
+  assert.doesNotMatch(markup, /正在共享/);
+  assert.doesNotMatch(markup, /复制分享链接/);
+});
+
+test('容量：给出建议人数，超过建议值给出降画质提示', () => {
+  const markup = render({
+    isSharing: true,
+    isShareLive: true,
+    shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
+    viewerCount: 5,
+    recommendedViewerCount: 4,
+    maxViewerCount: 6,
+  });
+
+  assert.match(markup, /建议 4 人同时观看（依网络），最多 6 人/);
+  assert.match(markup, /当前 5 人已超过建议人数，部分观众画质可能下降/);
+});
+
+test('未开始时也展示建议人数，且不渲染共享链接卡片', () => {
+  const markup = render({ recommendedViewerCount: 4, maxViewerCount: 6 });
+
+  assert.match(markup, /建议 4 人同时观看（依网络），最多 6 人/);
+  assert.doesNotMatch(markup, /复制分享链接/);
 });
 
 test('未开始时保留引导头部与开始按钮', () => {
