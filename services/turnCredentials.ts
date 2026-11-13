@@ -1,3 +1,9 @@
+import {
+  DEFAULT_SELF_HOSTED_TURN_TTL_SECONDS,
+  MAX_SELF_HOSTED_TURN_TTL_SECONDS,
+  MIN_SELF_HOSTED_TURN_TTL_SECONDS,
+} from '../constants/signaling';
+
 export type SelfHostedTurnEnv = {
   TURN_URLS?: string;
   TURN_SHARED_SECRET?: string;
@@ -14,10 +20,6 @@ export type TurnIceServer = {
 type IceServerWithUrls = {
   urls: string | string[];
 };
-
-const DEFAULT_TURN_TTL_SECONDS = 3600;
-const MIN_TURN_TTL_SECONDS = 60;
-const MAX_TURN_TTL_SECONDS = 86400;
 
 export const parseTurnUrls = (value: string | undefined): string[] => {
   if (!value) return [];
@@ -71,9 +73,9 @@ export const selectReliableIceServers = <T extends IceServerWithUrls>(
 };
 
 export const getTurnTtlSeconds = (value: string | undefined): number => {
-  const parsed = value ? Number.parseInt(value, 10) : DEFAULT_TURN_TTL_SECONDS;
-  const ttl = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_TURN_TTL_SECONDS;
-  return Math.min(MAX_TURN_TTL_SECONDS, Math.max(MIN_TURN_TTL_SECONDS, ttl));
+  const parsed = value ? Number.parseInt(value, 10) : DEFAULT_SELF_HOSTED_TURN_TTL_SECONDS;
+  const ttl = Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_SELF_HOSTED_TURN_TTL_SECONDS;
+  return Math.min(MAX_SELF_HOSTED_TURN_TTL_SECONDS, Math.max(MIN_SELF_HOSTED_TURN_TTL_SECONDS, ttl));
 };
 
 const toBase64 = (bytes: ArrayBuffer) => {

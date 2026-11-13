@@ -72,6 +72,14 @@ export const MAX_CF_TURN_TTL_SECONDS = 86_400;
 
 /** 凭证缓存要提前多久失效，避免把即将过期的凭证发给客户端。 */
 export const CF_TURN_CACHE_SAFETY_WINDOW_SECONDS = 60;
+/**
+ * 自建 TURN（`TURN_TTL_SECONDS`）与 Cloudflare 短期凭证用同一套边界：
+ * 值只写一次，services/turnCredentials.ts 从这里导入。改这里等于同时改两条路径。
+ */
+export const DEFAULT_SELF_HOSTED_TURN_TTL_SECONDS = DEFAULT_CF_TURN_TTL_SECONDS;
+export const MIN_SELF_HOSTED_TURN_TTL_SECONDS = MIN_CF_TURN_TTL_SECONDS;
+export const MAX_SELF_HOSTED_TURN_TTL_SECONDS = MAX_CF_TURN_TTL_SECONDS;
+
 
 /** 调用 Cloudflare TURN API 的超时。 */
 export const CF_TURN_FETCH_TIMEOUT_MS = 4000;

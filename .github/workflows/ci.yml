@@ -36,20 +36,23 @@ jobs:
         run: npm run test:all
 
       # 覆盖率门槛用 node:test 内置能力，不引入依赖；阈值在 scripts/node-test-args.mjs。
-      # 只对 services 卡阈值：组件测试大量走 DOM 桩，函数覆盖低不代表回归风险高。
+      # NODE_TEST_COVERAGE_INCLUDE 让「没被任何测试 import 的文件」也进分母
+      # （默认只统计已加载文件，新模块会静默拉低不了覆盖率）。
       - name: Unit test coverage gate
         env:
           NODE_TEST_COVERAGE: '1'
+          NODE_TEST_COVERAGE_INCLUDE: 'services/**/*.ts'
         run: node ./scripts/run-node-tests.mjs services
 
-      # 组件覆盖率单独卡一套更低的阈值（当前 69.7 行 / 69.4 分支 / 50 函数）：
+      # 组件覆盖率单独卡一套更低的阈值（计入未被测试加载的组件后：61.7 行 / 64.6 分支 / 43.6 函数）：
       # 组件测试大量走 DOM 桩，函数覆盖率天然偏低，用 services 的阈值会逼出无意义断言。
       - name: Component coverage gate
         env:
           NODE_TEST_COVERAGE: '1'
-          NODE_TEST_COVERAGE_MIN_LINES: '65'
-          NODE_TEST_COVERAGE_MIN_BRANCHES: '60'
-          NODE_TEST_COVERAGE_MIN_FUNCTIONS: '45'
+          NODE_TEST_COVERAGE_INCLUDE: 'components/**/*.ts,components/**/*.tsx'
+          NODE_TEST_COVERAGE_MIN_LINES: '60'
+          NODE_TEST_COVERAGE_MIN_BRANCHES: '58'
+          NODE_TEST_COVERAGE_MIN_FUNCTIONS: '40'
         run: node ./scripts/run-node-tests.mjs components
 
       - name: Build

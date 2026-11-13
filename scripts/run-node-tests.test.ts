@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
@@ -80,4 +81,50 @@ test('collectTestFiles 对不存在的目标与空目录报错，而不是静默
   } finally {
     rmSync(empty, { recursive: true, force: true });
   }
+});
+
+const isolatedEnv = (): Record<string, string | undefined> => {
+  // 子进程里残留 NODE_TEST_CONTEXT 会让它对 `node --test` 误以为自己是被父 runner
+  // 启动的测试文件，失败时也返回 0——正是本条测试要防的假绿。
+  const env: Record<string, string | undefined> = { ...process.env, NODE_TEST_COVERAGE: '0' };
+  delete env.NODE_TEST_CONTEXT;
+  delete env.NODE_TEST_REPORTER;
+  return env;
+};
+
+test('runner 把子进程的失败退出码透传出去，不会把红测试报成绿', () => {
+  // 直接断言脚本行为：以前 runner 只看 spawnSync 的 status，这里守住
+  // 「测试失败 → 进程非 0」这条契约，避免 CI 靠退出码判断时假绿。
+  const root = mkdtempSync(join(tmpdir(), 'aerodrop-runner-'));
+  try {
+    writeFileSync(
+      join(root, 'failing.test.ts'),
+      [
+        "import assert from 'node:assert/strict';",
+        "import test from 'node:test';",
+        '',
+        "test('fails on purpose', () => { assert.fail('boom'); });",
+        '',
+      ].join(String.fromCharCode(10)),
+    );
+    const result = spawnSync(process.execPath, [join('scripts', 'run-node-tests.mjs'), root], {
+      cwd: process.cwd(),
+      encoding: 'utf8',
+      // 在 node --test 里再 spawn 一个 node --test：必须删掉 NODE_TEST_CONTEXT，
+      // 否则子进程会以为自己是被父 runner 启动的测试文件，退出码不再反映结果。
+      env: isolatedEnv(),
+    });
+    assert.notEqual(result.status, 0, '失败的测试必须让 runner 非 0 退出');
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('runner 对不存在的目标直接非 0 退出，而不是空跑成功', () => {
+  const result = spawnSync(process.execPath, [join('scripts', 'run-node-tests.mjs'), 'definitely-missing-dir'], {
+    cwd: process.cwd(),
+    encoding: 'utf8',
+    env: isolatedEnv(),
+  });
+  assert.notEqual(result.status, 0);
 });

@@ -13,6 +13,27 @@ const readCoverageThreshold = (name, fallback) => {
   return Number.isFinite(parsed) && parsed >= 0 ? parsed : fallback;
 };
 
+const readList = (name) => (process.env[name] ?? '')
+  .split(',')
+  .map((entry) => entry.trim())
+  .filter(Boolean);
+
+// 老版本 Node（22.12 是否支持未验证）没有这两个旗标，探测不到就不传，
+// 覆盖率会退化成「只统计已加载文件」，但至少不会因为未知旗标直接崩掉。
+const supportsCoverageFilters = () => process.allowedNodeEnvironmentFlags.has('--test-coverage-include');
+
+const coverageIncludeArgs = () => {
+  if (!supportsCoverageFilters()) return [];
+  return readList('NODE_TEST_COVERAGE_INCLUDE').map((pattern) => `--test-coverage-include=${pattern}`);
+};
+
+const coverageExcludeArgs = () => {
+  if (!supportsCoverageFilters()) return [];
+  const defaults = ['**/*.test.ts', '**/*.test.tsx', 'scripts/test-stubs/**'];
+  return [...defaults, ...readList('NODE_TEST_COVERAGE_EXCLUDE')]
+    .map((pattern) => `--test-coverage-exclude=${pattern}`);
+};
+
 export const buildNodeTestArgs = (files) => [
   // tsx 负责 TS/JSX 转译；test-stubs 把只在浏览器里做视觉效果的大 barrel 依赖
   // （motion/react、@hugeicons/*）换成本地极简实现，避免每个测试子进程重复转译。
@@ -24,9 +45,14 @@ export const buildNodeTestArgs = (files) => [
   // Node 22.12（.nvmrc 与 CI）仍需要这个开关；Node 24 接受但不再必需。
   '--experimental-sqlite',
   // CI 用 NODE_TEST_COVERAGE=1 打开覆盖率并卡阈值；本地默认关闭，保持测试快。
+  // 默认覆盖率只统计「被加载过」的文件：新增一个没人 import 的模块不进分母，门槛
+  // 会永久绿灯。NODE_TEST_COVERAGE_INCLUDE 让 CI 指定整个目录，未被任何测试加载
+  // 的文件按 0 计入（Node 22.12 是否支持该旗标未验证，所以先探测再传）。
   ...(process.env.NODE_TEST_COVERAGE === '1'
     ? [
         '--experimental-test-coverage',
+        ...coverageIncludeArgs(),
+        ...coverageExcludeArgs(),
         `--test-coverage-lines=${readCoverageThreshold('NODE_TEST_COVERAGE_MIN_LINES', 85)}`,
         `--test-coverage-branches=${readCoverageThreshold('NODE_TEST_COVERAGE_MIN_BRANCHES', 78)}`,
         `--test-coverage-functions=${readCoverageThreshold('NODE_TEST_COVERAGE_MIN_FUNCTIONS', 75)}`,
