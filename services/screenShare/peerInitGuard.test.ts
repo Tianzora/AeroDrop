@@ -1,7 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { createSingleFlight } from './peerInitGuard.ts';
+import { createSingleFlight, createSingleFlightSlot } from './peerInitGuard.ts';
 
 const wait = (ms: number) => new Promise<void>((resolve) => setTimeout(resolve, ms));
 
@@ -53,4 +53,29 @@ test('串行调用不受影响：一次结束之后下一次照常进入', () =>
   flight.leave();
   assert.equal(flight.tryEnter(), true);
   flight.leave();
+});
+
+test('卡住的闸门会被判为过期、可以换掉：一次挂住的登记不该让分享永久停在 amber', () => {
+  const flight = createSingleFlight();
+  assert.equal(flight.tryEnter(), true);
+  // 刚进入时当然没过期：这是「绕过兜底的死锁」的判据，不是超时的替代品。
+  assert.equal(flight.isStale(Date.now(), 60_000), false);
+  assert.equal(flight.isStale(Date.now() + 60_001, 60_000), true);
+
+  const idle = createSingleFlight();
+  assert.equal(idle.isStale(Date.now() + 10_000_000, 60_000), false, '没人持有的闸门无从过期');
+});
+
+test('停止后立刻再开始：换新闸门让新会话进得去，旧调用的 leave 不会放掉新闸门', () => {
+  const slot = createSingleFlightSlot();
+  const previous = slot.current();
+  assert.equal(previous.tryEnter(), true, '旧会话的初始化还卡在 await 上');
+
+  const fresh = slot.reset();
+  assert.notEqual(fresh, previous, 'reset 必须换新对象，否则旧调用的 finally 会误放新会话的闸门');
+  assert.equal(slot.current().tryEnter(), true, '新会话必须能抢到自己的闸门');
+
+  previous.leave();
+  assert.equal(slot.current().isInFlight(), true, '旧调用收尾只该影响它自己那一个闸门');
+  assert.equal(slot.current().tryEnter(), false);
 });

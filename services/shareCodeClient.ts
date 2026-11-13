@@ -86,11 +86,19 @@ export const registerShareCode = async (
     return { status: 'failed', error: 'code must be six digits' };
   }
 
+  // 登记没有超时的话，一次挂住的请求会让屏幕共享的初始化永远停在 await 上：
+  // 单飞闸门不释放，后续每次重试都在闸门处直接放弃，用户只能刷新页面。
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    CONNECTION_TIMINGS.SHARE_CODE_REGISTER_TIMEOUT_MS
+  );
   try {
     const response = await resolveFetch(options)(resolveApiUrl(options, '/api/share-code'), {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       cache: 'no-store',
+      signal: controller.signal,
       body: JSON.stringify({
         peerId: input.peerId,
         secretHash: input.secretHash,
@@ -109,6 +117,8 @@ export const registerShareCode = async (
     return { status: 'ok', code: payload.code, expiresAt: payload.expiresAt };
   } catch (error) {
     return { status: 'failed', error: error instanceof Error ? error.message : 'Share code request failed' };
+  } finally {
+    clearTimeout(timeout);
   }
 };
 

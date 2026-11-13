@@ -152,6 +152,8 @@ interface HostLog {
   connectionFailures: string[];
   /** 状态行文案的写入顺序：用来断言「有在途传输时降级提示而不是 error」 */
   connectionStatuses: string[];
+  /** 持久降级位（口令已作废）的写入顺序：这条不能靠 30 秒提示兜住 */
+  shareRevoked: Array<string | null>;
   /** 关键回调顺序，用来断言「先走完整停止流程，再写 error 态」。 */
   order: string[];
   metadata: FileMetadata | null;
@@ -172,6 +174,7 @@ const createHost = () => {
     shareEnded: 0,
     connectionFailures: [],
     connectionStatuses: [],
+    shareRevoked: [],
     order: [],
     metadata: null,
     phase: () => log.phases[log.phases.length - 1]?.phase ?? '',
@@ -194,6 +197,7 @@ const createHost = () => {
     setShareCode: (code) => { log.shareCodes.push(code); },
     setRemainingTime: (text) => { log.remainingTimes.push(text); },
     setConnectionStatus: (status) => { log.connectionStatuses.push(status); },
+    setShareRevoked: (message) => { log.shareRevoked.push(message); },
     setMetadata: (next) => { log.metadata = next; },
     notify: (message, type) => { log.notifications.push({ message, type }); },
     getActiveTransfers: () => activeTransfers,
@@ -659,4 +663,37 @@ test('信令恢复（open）会清掉降级状态位，不留一条过期提示'
 
   peer()?.emit('open');
   assert.equal(log.connectionStatuses[log.connectionStatuses.length - 1], '');
+});
+
+test('口令被注销后降级位要留下来：作废是持久事实，不能跟着 30 秒提示一起消失', async () => {
+  const { host, log, peer, setActiveConnections } = createHost();
+  const { deps } = createDeps();
+  const session = createSenderSession(host, deps);
+
+  await session.start({ metadata, expiryOption: '10m' });
+  peer()?.emit('open');
+  setActiveConnections(1);
+
+  peer()?.emit('error', { type: 'unauthorized' });
+  await Promise.resolve();
+
+  assert.equal(log.shareRevoked.at(-1), SHARE_SIGNALING_LOST_MESSAGE);
+  assert.notEqual(log.phase(), 'error', '有在途传输时不能把传输列表撤掉');
+
+  peer()?.emit('open');
+  assert.equal(log.shareRevoked.at(-1), null, '信令恢复后必须清掉降级位，否则界面一直说链接失效');
+});
+
+test('重新开始分享不会继承上一轮的降级位', async () => {
+  const { host, log, peer, setActiveConnections } = createHost();
+  const { deps } = createDeps();
+  const session = createSenderSession(host, deps);
+  await session.start({ metadata, expiryOption: '10m' });
+  setActiveConnections(1);
+  peer()?.emit('error', { type: 'unauthorized' });
+  await Promise.resolve();
+  assert.equal(log.shareRevoked.at(-1), SHARE_SIGNALING_LOST_MESSAGE);
+
+  await session.start({ metadata, expiryOption: '10m' });
+  assert.equal(log.shareRevoked.at(-1), null, '新口令不能继承上一轮的失效提示');
 });

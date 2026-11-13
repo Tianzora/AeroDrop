@@ -141,6 +141,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
   const stateRef = useRef<TransferState>(state);
   stateRef.current = state;
   const [remainingTime, setRemainingTime] = useState<string>('');
+  // 口令/链接是否已经作废：这不是会过期的状态行提示，过期了就没人看得见。
+  const [shareRevokedMessage, setShareRevokedMessage] = useState<string | null>(null);
 
   const [copied, setCopied] = useState(false);
   const [linkCopied, setLinkCopied] = useState(false);
@@ -452,9 +454,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
 
   const updateConnectionStatusUI = () => {
     const count = getVisibleConnections().length;
-    if (count > 1) {
+    if (count > 0) {
        applyRoutineConnectionStatus(`已连接 ${count} 个设备`);
-    } else if (count === 0) {
+    } else {
        applyRoutineConnectionStatus('');
     }
   };
@@ -710,6 +712,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
       setRemainingTime: (text) => setRemainingTime(text),
       // 会话层写的是运维提示（信令失效但还有在途传输），必须能压住连接数统计。
       setConnectionStatus: (status) => pushConnectionStatus(status),
+      setShareRevoked: (message) => setShareRevokedMessage(message),
       setMetadata: (next) => setMetadata(next),
       notify: (message, type) => onNotification?.(message, type),
       getActiveTransfers: () => activeTransfersCount.current,
@@ -1644,6 +1647,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
       shareLink={shareLink}
       handleCopyLink={handleCopyLink}
       remainingTime={remainingTime}
+      shareRevokedMessage={shareRevokedMessage}
       connectionStatus={connectionStatus}
       individualStats={individualStats}
       totalProgress={totalProgress}

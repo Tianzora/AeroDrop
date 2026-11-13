@@ -21,7 +21,7 @@ export type ScreenShareRoom = {
 };
 
 /** 登记失败原因：重试策略与文案都按它分流，不再一律当成「网络不可达」。 */
-export type ScreenShareRoomFailureReason = 'taken' | 'rate-limited' | 'failed';
+export type ScreenShareRoomFailureReason = 'taken' | 'rate-limited' | 'timeout' | 'failed';
 
 export type ScreenShareRoomFailure = {
   status: 'failed';
@@ -41,6 +41,8 @@ const toFailureReason = (status: string): ScreenShareRoomFailureReason => {
       return 'taken';
     case 'rate-limited':
       return 'rate-limited';
+    case 'timeout':
+      return 'timeout';
     default:
       return 'failed';
   }
@@ -77,6 +79,8 @@ export const describeScreenShareRoomFailure = (status: string): string => {
       return '共享房间号已被占用，请重新开始共享';
     case 'rate-limited':
       return '创建共享房间过于频繁，请稍后再试';
+    case 'timeout':
+      return '共享服务长时间无响应，请检查网络后重新开始共享';
     default:
       return '共享房间登记失败，请检查网络后重试';
   }
@@ -113,17 +117,38 @@ export const registerScreenShareRoom = async (input?: {
 };
 
 /**
+ * 房号是否已经过期。分享端必须据此把链接标成失效——续期失败 3 次才提示的话，
+ * 后台标签页里定时器被节流的那段时间，链接可能已经死了而界面还是绿的。
+ */
+export const isScreenShareRoomExpired = (
+  room: ScreenShareRoom,
+  now: number = Date.now(),
+): boolean => now >= room.expiresAt;
+
+export type ScreenShareRoomRenewal = {
+  readonly ok: boolean;
+  /** 续期成功时服务端返回的新过期时间（毫秒时间戳）；失败为 null。 */
+  readonly expiresAt: number | null;
+};
+
+/**
  * 续期：同 peerId + 同 secret + 同口令重新登记只延长过期时间，不换码、不改绑定，
  * 所以已发出去的链接在长时间分享里仍然有效。
+ *
+ * 返回值带上新的 expiresAt：分享端要拿它判断「链接是不是已经过期」，
+ * 只回一个布尔值的话，房号过期这件事在分享端永远不可见。
  */
-export const renewScreenShareRoom = async (room: ScreenShareRoom): Promise<boolean> => {
+export const renewScreenShareRoom = async (
+  room: ScreenShareRoom,
+): Promise<ScreenShareRoomRenewal> => {
   const result = await requestShareCode({
     peerId: room.peerId,
     requestedCode: room.code,
     ttlSeconds: SCREEN_SHARE_ROOM_TTL_SECONDS,
     secret: room.secret,
   });
-  return result.status === 'ok';
+  if (result.status !== 'ok') return { ok: false, expiresAt: null };
+  return { ok: true, expiresAt: result.expiresAt };
 };
 
 /** 停止分享/终态失败时撤销房号；失败按已失效处理，不让注销异常影响本地收尾。 */

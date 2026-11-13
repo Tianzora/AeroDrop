@@ -36,10 +36,11 @@ import {
   type ScreenShareQualityLevel,
 } from '../services/screenShare/bitratePolicy';
 import { decideViewerHeartbeat } from '../services/screenShare/viewerHeartbeatPolicy';
-import { createSingleFlight, type SingleFlight } from '../services/screenShare/peerInitGuard';
+import { createSingleFlightSlot, type SingleFlightSlot } from '../services/screenShare/peerInitGuard';
 import { describeViewerCapacity } from '../services/screenShare/viewerCapacity';
 import {
   createScreenSharePeerId,
+  isScreenShareRoomExpired,
   isTerminalScreenShareRoomFailure,
   registerScreenShareRoom,
   renewScreenShareRoom,
@@ -48,6 +49,16 @@ import {
   type ScreenShareRoom,
   type ScreenShareRoomFailure,
 } from '../services/screenShare/shareRoomRegistration';
+import { createScreenSharePeerCredentials } from '../services/screenShare/screenSharePeerCredentials';
+import {
+  forgetSessionProof,
+  recallSessionProof,
+  rememberSessionProof,
+} from '../services/screenShare/sessionProofStore';
+import {
+  describeScreenCaptureFailure,
+  type ScreenCaptureFailure,
+} from '../services/screenShare/screenCaptureGuidance';
 
 interface ScreenShareProps {
   onNotification: (message: string, type: 'success' | 'info' | 'error') => void;
@@ -58,16 +69,6 @@ interface ScreenShareProps {
 
 type QualityLevel = ScreenShareQualityLevel;
 
-// 屏幕录制失败不止「用户取消」一种：浏览器可能对「用户取消」「权限策略拒绝」
-// 「嵌入式预览框」都抛 NotAllowedError，所以这里把原始 name/message 一起带出来，
-// 不要把所有 NotAllowedError 都说成用户取消。
-type ScreenCaptureFailure = {
-  name: string;
-  message: string;
-  isCancel: boolean;
-  description: string;
-};
-
 const isEmbeddedFrame = () =>
   typeof window !== 'undefined' && window.self !== window.top;
 
@@ -77,73 +78,11 @@ const hasUserActivation = (): boolean => {
   return activation ? activation.isActive : true;
 };
 
-export const describeScreenCaptureFailure = (error: unknown): ScreenCaptureFailure => {
-  const name = error instanceof DOMException || error instanceof Error ? error.name : '';
-  const message = error instanceof Error ? error.message : String(error ?? '');
-  const embedded = isEmbeddedFrame();
-
-  if (name === 'AbortError') {
-    return { name, message, isCancel: true, description: '用户取消了屏幕共享' };
-  }
-
-  if (name === 'NotSupportedError') {
-    return {
-      name,
-      message,
-      isCancel: false,
-      description: '当前环境不支持屏幕录制（无桌面会话、无头浏览器或嵌入式预览框）',
-    };
-  }
-
-  if (name === 'NotReadableError') {
-    return {
-      name,
-      message,
-      isCancel: false,
-      description: '系统拒绝了屏幕录制（可能被安全软件或其他应用占用），请重试',
-    };
-  }
-
-  if (name === 'NotAllowedError') {
-    // Chrome 对「用户取消」「策略拒绝」「缺少用户手势」都给 NotAllowedError，
-    // 只有 message 恰好是 "Permission denied" 且页面不在 iframe 里时才可能是取消。
-    const looksLikeCancel = /^permission denied\.?$/i.test(message.trim());
-    if (looksLikeCancel && !embedded && hasUserActivation()) {
-      return { name, message, isCancel: true, description: '用户取消了屏幕共享' };
-    }
-    if (embedded) {
-      return {
-        name,
-        message,
-        isCancel: false,
-        description:
-          '浏览器拒绝了屏幕录制：当前页面嵌在预览框/iframe 中，浏览器默认禁止在这里录制屏幕，请在新标签页直接打开后重试',
-      };
-    }
-    if (!hasUserActivation()) {
-      return {
-        name,
-        message,
-        isCancel: false,
-        description:
-          '浏览器没有把这次点击识别为用户手势（可能是脚本或自动化触发），请在页面上手动点击「开始共享屏幕」后重试',
-      };
-    }
-    return {
-      name,
-      message,
-      isCancel: false,
-      description: `浏览器拒绝了屏幕录制：${message || name}，请检查浏览器的屏幕录制权限、企业策略，或在独立标签页中重试`,
-    };
-  }
-
-  return {
-    name,
-    message,
-    isCancel: false,
-    description: `屏幕共享启动失败：${message || '未知错误'}${name ? `（${name}）` : ''}`,
-  };
-};
+const describeCaptureError = (error: unknown): ScreenCaptureFailure =>
+  describeScreenCaptureFailure(error, {
+    embedded: isEmbeddedFrame(),
+    userActivation: hasUserActivation(),
+  });
 
 /**
  * 找到已经协商出来的音频 sender。不能看 sender.track：replaceTrack(null) 之后它会变成 null，
@@ -182,6 +121,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const [shareRoom, setShareRoom] = useState<ScreenShareRoom | null>(null);
   // 房号续期连续失败：链接还剩不到一个续期窗口就会过期。共享画面照常，但必须提示。
   const [shareRoomRenewalWarning, setShareRoomRenewalWarning] = useState(false);
+  // 房号已经过期且没能续上：链接作废，界面不能再拿它配绿色「正在共享」。
+  const [shareRoomExpired, setShareRoomExpired] = useState(false);
+  // 是否曾经连上过：用来区分「首连中」与「连上过又断了」，别把首次握手说成信令中断。
+  const [hasBeenReady, setHasBeenReady] = useState(false);
   const [copied, setCopied] = useState(false);
   const [viewerCount, setViewerCount] = useState(0);
   const [targetSharerId, setTargetSharerId] = useState<string | null>(null);
@@ -242,6 +185,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     SCREEN_SHARE_BANDWIDTH_MONITOR_INTERVAL_MS,
     SCREEN_SHARE_BANDWARMUP_MS,
     SCREEN_SHARE_VIEWER_STATS_INTERVAL_MS,
+    SHARE_ROOM_REGISTRATION_MAX_TIMEOUTS,
   } = CONNECTION_TIMINGS;
   const MAX_RECONNECT_ATTEMPTS = SCREEN_SHARE_MAX_RECONNECT_ATTEMPTS;
   // 观看者端：连接过程的全局超时定时器
@@ -258,9 +202,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const shareRoomFailureRef = useRef<ScreenShareRoomFailure | null>(null);
   // 房号续期连续失败计数：达到 CONNECTION_TIMINGS.SHARE_ROOM_RENEWAL_MAX_FAILURES 才提示。
   const shareRoomRenewalFailuresRef = useRef(0);
+  // 连续「登记超时」次数：服务端连续两次 8s 不响应就不是抖动，继续退避只会把界面
+  // 永久停在「正在连接服务器」，要落成可操作终态。
+  const shareRoomTimeoutsRef = useRef(0);
   // 初始化单飞闸门：开始共享/看门狗/恢复退避都可能触发 initializePeer，慢网络下会有第二次
   // 调用在上一次还没结束时进来。并发调用会各自登记房号，先登记的成为无人撤销的孤儿。
-  const peerInitFlightRef = useRef<SingleFlight | null>(null);
+  const peerInitFlightRef = useRef<SingleFlightSlot>(createSingleFlightSlot());
   // 信令是否已经「坏到需要恢复」：只有它为真时恢复 effect 才会重试，避免刚点开始共享
   // （peer 正在握手）就被当成故障去重建。
   const sharerSignalingBrokenRef = useRef(false);
@@ -866,11 +813,21 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           failSharerSessionRef.current(registration.message);
           return;
         }
+        if (registration.reason === 'timeout') {
+          shareRoomTimeoutsRef.current += 1;
+          if (shareRoomTimeoutsRef.current >= SHARE_ROOM_REGISTRATION_MAX_TIMEOUTS) {
+            failSharerSessionRef.current(registration.message);
+            return;
+          }
+        } else {
+          shareRoomTimeoutsRef.current = 0;
+        }
         sharerSignalingBrokenRef.current = true;
         setSharerRecoveryTick((tick) => tick + 1);
         return;
       }
       room = registration.room;
+      shareRoomTimeoutsRef.current = 0;
       shareRoomFailureRef.current = null;
       shareRoomRef.current = room;
       setShareRoom(room);
@@ -878,14 +835,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     const id = room.peerId;
     const useSecurePeerServer = window.location.protocol === 'https:';
+    // 重建是新建 PeerRuntime：proof 存在实例内存里，不主动接回来的话过了静态摘要
+    // 宽限期就只能拿到 4010（分享直接终态、已发链接全废）。
     const peer = new PeerRuntime(id, {
       debug: 0,
       secure: useSecurePeerServer,
       pingInterval: 5000, // 缩短心跳间隔以保持 VPN 隧道活跃
-      // 与服务端登记一致的凭证：握手期校验 HMAC，同 peerId 重建凭同一 secretHash 才允许接管。
-      signalingCode: room.code,
-      signalingToken: room.secret,
-      sessionSecretHash: room.secretHash,
+      // 服务端首次绑定后只认轮换 proof；还没拿到 proof 时退回首连用的静态摘要。
+      ...createScreenSharePeerCredentials(room, recallSessionProof(room.peerId)),
       config: {
         iceServers: iceConfig.iceServers,
         iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
@@ -902,6 +859,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       sharerPeerOpenedAtRef.current = Date.now();
       setPeerId(openedId);
       setIsPeerReady(true);
+      setHasBeenReady(true);
       // 只清掉「信令不可达」的提示；其它错误（权限、设备）不该被恢复事件覆盖。
       setError((prev) => (prev === SIGNALING_UNREACHABLE_MESSAGE ? null : prev));
     };
@@ -910,6 +868,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       logDebug('log', 'Peer ID:', openedId);
       handleSignalingReady(openedId);
       onNotification(`连接 ID: ${openedId}`, 'info');
+    });
+
+    // proof 每次注册都会轮换：接住最新值，重建/刷新后才有凭证可用。
+    peer.on('session-proof', (proof) => {
+      rememberSessionProof(room.peerId, proof);
     });
 
     // 'open' 只在首次注册时发一次；自动重连成功后必须重新把 isPeerReady 置回 true，
@@ -1174,7 +1137,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   // 单飞包装：已在飞时直接放弃这一次，由在飞的那次结果驱动后续（它的失败会自己 tick 回
   // 恢复流程）。返回 false 表示这一调用没有真正执行初始化，调用方据此不要消耗重试预算。
   const initializePeer = useCallback(async (): Promise<boolean> => {
-    const flight = peerInitFlightRef.current ?? (peerInitFlightRef.current = createSingleFlight());
+    const flight = peerInitFlightRef.current.current();
     if (!flight.tryEnter()) return false;
     try {
       await initializePeerUnlocked();
@@ -1253,11 +1216,17 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     logDebug('warn', 'Screen share session failed:', message);
 
     // 让仍在 await 的 initializePeer 作废，别在终态之后又注册一个新会话。
+    // 闸门换新对象而不是就地清空：旧调用结束时的 leave() 只碰它自己那一个。
     peerSessionTokenRef.current += 1;
+    peerInitFlightRef.current.reset();
     const room = shareRoomRef.current;
     shareRoomRef.current = null;
     setShareRoom(null);
-    if (room) void revokeScreenShareRoom(room);
+    if (room) {
+      void revokeScreenShareRoom(room);
+      // 房号已撤销：留着的 proof 只会在下一次共享里被误当成有效凭证。
+      forgetSessionProof(room.peerId);
+    }
 
     broadcastShareEnded('stopped');
     if (sharerReconnectTimerRef.current) {
@@ -1270,7 +1239,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     sharerSignalingBrokenRef.current = false;
     shareRoomFailureRef.current = null;
     shareRoomRenewalFailuresRef.current = 0;
+    shareRoomTimeoutsRef.current = 0;
     setShareRoomRenewalWarning(false);
+    setShareRoomExpired(false);
 
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
@@ -1375,7 +1346,16 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       if (!isSharing) return;
       // 上一次初始化还没结束（弱网下单次 init 会超过看门狗与退避间隔）：跳过这一次，
       // 不与它并发。在飞那次的失败通路会自己 tick 回来重排，成功则直接进 ready。
-      if (peerInitFlightRef.current?.isInFlight()) return;
+      // 但闸门不能无条件信任：登记本身有超时兜底，真被卡住时必须换一个新闸门继续，
+      // 否则恢复流程每轮都在这里早退，界面永久停在「正在连接服务器」。
+      const initSlot = peerInitFlightRef.current;
+      if (initSlot.current().isInFlight()) {
+        if (!initSlot.current().isStale(Date.now(), CONNECTION_TIMINGS.SHARE_INIT_MAX_HOLD_MS)) {
+          return;
+        }
+        logDebug('warn', 'Screen share init gate looks stuck; replacing it');
+        initSlot.reset();
+      }
 
       const currentPeer = peerRef.current;
 
@@ -1457,31 +1437,82 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     failSharerSession,
   ]);
 
-  // 房号续期：长时间分享时用同 peerId + 同 secret 重新登记，只延长 TTL 不换口令，
-  // 已发出去的链接因此不会在中途过期。单次失败不影响当前会话（TTL 有 24 小时余量），
-  // 连续失败到 SHARE_ROOM_RENEWAL_MAX_FAILURES 才提示——但仍然不掐直播。
+  // 房号续期与过期感知。
+  //
+  // 续期：长时间分享时用同 peerId + 同 secret 重新登记，只延长 TTL 不换口令，已发出去的
+  // 链接因此不会在中途过期。单次失败不影响当前会话（TTL 有 24 小时余量），连续失败到
+  // SHARE_ROOM_RENEWAL_MAX_FAILURES 才提示——但仍然不掐直播。
+  //
+  // 过期：后台标签页里的 setInterval 会被节流到分钟级，房号可能在无人续期时过掉。所以回到
+  // 前台/网络恢复时立刻续一次，并且把「链接已失效」显式画出来——给一个已经作废的链接配
+  // 绿色「正在共享」，就是把观众骗进来再看「找不到分享者」。
+  const renewShareRoomNow = useCallback(async () => {
+    const currentRoom = shareRoomRef.current;
+    if (!currentRoom) return;
+    const renewal = await renewScreenShareRoom(currentRoom);
+    logDebug(
+      renewal.ok ? 'log' : 'warn',
+      'Screen share room renewal:',
+      renewal.ok,
+      renewal.expiresAt ?? '',
+    );
+    if (renewal.ok) {
+      shareRoomRenewalFailuresRef.current = 0;
+      setShareRoomRenewalWarning(false);
+      setShareRoomExpired(false);
+      if (renewal.expiresAt !== null) {
+        const renewedRoom = { ...currentRoom, expiresAt: renewal.expiresAt };
+        shareRoomRef.current = renewedRoom;
+        setShareRoom(renewedRoom);
+      }
+      return;
+    }
+    shareRoomRenewalFailuresRef.current += 1;
+    // 续期失败意味着「链接 TTL 在走向过期」，不是信令故障：只提示，不碰
+    // sharerSignalingBrokenRef。否则恢复 effect 会为了一个服务端明确拒绝去重建 peer，
+    // 把本可自愈的抖动升级成全员断流；清理时也不可能只撤自己那一次标记。
+    if (shareRoomRenewalFailuresRef.current >= CONNECTION_TIMINGS.SHARE_ROOM_RENEWAL_MAX_FAILURES) {
+      setShareRoomRenewalWarning(true);
+    }
+    if (isScreenShareRoomExpired(currentRoom)) setShareRoomExpired(true);
+  }, []);
+
   useEffect(() => {
     if (!isSharing || !shareRoom) return;
-    const timer = window.setInterval(() => {
+    const timer = window.setInterval(
+      () => void renewShareRoomNow(),
+      CONNECTION_TIMINGS.SHARE_CODE_RENEWAL_INTERVAL_MS,
+    );
+    return () => window.clearInterval(timer);
+  }, [isSharing, shareRoom, renewShareRoomNow]);
+
+  // 回到前台/网络恢复立刻续期：切后台期间定时器被节流，不能等下一个 30 分钟窗口。
+  useEffect(() => {
+    if (!isSharing) return;
+    const handleWake = () => {
+      if (document.visibilityState === 'hidden') return;
+      void renewShareRoomNow();
+    };
+    document.addEventListener('visibilitychange', handleWake);
+    window.addEventListener('online', handleWake);
+    return () => {
+      document.removeEventListener('visibilitychange', handleWake);
+      window.removeEventListener('online', handleWake);
+    };
+  }, [isSharing, renewShareRoomNow]);
+
+  // 过期看门狗：续期一直失败时，界面也必须承认链接已经作废。
+  useEffect(() => {
+    if (!isSharing || !shareRoom) return;
+    const checkExpiry = () => {
       const currentRoom = shareRoomRef.current;
-      if (!currentRoom) return;
-      void renewScreenShareRoom(currentRoom).then((renewed) => {
-        logDebug(renewed ? 'log' : 'warn', 'Screen share room renewal:', renewed);
-        if (renewed) {
-          shareRoomRenewalFailuresRef.current = 0;
-          setShareRoomRenewalWarning(false);
-          return;
-        }
-        shareRoomRenewalFailuresRef.current += 1;
-        if (shareRoomRenewalFailuresRef.current < CONNECTION_TIMINGS.SHARE_ROOM_RENEWAL_MAX_FAILURES) {
-          return;
-        }
-        // 续期失败意味着「链接 TTL 在走向过期」，不是信令故障：只提示，不碰
-        // sharerSignalingBrokenRef。否则恢复 effect 会为了一个服务端明确拒绝去重建 peer，
-        // 把本可自愈的抖动升级成全员断流；清理时也不可能只撤自己那一次标记。
-        setShareRoomRenewalWarning(true);
-      });
-    }, CONNECTION_TIMINGS.SHARE_CODE_RENEWAL_INTERVAL_MS);
+      setShareRoomExpired(currentRoom ? isScreenShareRoomExpired(currentRoom) : false);
+    };
+    checkExpiry();
+    const timer = window.setInterval(
+      checkExpiry,
+      CONNECTION_TIMINGS.SHARE_ROOM_EXPIRY_CHECK_INTERVAL_MS,
+    );
     return () => window.clearInterval(timer);
   }, [isSharing, shareRoom]);
 
@@ -2250,12 +2281,19 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       shareRoomFailureRef.current = null;
       shareRoomRenewalFailuresRef.current = 0;
       setShareRoomRenewalWarning(false);
+      setShareRoomExpired(false);
       setSharerFailure(null);
       setIsSharing(true);
-      void initializePeer();
+      void initializePeer().then((started) => {
+        if (started) return;
+        // 闸门被别的初始化占着（典型场景：刚停止又立刻开始）：不能静默吞掉，
+        // 交给恢复流程在它结束之后再起一次。
+        sharerSignalingBrokenRef.current = true;
+        setSharerRecoveryTick((tick) => tick + 1);
+      });
       onNotification(`屏幕共享已开始${getScreenShareAudioSuffix(stream)}`, 'success');
     } catch (err) {
-      const failure = describeScreenCaptureFailure(err);
+      const failure = describeCaptureError(err);
       logDebug('warn', 'screen-share start failed', {
         name: failure.name,
         message: failure.message,
@@ -2289,7 +2327,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       replaceActiveCallTracks(newStream);
       onNotification(`已切换共享窗口${audioSuffix}`, 'success');
     } catch (err) {
-      const failure = describeScreenCaptureFailure(err);
+      const failure = describeCaptureError(err);
       logDebug('warn', 'screen-share change source failed', {
         name: failure.name,
         message: failure.message,
@@ -2302,12 +2340,17 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
   const stopScreenShare = () => {
     // 让仍在 await 的 initializePeer 作废，避免停止后又有新 peer 注册。
+    // 闸门换新：否则「停止 → 立刻再开始」的新初始化会在旧闸门上拿到 false 被丢弃。
     peerSessionTokenRef.current += 1;
+    peerInitFlightRef.current.reset();
     // 结束分享即撤销房号：旧链接（?view=<peerId>）之后不可再用，也不会被新会话复用。
     const room = shareRoomRef.current;
     shareRoomRef.current = null;
     setShareRoom(null);
-    if (room) void revokeScreenShareRoom(room);
+    if (room) {
+      void revokeScreenShareRoom(room);
+      forgetSessionProof(room.peerId);
+    }
     broadcastShareEnded('stopped');
     if (sharerReconnectTimerRef.current) {
       clearTimeout(sharerReconnectTimerRef.current);
@@ -2319,7 +2362,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     sharerFailureHandledRef.current = false;
     shareRoomFailureRef.current = null;
     shareRoomRenewalFailuresRef.current = 0;
+    shareRoomTimeoutsRef.current = 0;
     setShareRoomRenewalWarning(false);
+    setShareRoomExpired(false);
     setSharerFailure(null);
 
     if (streamRef.current) {
@@ -2397,6 +2442,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       isPeerReady={isPeerReady}
       isShareLive={isShareLive}
       shareRoomRenewalWarning={shareRoomRenewalWarning}
+      shareRoomExpired={shareRoomExpired}
+      hasBeenReady={hasBeenReady}
       sharerFailure={sharerFailure}
       dismissSharerFailure={() => {
         setSharerFailure(null);

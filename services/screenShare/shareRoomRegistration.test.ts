@@ -10,6 +10,8 @@ import {
   revokeScreenShareRoomBeacon,
 } from './shareRoomRegistration.ts';
 
+import { CONNECTION_TIMINGS } from '../../constants/transfer.ts';
+
 const PEER_ID_PATTERN = /^[A-Za-z0-9_-]{8,128}$/;
 
 test('房号由服务端可接受的随机 peerId 派生，不再是 6 位可枚举短码', () => {
@@ -141,4 +143,42 @@ test('页面卸载时的撤销用 keepalive 抢发：普通 fetch 会被文档�
       assert.equal(calls.length, 0, '没有房号时不该发出空撤销');
     },
   );
+});
+
+test('登记超时被单独报出来：服务端 8s 不响应要落成可操作终态，不是一次普通网络失败', async () => {
+  // 真挂住的 fetch：只有 AbortSignal 才能让它结束。以前没有超时，initializePeer 会永远停在
+  // await 上，单飞闸门不释放，界面永久停在「正在连接服务器」——这条用例守住那条回归。
+  const originalFetch = globalThis.fetch;
+  let aborted = false;
+  globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+    assert.equal(String(input), '/api/share-code');
+    return new Promise<Response>((_resolve, reject) => {
+      const fail = () => {
+        aborted = true;
+        const error = new Error('The operation was aborted');
+        error.name = 'AbortError';
+        reject(error);
+      };
+      if (init?.signal?.aborted) {
+        fail();
+        return;
+      }
+      init?.signal?.addEventListener('abort', fail, { once: true });
+    });
+  }) as typeof fetch;
+  try {
+    const started = Date.now();
+    const result = await registerScreenShareRoom({ peerId: 'AERO-0123456789abcdef01' });
+    assert.equal(result.status, 'failed');
+    if (result.status === 'failed') {
+      assert.equal(result.reason, 'timeout');
+      assert.equal(result.message, '共享服务长时间无响应，请检查网络后重新开始共享');
+    }
+    assert.equal(aborted, true);
+    assert.ok(Date.now() - started >= CONNECTION_TIMINGS.SHARE_CODE_REGISTER_TIMEOUT_MS - 200);
+    // 超时不是终态：还能换链路重试；但它必须和「网络抖动」区分开，否则界面会无限重排。
+    assert.equal(isTerminalScreenShareRoomFailure('timeout'), false);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
 });

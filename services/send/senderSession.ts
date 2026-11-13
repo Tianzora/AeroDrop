@@ -2,6 +2,7 @@ import { CONNECTION_TIMINGS, EXPIRY_DURATIONS, type ExpiryOption } from '../../c
 import { P2P_PROTOCOL_VERSION, type FileMetadata } from '../../types';
 import {
   NO_TURN_WARNING_MESSAGE,
+  SHARE_EXPIRED_REMAINING_TEXT,
   SHARE_SIGNALING_LOST_MESSAGE,
   getPeerRuntimeErrorMessage,
   isShareSessionLostError,
@@ -51,6 +52,12 @@ export interface SenderSessionHost {
    * 不该打到错误页、又不能让界面显示一切正常的中间态。
    */
   setConnectionStatus: (status: string) => void;
+  /**
+   * 持久降级位：「这个口令已经作废」，不是一条会过期的提示。授权被撤或口令被注销后，
+   * 界面必须一直显示已失效——30 秒后自动消失的提示会让状态行回到「等待连接」，
+   * 而用户手里那个口令其实已经连不上了。
+   */
+  setShareRevoked: (message: string | null) => void;
   setMetadata: (metadata: FileMetadata) => void;
   notify: (message: string, type: 'success' | 'info' | 'error') => void;
   getActiveTransfers: () => number;
@@ -209,6 +216,7 @@ export class SenderSession {
     this.expiresAt = undefined;
     // 新一轮分享从干净状态开始：上一次的「分享已失效」提示不能残留到新口令上。
     this.host.setConnectionStatus('');
+    this.host.setShareRevoked(null);
     this.host.setPhase('preparing');
     this.host.setPreparingStage('fetching_ice');
 
@@ -396,6 +404,7 @@ export class SenderSession {
       this.host.setPreparingStage('fetching_ice');
       this.host.setPhase('waiting');
       this.host.setConnectionStatus('');
+      this.host.setShareRevoked(null);
       this.startCountdown();
     });
     customPeer.on('error', (err) => {
@@ -425,6 +434,8 @@ export class SenderSession {
         // 有在途传输：setPhase('error') 会把传输列表从界面上撤掉，用户会以为文件也断了。
         // 改成状态位的降级提示——链接不能再发给新设备，已有连接照常传完。
         this.host.setConnectionStatus(SHARE_SIGNALING_LOST_MESSAGE);
+        // 口令已被注销：降级位要留下，不能只是 30 秒的提示。
+        this.host.setShareRevoked(SHARE_SIGNALING_LOST_MESSAGE);
         this.host.notify(SHARE_SIGNALING_LOST_MESSAGE, 'info');
         return;
       }
@@ -443,6 +454,7 @@ export class SenderSession {
         // 不提示的话用户会以为网络恢复后还能续传（旧实现在这里只弹一条 toast）。
         if (isShareSessionLostError(err.type)) {
           this.host.setConnectionStatus(SHARE_SIGNALING_LOST_MESSAGE);
+          this.host.setShareRevoked(SHARE_SIGNALING_LOST_MESSAGE);
         }
         if (err.type === 'unauthorized' && !this.registration) {
           // 分享到期后口令已注销：信令重连会失败，但已有连接上的传输不受影响。
@@ -583,6 +595,7 @@ export class SenderSession {
     const resumed = await this.deps.resumeShareSession(registration);
     if (resumed) {
       this.host.setConnectionStatus('');
+      this.host.setShareRevoked(null);
       return;
     }
     // 窗口已过或码已被回收：不要再让 UI 展示一个连不上的分享。
@@ -591,8 +604,9 @@ export class SenderSession {
     // TRANSFER_CANCELLED，把本来能自己跑完的传输直接掐断。
     if (this.host.getActiveTransfers() > 0) {
       // 口令已经被服务端注销，继续展示它会让用户把死码发给别人。
-      this.host.setRemainingTime('已失效');
+      this.host.setRemainingTime(SHARE_EXPIRED_REMAINING_TEXT);
       this.host.setConnectionStatus(SHARE_SIGNALING_LOST_MESSAGE);
+      this.host.setShareRevoked(SHARE_SIGNALING_LOST_MESSAGE);
       this.host.notify('分享已失效，当前传输不受影响；需要继续分享请重新创建', 'info');
       return;
     }

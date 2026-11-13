@@ -22,6 +22,12 @@ export const SHARE_SIGNALING_LOST_MESSAGE =
   '分享已失效，进行中的传输不受影响，新设备无法加入';
 
 /**
+ * 有效期一栏在口令已作废时显示的文案。界面靠它判断「链接还能不能发」，
+ * 所以写在一处：`senderSession` 写、`SenderUI` 读，两边各拼一个字符串就会失配。
+ */
+export const SHARE_EXPIRED_REMAINING_TEXT = '已失效';
+
+/**
  * peerRuntime 的 error.type 到用户可懂文案的唯一映射点。
  *
  * 这里刻意不把技术标识拼进文案：用户看不懂 `peer-unavailable`，而原始错误已经由

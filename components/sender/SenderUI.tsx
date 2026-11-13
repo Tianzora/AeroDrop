@@ -2,7 +2,8 @@ import React from 'react';
 import { TransferState, FileMetadata } from '../../types';
 import { formatFileSize } from '../../services/fileUtils';
 import type { FileType } from '../../services/fileType';
-import { Upload, AlertCircle, X, Check, Copy, Loader2, Folder, ChevronDown, ChevronUp, Monitor, StopCircle } from 'lucide-react';
+import { Upload, AlertCircle, AlertTriangle, X, Check, Copy, Loader2, Folder, ChevronDown, ChevronUp, Monitor, StopCircle } from 'lucide-react';
+import { SHARE_EXPIRED_REMAINING_TEXT } from '../../services/connectionGuidance';
 import { motion, useReducedMotion } from 'motion/react';
 import { FileTypeIcon } from '../FileTypeIcon';
 import { ProgressTrack, TransferProgressCard } from '../TransferProgress';
@@ -77,6 +78,11 @@ interface SenderUIProps {
   shareLink: string;
   handleCopyLink: () => void;
   remainingTime: string;
+  /**
+   * 口令/链接已作废时的说明文案（null = 仍有效）。和 remainingTime 分开：倒计时是
+   * 会走的数字，作废是持久事实，传输还在跑时后者不能随时间消失。
+   */
+  shareRevokedMessage: string | null;
   connectionStatus: string;
   individualStats: SenderPeerTransferStat[];
   totalProgress: number;
@@ -115,6 +121,7 @@ export const SenderUI: React.FC<SenderUIProps> = ({
   shareLink,
   handleCopyLink,
   remainingTime,
+  shareRevokedMessage,
   connectionStatus,
   individualStats,
   totalProgress,
@@ -131,7 +138,7 @@ export const SenderUI: React.FC<SenderUIProps> = ({
   const reduceMotion = useReducedMotion();
   const hasSingleDevice = individualStats.length === 1;
   // 分享到期后新接收者已被拒绝，但已有传输可能仍在继续：此时不能再让人复制旧口令/链接。
-  const shareExpired = remainingTime === '已过期';
+  const shareExpired = shareRevokedMessage !== null || remainingTime === SHARE_EXPIRED_REMAINING_TEXT;
 
   return (
     <div className="w-full max-w-xl mx-auto p-4 md:p-6 bg-white dark:bg-night-850 rounded-card shadow-card border border-slate-100 dark:border-night-750 transition-colors">
@@ -307,9 +314,17 @@ export const SenderUI: React.FC<SenderUIProps> = ({
                 )}
               </span>
             </button>
+            {shareRevokedMessage && (
+              <p className="flex items-start gap-1.5 pb-1 pl-16 text-xs leading-relaxed text-amber-600 dark:text-amber-400">
+                <AlertTriangle size={13} className="mt-0.5 shrink-0" aria-hidden="true" />
+                {shareRevokedMessage}
+              </p>
+            )}
             <div className="flex items-center gap-3 py-2">
               <span className="w-16 shrink-0 text-xs font-medium text-slate-500 dark:text-night-400">有效期</span>
-              <span className="text-sm tabular-nums text-slate-700 dark:text-night-200">{remainingTime || '--'}</span>
+              <span className="text-sm tabular-nums text-slate-700 dark:text-night-200">
+                {shareRevokedMessage ? SHARE_EXPIRED_REMAINING_TEXT : remainingTime || '--'}
+              </span>
             </div>
             <div className="flex items-center gap-3 py-2">
               <span className="w-16 shrink-0 text-xs font-medium text-slate-500 dark:text-night-400">状态</span>
@@ -410,7 +425,7 @@ export const SenderUI: React.FC<SenderUIProps> = ({
 
           <div className="pt-4">
             <button onClick={stopSharing} className="w-full h-12 bg-red-600 text-white text-sm font-bold rounded-full shadow-md shadow-red-600/20 hover:bg-red-700 active:scale-[0.99] transition-colors flex items-center justify-center gap-2">
-              <StopCircle size={18} /> 停止分享
+              <StopCircle size={18} /> {shareExpired ? '重新创建分享' : '停止分享'}
             </button>
           </div>
         </div>

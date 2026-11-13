@@ -42,6 +42,7 @@ const baseProps = {
   shareLink: '',
   handleCopyLink: () => {},
   remainingTime: '',
+  shareRevokedMessage: null,
   connectionStatus: '',
   individualStats: [],
   totalProgress: 0,
@@ -80,4 +81,23 @@ test('renders semantic file type icons in expanded sender file list', () => {
   const html = renderToStaticMarkup(React.createElement(SenderUI, baseProps));
   assert.match(html, /lucide-file-text/);
   assert.match(html, /lucide-archive/);
+});
+
+test('口令被注销后：有效期显示已失效、复制被禁、主按钮改成重新创建', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(SenderUI, {
+      ...baseProps,
+      state: TransferState.WAITING_FOR_PEER,
+      transferCode: '123456',
+      shareLink: 'https://example.com/?code=123456',
+      remainingTime: '09:58',
+      shareRevokedMessage: '分享已失效，进行中的传输不受影响，新设备无法加入',
+    })
+  );
+
+  assert.match(html, /进行中的传输不受影响/);
+  assert.match(html, /重新创建分享/);
+  // 30 秒提示会过期，但这条状态不会：有效期一栏必须一直显示已失效。
+  assert.match(html, />已失效</);
+  assert.doesNotMatch(html, /复制分享口令/);
 });

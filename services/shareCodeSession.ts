@@ -40,7 +40,7 @@ export const isValidShareCode = (code: string): boolean => SHARE_CODE_PATTERN.te
 export const normalizeShareCodeInput = (value: string): string =>
   value.replace(/[^0-9]/g, '').slice(0, SHARE_CODE_DIGITS);
 
-export type ShareCodeFailureReason = 'taken' | 'rate-limited' | 'invalid' | 'failed';
+export type ShareCodeFailureReason = 'taken' | 'rate-limited' | 'invalid' | 'timeout' | 'failed';
 
 export type ShareCodeRequestResult =
   | { status: 'ok'; code: string; expiresAt: number; peerId: string; secret: string; secretHash: string }
@@ -87,6 +87,13 @@ export const requestShareCode = async (input: {
     };
   }
 
+  // 登记没有超时的话，一次挂住的请求会让屏幕共享的初始化永远停在 await 上：单飞闸门
+  // 不释放，后续每次重试都在闸门处直接放弃，界面永久停在「正在连接服务器」。
+  const controller = new AbortController();
+  const timeout = setTimeout(
+    () => controller.abort(),
+    CONNECTION_TIMINGS.SHARE_CODE_REGISTER_TIMEOUT_MS
+  );
   try {
     const response = await fetch('/api/share-code', {
       method: 'POST',
@@ -98,6 +105,7 @@ export const requestShareCode = async (input: {
         ...(typeof input.ttlSeconds === 'number' ? { ttlSeconds: input.ttlSeconds } : {}),
       }),
       cache: 'no-store',
+      signal: controller.signal,
     });
 
     if (response.status === 409) {
@@ -128,7 +136,10 @@ export const requestShareCode = async (input: {
       secretHash,
     };
   } catch {
-    return { status: 'failed' };
+    // 超时单独成一类：调用方据此判断「服务端没响应」，而不是把它当成一次普通抖动。
+    return controller.signal.aborted ? { status: 'timeout' } : { status: 'failed' };
+  } finally {
+    clearTimeout(timeout);
   }
 };
 

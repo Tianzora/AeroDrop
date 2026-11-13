@@ -39,8 +39,25 @@ export const CONNECTION_TIMINGS = {
    * 说明链接真的要到期了，必须给 amber 提示，但不要因此停掉直播。
    */
   SHARE_ROOM_RENEWAL_MAX_FAILURES: 3,
+  /** 检查房号是否已经过期的间隔：过期必须让分享端看见，不能只靠 30 分钟一次的续期。 */
+  SHARE_ROOM_EXPIRY_CHECK_INTERVAL_MS: 60_000,
+  /**
+   * 连续多少次登记超时才落终态。单次超时可能只是 Worker 冷启动或链路抖动，值得重试；
+   * 连续两次（约 17s 无响应）就不再退避——否则界面会永久停在「正在连接服务器」。
+   */
+  SHARE_ROOM_REGISTRATION_MAX_TIMEOUTS: 2,
   /** 接收端兑换口令的超时：断网/Worker 卡住时不能无限停在等待页。 */
   SHARE_CODE_LOOKUP_TIMEOUT_MS: 4_000,
+  /**
+   * 口令/屏幕共享房号登记的超时：登记要等 Durable Object 落盘，比查询慢，可以放宽，
+   * 但不能没有上限——初始化要等它返回才释放单飞闸门，挂住就等于这个分享不可恢复。
+   */
+  SHARE_CODE_REGISTER_TIMEOUT_MS: 8_000,
+  /**
+   * 单飞闸门的最长持有时间。登记本身已有超时兜底，这里防的是将来再出现无法中断的等待：
+   * 超过这个时长仍占着闸门，恢复流程就换一个新闸门继续，旧调用结束时只碰它自己那一个。
+   */
+  SHARE_INIT_MAX_HOLD_MS: 60_000,
   /** pagehide 时延后注销口令的窗口：期间原凭证可 resume，避免切后台被误杀。 */
   SHARE_CODE_REVOKE_GRACE_MS: 60_000,
   /** 续传检查点的最小写入间隔/增量，避免每收到一块就写 localStorage。 */

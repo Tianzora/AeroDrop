@@ -28,6 +28,10 @@ interface ScreenShareUIProps {
   isShareLive: boolean;
   /** 房号续期连续失败：画面照常，但链接快到期了，不能再显示「一切正常」。 */
   shareRoomRenewalWarning: boolean;
+  /** 房号已过期：链接作废，不能再显示成可用链接，也不能配绿色 LIVE。 */
+  shareRoomExpired: boolean;
+  /** 是否曾经连上过信令：区分「首连中」与「连上又断」，文案不同。 */
+  hasBeenReady: boolean;
   sharerFailure: { reason: 'signaling_failed'; message: string } | null;
   dismissSharerFailure: () => void;
   recommendedViewerCount: number;
@@ -61,6 +65,8 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   copied,
   isShareLive,
   shareRoomRenewalWarning,
+  shareRoomExpired,
+  hasBeenReady,
   sharerFailure,
   dismissSharerFailure,
   recommendedViewerCount,
@@ -72,6 +78,9 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   startScreenShare,
   stopScreenShare,
 }) => {
+  // 链接可用 = 信令就绪 且 房号没过期。任一不成立，这个链接就指向一个连不上的分享。
+  const linkUsable = isShareLive && !shareRoomExpired;
+
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
   const viewerElRef = useRef<HTMLVideoElement | null>(null);
   const hideControlsTimerRef = useRef<number | null>(null);
@@ -480,12 +489,12 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                     href={shareLink}
                     target="_blank"
                     rel="noopener noreferrer"
-                    aria-disabled={!isShareLive}
+                    aria-disabled={!linkUsable}
                     /* 失效链接不能只靠 pointer-events 拦鼠标：键盘 Tab 仍会聚焦到一个
                        aria-disabled 的链接上。直接移出焦点序列。 */
-                    tabIndex={isShareLive ? undefined : -1}
+                    tabIndex={linkUsable ? undefined : -1}
                     className={`flex-1 min-w-0 text-sm font-mono truncate ${
-                      isShareLive
+                      linkUsable
                         ? 'text-brand-600 dark:text-brand-400 hover:underline'
                         : 'text-slate-400 dark:text-night-500 pointer-events-none'
                     }`}
@@ -495,9 +504,9 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                   </a>
                   <button
                     onClick={copyShareLink}
-                    disabled={!isShareLive}
+                    disabled={!linkUsable}
                     className="inline-flex min-w-11 min-h-11 shrink-0 items-center justify-center rounded-control text-slate-500 transition-colors hover:bg-slate-200/70 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-night-400 dark:hover:bg-night-750/70 dark:hover:text-night-200"
-                    title={isShareLive ? '复制分享链接' : '分享链接已失效'}
+                    title={linkUsable ? '复制分享链接' : '分享链接已失效'}
                     aria-label="复制分享链接"
                   >
                     {copied ? (
@@ -508,20 +517,25 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                   </button>
                   <button
                     onClick={shareLinkToApps}
-                    disabled={!isShareLive}
+                    disabled={!linkUsable}
                     className="inline-flex min-w-11 min-h-11 shrink-0 items-center justify-center rounded-control text-slate-500 transition-colors hover:bg-slate-200/70 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-night-400 dark:hover:bg-night-750/70 dark:hover:text-night-200"
-                    title={isShareLive ? '分享链接' : '分享链接已失效'}
+                    title={linkUsable ? '分享链接' : '分享链接已失效'}
                     aria-label="分享链接"
                   >
                     <Share2 size={18} />
                   </button>
                 </div>
-                {!isShareLive && (
+                {shareRoomExpired && (
                   <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
-                    信令中断，新观众暂时无法加入
+                    分享链接已失效，需要重新开始共享才能让新观众加入
                   </p>
                 )}
-                {isShareLive && shareRoomRenewalWarning && (
+                {!shareRoomExpired && !isShareLive && (
+                  <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
+                    {hasBeenReady ? '信令中断，新观众暂时无法加入' : '正在连接服务器，连上后新观众即可加入'}
+                  </p>
+                )}
+                {linkUsable && shareRoomRenewalWarning && (
                   <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
                     分享链接续期失败，到期后观众将无法再加入
                   </p>
@@ -551,7 +565,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                     现在改为画面内的 LIVE 徽标，右上角只保留画质胶囊；观看人数放到
                     链接卡片的标题行（那本来就是链接/观看者语义），避免窄屏挤爆。 */}
                 <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/60 via-black/25 to-transparent p-2.5">
-                  {isShareLive ? (
+                  {linkUsable ? (
                     <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-sm">
                       <span className="relative flex h-2 w-2">
                         <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
@@ -559,11 +573,17 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                       </span>
                       正在共享
                     </span>
+                  ) : shareRoomExpired ? (
+                    /* 房号已过期：链接已经连不上了，不能再显示成绿色的实时状态。 */
+                    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-amber-500/90 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-sm">
+                      <AlertTriangle size={16} />
+                      链接已失效
+                    </span>
                   ) : (
                     /* 采集在跑但信令不通：绿色 LIVE 会骗人，改成 amber 的连接态。 */
                     <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-amber-500/90 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-sm">
                       <Loader2 size={16} className="animate-spin" />
-                      正在连接服务器...
+                      {hasBeenReady ? '正在重连服务器...' : '正在连接服务器...'}
                     </span>
                   )}
                   <span className="flex flex-wrap items-center justify-end gap-1.5">

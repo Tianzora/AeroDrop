@@ -28,6 +28,8 @@ const baseProps: React.ComponentProps<typeof ScreenShareUI> = {
   isPeerReady: true,
   isShareLive: false,
   shareRoomRenewalWarning: false,
+  shareRoomExpired: false,
+  hasBeenReady: false,
   sharerFailure: null,
   dismissSharerFailure: () => {},
   recommendedViewerCount: 4,
@@ -80,11 +82,12 @@ test('共享中但信令未就绪：不显示绿色 LIVE，链接标注失效', 
     isSharing: true,
     isShareLive: false,
     isPeerReady: false,
+    hasBeenReady: true,
     shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
   });
 
-  // 采集在跑但没注册上：绿色「正在共享」会骗人，只能显示连接态。
-  assert.match(markup, /正在连接服务器/);
+  // 曾经连上过又掉了：绿色「正在共享」会骗人，只能说在重连。
+  assert.match(markup, /正在重连服务器/);
   assert.doesNotMatch(markup, /正在共享/);
   assert.match(markup, /信令中断，新观众暂时无法加入/);
   assert.match(markup, /disabled=""/);
@@ -145,6 +148,7 @@ test('信令未就绪时不叠续期提示：那一刻更该说的是链接暂�
     isSharing: true,
     isShareLive: false,
     isPeerReady: false,
+    hasBeenReady: true,
     shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
     shareRoomRenewalWarning: true,
   });
@@ -185,4 +189,40 @@ test('链接失效时不只是拦鼠标：连键盘焦点一起移出序列', ()
   const live = render({ isSharing: true, isShareLive: true, shareLink: link });
   assert.match(live, /aria-disabled="false"/);
   assert.doesNotMatch(live, /tabindex="-1"/);
+});
+
+test('房号过期：徽标与链接一起失效，不能继续显示绿色正在共享', () => {
+  const markup = render({
+    isSharing: true,
+    isShareLive: true,
+    shareRoomExpired: true,
+    shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
+  });
+
+  assert.match(markup, /链接已失效/);
+  assert.match(markup, /分享链接已失效，需要重新开始共享才能让新观众加入/);
+  assert.doesNotMatch(markup, /正在共享/);
+  assert.match(markup, /aria-disabled="true"/);
+  assert.match(markup, /tabindex="-1"/);
+});
+
+test('首次连接不说「信令中断」：还没连上过和掉线是两回事', () => {
+  const connecting = render({
+    isSharing: true,
+    isShareLive: false,
+    isPeerReady: false,
+    hasBeenReady: false,
+    shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
+  });
+  assert.match(connecting, /正在连接服务器，连上后新观众即可加入/);
+  assert.doesNotMatch(connecting, /信令中断/);
+
+  const reconnecting = render({
+    isSharing: true,
+    isShareLive: false,
+    isPeerReady: false,
+    hasBeenReady: true,
+    shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
+  });
+  assert.match(reconnecting, /信令中断，新观众暂时无法加入/);
 });

@@ -1,6 +1,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { CONNECTION_TIMINGS } from '../constants/transfer.ts';
 import { computeShareCodeSecretHash } from './shareCodeRegistry.ts';
 import {
   computeShareSecretHash,
@@ -214,4 +215,30 @@ test('maps an expired resume window to forbidden', async () => {
   );
 
   assert.deepEqual(result, { status: 'forbidden' });
+});
+
+test('登记挂住时按常量超时中止：调用方不会永远停在 await 上，闸门才有机会释放', async () => {
+  let signal: AbortSignal | null | undefined;
+  const hangingFetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+    signal = init?.signal;
+    return new Promise<Response>((_resolve, reject) => {
+      signal?.addEventListener('abort', () =>
+        reject(new DOMException('The operation was aborted.', 'AbortError'))
+      );
+    });
+  }) as typeof fetch;
+
+  // 超时被删掉时这条用例要失败而不是挂住整个测试进程。
+  const result = await Promise.race([
+    registerShareCode({ peerId: PEER_ID, secretHash: SECRET_HASH }, { fetchImpl: hangingFetch }),
+    new Promise<never>((_resolve, reject) =>
+      setTimeout(
+        () => reject(new Error('registerShareCode 没有超时：请求挂住时调用方会被永久卡死')),
+        CONNECTION_TIMINGS.SHARE_CODE_REGISTER_TIMEOUT_MS + 2_000
+      )
+    ),
+  ]);
+
+  assert.equal(result.status, 'failed');
+  assert.equal(signal?.aborted, true, '必须真的把请求 abort 掉，否则连接会一直占着');
 });

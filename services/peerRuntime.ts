@@ -54,6 +54,12 @@ type PeerRuntimeModule = {
 type PeerEvents = {
   open: (peerId: string) => void;
   'signaling:restored': (peerId: string) => void;
+  /**
+   * 服务端刚换发的新会话凭证。重建 PeerRuntime 是新建实例，内存里的 proof 会随旧实例
+   * 一起消失；上层必须把这个值接住并在重建时传回来，否则过了静态摘要的宽限期就只剩
+   * 4010（分享会话不可恢复）。
+   */
+  'session-proof': (proof: string) => void;
   connection: (connection: DataConnection) => void;
   call: (call: MediaConnection) => void;
   error: (error: PeerRuntimeError) => void;
@@ -783,6 +789,14 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
   }
 
   /**
+   * 最近一次拿到的轮换凭证（未注册过 / 文件传输等未绑定会话返回 null）。
+   * 重建实例时把它作为 `sessionProof` 传回来，否则过了静态摘要宽限期只会拿到 4010。
+   */
+  getSessionProof(): string | null {
+    return this.sessionProof;
+  }
+
+  /**
    * TURN 短期凭证默认 1 小时过期。PeerRuntime 在构造时把 iceServers 冻结进
    * RTCConfiguration，长会话中新接入的连接会拿着过期凭证去 gather relay 候选。
    * 已建立的 RTCPeerConnection 也要同步：传输层在断链后会 restartIce，若仍握着
@@ -1061,6 +1075,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       if (typeof message.sessionProof === 'string' && message.sessionProof.length > 0) {
         // 每次注册轮换：下一次重连带最新值；旧值只在服务端宽限期内可用，避免静态 bearer。
         this.sessionProof = message.sessionProof;
+        this.emit('session-proof', this.sessionProof);
         this.log('info', 'signaling_session_proof_rotated', {
           sessionProofLength: message.sessionProof.length,
         });

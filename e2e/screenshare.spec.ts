@@ -325,13 +325,15 @@ test.describe('screen share', () => {
     expect(await page.evaluate(() => (window as typeof window & { __shareCodeAttempts?: number }).__shareCodeAttempts)).toBe(2);
   });
 
-  // 并发初始化的回归：初始化没有单飞闸门时，看门狗（20s 建连超时）与恢复退避会在「上一次
-  // 登记还没回来」时再起一次初始化，于是同一台机器登记两个房号——先回来的那个变成无人撤销的
-  // 孤儿，占满 24h 房号并吃掉同 IP 的登记预算，让 429 终态更早误触发。
-  // 每条网络腿都有自己的超时，真实环境很难把单次初始化拖过 20s；这里用「永不返回的登记」
-  // 把「初始化比看门狗慢」这个前提做出来，验证的是闸门本身：超时后可以无限重排，但同一时刻
-  // 只能有一次登记在飞。
-  test('a stalled room registration is never duplicated by watchdog retries', async ({ page }) => {
+  // 并发初始化 + 登记超时兜底，两件事一起守：
+  // 1) 单飞闸门：看门狗（20s 建连超时）与恢复退避不能在「上一次登记还没回来」时再起一次
+  //    初始化——否则同一台机器登记两个房号，先回来的那个变成无人撤销的孤儿，占满 24h 并吃
+  //    掉同 IP 的登记预算，让 429 终态更早误触发。
+  // 2) 不可恢复：以前登记可以永不返回，initializePeer 的 finally 不执行，闸门永久占用，
+  //    界面停在「正在连接服务器」只能刷新。现在登记自带超时，连续两次不响应就落可操作终态。
+  test('a stalled room registration ends in an actionable terminal state, never a stuck LIVE', async ({
+    page,
+  }) => {
     await page.addInitScript(() => {
       const nativeFetch = window.fetch.bind(window);
       const state = window as typeof window & { __shareCodeAttempts?: number };
@@ -342,8 +344,21 @@ test.describe('screen share', () => {
         const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
         if (method === 'POST' && new URL(rawUrl, location.href).pathname === '/api/share-code') {
           state.__shareCodeAttempts = (state.__shareCodeAttempts ?? 0) + 1;
-          // 挂住不返回：模拟弱网下初始化被拖过看门狗的 20s。
-          return new Promise<Response>(() => {});
+          // 挂住不返回，但必须尊重调用方的 AbortSignal：真实 fetch 被 abort 时会立刻 reject。
+          // 不 abort 就等于把「永不返回」写进 mock，反而把产品缺陷当成期望。
+          return new Promise<Response>((_resolve, reject) => {
+            const signal = init?.signal;
+            const fail = () => {
+              const error = new Error('The operation was aborted');
+              error.name = 'AbortError';
+              reject(error);
+            };
+            if (signal?.aborted) {
+              fail();
+              return;
+            }
+            signal?.addEventListener('abort', fail, { once: true });
+          });
         }
         return nativeFetch(input as RequestInfo, init);
       }) as typeof window.fetch;
@@ -358,11 +373,20 @@ test.describe('screen share', () => {
     await page.getByRole('button', { name: '共享' }).click();
     await page.getByRole('button', { name: '开始共享屏幕' }).click();
 
-    // 等过看门狗的 20s 与至少一次恢复退避（1s/2s），期间只允许一次登记。
-    await page.waitForTimeout(25_000);
-    expect(await page.evaluate(() => (window as typeof window & { __shareCodeAttempts?: number }).__shareCodeAttempts)).toBe(1);
-    // 登记没回来就不许装成共享中：绿色 LIVE 与可复制链接都不该出现。
+    // 第一次 8s 超时 → 退避重试 1s → 第二次 8s 超时 → 终态，约 17s 落地。
+    await expect(page.getByText('共享已中断')).toBeVisible({ timeout: 25_000 });
+    await expect(
+      page.getByRole('main').getByText('共享服务长时间无响应，请检查网络后重新开始共享')
+    ).toBeVisible();
+    // 两次登记都被 abort：闸门确实释放并重试过，但不会无限重排。
+    expect(
+      await page.evaluate(
+        () => (window as typeof window & { __shareCodeAttempts?: number }).__shareCodeAttempts
+      )
+    ).toBe(2);
+    // 登记没成功就不许装成共享中：绿色 LIVE 与可复制链接都不该出现。
     await expect(page.getByText('正在共享')).toHaveCount(0);
     await expect(page.locator('a[href*="view="]')).toHaveCount(0);
+    await expect(page.getByRole('button', { name: '重新开始共享' })).toBeVisible();
   });
 })
