@@ -161,3 +161,28 @@ test('未开始时保留引导头部与开始按钮', () => {
   assert.match(markup, /与其他设备实时共享您的屏幕内容/);
   assert.doesNotMatch(markup, /停止共享/);
 });
+
+test('信令终态只留终态卡里的「重新开始共享」，不再重复一颗主按钮', () => {
+  const markup = render({
+    sharerFailure: {
+      reason: 'signaling_failed',
+      message: '无法连接信令服务器，请检查网络后重试',
+    },
+  });
+
+  // 同一屏两个「开始共享」入口会让人分不清哪个才是恢复路径。
+  assert.match(markup, /重新开始共享/);
+  assert.doesNotMatch(markup, /开始共享屏幕/);
+});
+
+test('链接失效时不只是拦鼠标：连键盘焦点一起移出序列', () => {
+  const link = 'https://example.com/#/screen-share?view=AERO-abc';
+
+  const dead = render({ isSharing: true, isShareLive: false, isPeerReady: false, shareLink: link });
+  assert.match(dead, /aria-disabled="true"/);
+  assert.match(dead, /tabindex="-1"/);
+
+  const live = render({ isSharing: true, isShareLive: true, shareLink: link });
+  assert.match(live, /aria-disabled="false"/);
+  assert.doesNotMatch(live, /tabindex="-1"/);
+});

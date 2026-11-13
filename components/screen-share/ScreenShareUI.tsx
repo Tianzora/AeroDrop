@@ -481,6 +481,9 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                     target="_blank"
                     rel="noopener noreferrer"
                     aria-disabled={!isShareLive}
+                    /* 失效链接不能只靠 pointer-events 拦鼠标：键盘 Tab 仍会聚焦到一个
+                       aria-disabled 的链接上。直接移出焦点序列。 */
+                    tabIndex={isShareLive ? undefined : -1}
                     className={`flex-1 min-w-0 text-sm font-mono truncate ${
                       isShareLive
                         ? 'text-brand-600 dark:text-brand-400 hover:underline'
@@ -573,7 +576,8 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               </div>
             )}
 
-            {!isSharing ? (
+            {/* 终态卡里已经有「重新开始共享」：同一屏再放一颗「开始共享屏幕」是重复 CTA。 */}
+            {!isSharing && !sharerFailure && (
               <div className="mt-2 flex justify-center">
                 <button
                   onClick={startScreenShare}
@@ -583,7 +587,9 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                   开始共享屏幕
                 </button>
               </div>
-            ) : (
+            )}
+
+            {isSharing && (
               /* 共享中的操作改成工具条：切换窗口从画面上的悬停按钮变成常驻次要按钮，
                  停止共享保持红色主操作但不再独占整行，省下一大块纵向空间。 */
               <div className="flex items-center gap-2">

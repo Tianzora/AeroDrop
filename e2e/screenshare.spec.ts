@@ -256,7 +256,7 @@ test.describe('screen share', () => {
       window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
         const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
         const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
-        if (method === 'POST' && /\/api\/share-code$/.test(new URL(rawUrl, location.href).pathname)) {
+        if (method === 'POST' && new URL(rawUrl, location.href).pathname === '/api/share-code') {
           state.__shareCodeAttempts = (state.__shareCodeAttempts ?? 0) + 1;
           return Promise.resolve(
             new Response(JSON.stringify({ error: 'too many share code requests' }), {
@@ -323,5 +323,46 @@ test.describe('screen share', () => {
     await expect(page.getByText('正在共享')).toBeVisible({ timeout: 30_000 });
     await expect(page.locator('a[href*="view="]')).toHaveCount(1);
     expect(await page.evaluate(() => (window as typeof window & { __shareCodeAttempts?: number }).__shareCodeAttempts)).toBe(2);
+  });
+
+  // 并发初始化的回归：初始化没有单飞闸门时，看门狗（20s 建连超时）与恢复退避会在「上一次
+  // 登记还没回来」时再起一次初始化，于是同一台机器登记两个房号——先回来的那个变成无人撤销的
+  // 孤儿，占满 24h 房号并吃掉同 IP 的登记预算，让 429 终态更早误触发。
+  // 每条网络腿都有自己的超时，真实环境很难把单次初始化拖过 20s；这里用「永不返回的登记」
+  // 把「初始化比看门狗慢」这个前提做出来，验证的是闸门本身：超时后可以无限重排，但同一时刻
+  // 只能有一次登记在飞。
+  test('a stalled room registration is never duplicated by watchdog retries', async ({ page }) => {
+    await page.addInitScript(() => {
+      const nativeFetch = window.fetch.bind(window);
+      const state = window as typeof window & { __shareCodeAttempts?: number };
+      state.__shareCodeAttempts = 0;
+
+      window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+        if (method === 'POST' && new URL(rawUrl, location.href).pathname === '/api/share-code') {
+          state.__shareCodeAttempts = (state.__shareCodeAttempts ?? 0) + 1;
+          // 挂住不返回：模拟弱网下初始化被拖过看门狗的 20s。
+          return new Promise<Response>(() => {});
+        }
+        return nativeFetch(input as RequestInfo, init);
+      }) as typeof window.fetch;
+    });
+
+    await page.goto('/');
+    const supported = await page.evaluate(
+      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
+    );
+    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+
+    await page.getByRole('button', { name: '共享' }).click();
+    await page.getByRole('button', { name: '开始共享屏幕' }).click();
+
+    // 等过看门狗的 20s 与至少一次恢复退避（1s/2s），期间只允许一次登记。
+    await page.waitForTimeout(25_000);
+    expect(await page.evaluate(() => (window as typeof window & { __shareCodeAttempts?: number }).__shareCodeAttempts)).toBe(1);
+    // 登记没回来就不许装成共享中：绿色 LIVE 与可复制链接都不该出现。
+    await expect(page.getByText('正在共享')).toHaveCount(0);
+    await expect(page.locator('a[href*="view="]')).toHaveCount(0);
   });
 })

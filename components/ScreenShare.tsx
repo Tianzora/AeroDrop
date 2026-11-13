@@ -36,6 +36,7 @@ import {
   type ScreenShareQualityLevel,
 } from '../services/screenShare/bitratePolicy';
 import { decideViewerHeartbeat } from '../services/screenShare/viewerHeartbeatPolicy';
+import { createSingleFlight, type SingleFlight } from '../services/screenShare/peerInitGuard';
 import { describeViewerCapacity } from '../services/screenShare/viewerCapacity';
 import {
   createScreenSharePeerId,
@@ -257,9 +258,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const shareRoomFailureRef = useRef<ScreenShareRoomFailure | null>(null);
   // 房号续期连续失败计数：达到 CONNECTION_TIMINGS.SHARE_ROOM_RENEWAL_MAX_FAILURES 才提示。
   const shareRoomRenewalFailuresRef = useRef(0);
-  // 续期失败是否亲手把 sharerSignalingBrokenRef 置真：恢复时只能撤自己标的那一次，
-  // 不能把真实的信令故障一起清掉。
-  const shareRoomRenewalMarkedBrokenRef = useRef(false);
+  // 初始化单飞闸门：开始共享/看门狗/恢复退避都可能触发 initializePeer，慢网络下会有第二次
+  // 调用在上一次还没结束时进来。并发调用会各自登记房号，先登记的成为无人撤销的孤儿。
+  const peerInitFlightRef = useRef<SingleFlight | null>(null);
   // 信令是否已经「坏到需要恢复」：只有它为真时恢复 effect 才会重试，避免刚点开始共享
   // （peer 正在握手）就被当成故障去重建。
   const sharerSignalingBrokenRef = useRef(false);
@@ -828,7 +829,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   }, [syncViewerCount, stopBandwidthMonitoring, syncAggregateQualityLevel]);
 
 
-  const initializePeer = useCallback(async () => {
+  const initializePeerUnlocked = useCallback(async () => {
     const sessionToken = peerSessionTokenRef.current;
     if (peerRef.current) {
       peerRef.current.destroy();
@@ -1170,6 +1171,19 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     return peer;
   }, [onNotification, applyBitrateConstraints, startBandwidthMonitoring, getUniqueViewerCount, addActiveCall, removeActiveCall, preferVideoCodecs, sendQualityToViewer, syncAggregateQualityLevel, setPeerQualityLevel]);
 
+  // 单飞包装：已在飞时直接放弃这一次，由在飞的那次结果驱动后续（它的失败会自己 tick 回
+  // 恢复流程）。返回 false 表示这一调用没有真正执行初始化，调用方据此不要消耗重试预算。
+  const initializePeer = useCallback(async (): Promise<boolean> => {
+    const flight = peerInitFlightRef.current ?? (peerInitFlightRef.current = createSingleFlight());
+    if (!flight.tryEnter()) return false;
+    try {
+      await initializePeerUnlocked();
+      return true;
+    } finally {
+      flight.leave();
+    }
+  }, [initializePeerUnlocked]);
+
 
   // 分享者端：定期检查观看者心跳，移除断开的连接。
   // 判定本身在 viewerHeartbeatPolicy：传输健康时无视心跳缺失（后台标签页会把观看端的
@@ -1256,7 +1270,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     sharerSignalingBrokenRef.current = false;
     shareRoomFailureRef.current = null;
     shareRoomRenewalFailuresRef.current = 0;
-    shareRoomRenewalMarkedBrokenRef.current = false;
     setShareRoomRenewalWarning(false);
 
     if (streamRef.current) {
@@ -1360,6 +1373,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     sharerReconnectTimerRef.current = setTimeout(async () => {
       sharerReconnectTimerRef.current = null;
       if (!isSharing) return;
+      // 上一次初始化还没结束（弱网下单次 init 会超过看门狗与退避间隔）：跳过这一次，
+      // 不与它并发。在飞那次的失败通路会自己 tick 回来重排，成功则直接进 ready。
+      if (peerInitFlightRef.current?.isInFlight()) return;
 
       const currentPeer = peerRef.current;
 
@@ -1454,19 +1470,15 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         if (renewed) {
           shareRoomRenewalFailuresRef.current = 0;
           setShareRoomRenewalWarning(false);
-          if (shareRoomRenewalMarkedBrokenRef.current) {
-            shareRoomRenewalMarkedBrokenRef.current = false;
-            sharerSignalingBrokenRef.current = false;
-          }
           return;
         }
         shareRoomRenewalFailuresRef.current += 1;
         if (shareRoomRenewalFailuresRef.current < CONNECTION_TIMINGS.SHARE_ROOM_RENEWAL_MAX_FAILURES) {
           return;
         }
-        // 链接确实在走向过期：画面继续，但不能只显示绿色「正在共享」。
-        shareRoomRenewalMarkedBrokenRef.current = true;
-        sharerSignalingBrokenRef.current = true;
+        // 续期失败意味着「链接 TTL 在走向过期」，不是信令故障：只提示，不碰
+        // sharerSignalingBrokenRef。否则恢复 effect 会为了一个服务端明确拒绝去重建 peer，
+        // 把本可自愈的抖动升级成全员断流；清理时也不可能只撤自己那一次标记。
         setShareRoomRenewalWarning(true);
       });
     }, CONNECTION_TIMINGS.SHARE_CODE_RENEWAL_INTERVAL_MS);
@@ -2237,7 +2249,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       sharerPeerRebuildsRef.current = 0;
       shareRoomFailureRef.current = null;
       shareRoomRenewalFailuresRef.current = 0;
-      shareRoomRenewalMarkedBrokenRef.current = false;
       setShareRoomRenewalWarning(false);
       setSharerFailure(null);
       setIsSharing(true);
@@ -2308,7 +2319,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     sharerFailureHandledRef.current = false;
     shareRoomFailureRef.current = null;
     shareRoomRenewalFailuresRef.current = 0;
-    shareRoomRenewalMarkedBrokenRef.current = false;
     setShareRoomRenewalWarning(false);
     setSharerFailure(null);
 

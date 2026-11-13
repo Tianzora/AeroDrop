@@ -53,6 +53,11 @@ import {
   captureLogicalReceiverState,
   restoreLogicalReceiverState,
 } from '../services/send/sessionTransferState';
+import {
+  createConnectionStatusController,
+  type ConnectionStatusController,
+  type ConnectionStatusUpdate,
+} from '../services/send/connectionStatusNotice';
 import { createSenderRouteHandshakeHandler } from '../services/send/routeHandshake';
 import { runSendFileSequence } from '../services/send/sendFileSequence';
 import {
@@ -102,6 +107,28 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
 
   const [isDragOver, setIsDragOver] = useState(false);
   const [connectionStatus, setConnectionStatus] = useState<string>('');
+  // 状态行只有一块位置：senderSession 写入的运维提示（例如「分享已失效，进行中的传输不受影响」）
+  // 必须压过每 3 秒一次的连接数统计，否则提示最多活 3 秒、用户看不见。优先级、存活窗口与
+  // 清空都在 services/send/connectionStatusNotice 里判定，这里只做两次转发。
+  const connectionStatusControllerRef = useRef<ConnectionStatusController | null>(null);
+  const applyConnectionStatusUpdate = (update: ConnectionStatusUpdate) => {
+    if (!update.apply) return;
+    setConnectionStatus(update.status);
+  };
+  /** 运维提示入口（会话层）：空字符串表示恢复，同时清掉窗口。 */
+  const pushConnectionStatus = (status: string) => {
+    const controller =
+      connectionStatusControllerRef.current ??
+      (connectionStatusControllerRef.current = createConnectionStatusController());
+    applyConnectionStatusUpdate(controller.announce(status, Date.now()));
+  };
+  /** 常规统计入口（连接数轮询）：提示窗口内不写状态行。 */
+  const applyRoutineConnectionStatus = (status: string) => {
+    const controller =
+      connectionStatusControllerRef.current ??
+      (connectionStatusControllerRef.current = createConnectionStatusController());
+    applyConnectionStatusUpdate(controller.routine(status, Date.now()));
+  };
   const [showFileList, setShowFileList] = useState(false);
   const [peerNames, setPeerNames] = useState<Record<string, string>>({});
 
@@ -426,9 +453,9 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
   const updateConnectionStatusUI = () => {
     const count = getVisibleConnections().length;
     if (count > 1) {
-       setConnectionStatus(`已连接 ${count} 个设备`);
+       applyRoutineConnectionStatus(`已连接 ${count} 个设备`);
     } else if (count === 0) {
-       setConnectionStatus('');
+       applyRoutineConnectionStatus('');
     }
   };
 
@@ -559,7 +586,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
               peerConnectionTypeRef.current.set(conn.peer, networkType);
 
               if (shouldUpdateUi) {
-                  setConnectionStatus(`已连接 ${activeConnections.current.size} 个设备`);
+                  applyRoutineConnectionStatus(`已连接 ${activeConnections.current.size} 个设备`);
               }
           }
       } catch (e) {
@@ -681,7 +708,8 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
       setPreparingStage: (stage) => setPreparingStage(stage),
       setShareCode: (code) => setTransferCode(code),
       setRemainingTime: (text) => setRemainingTime(text),
-      setConnectionStatus: (status) => setConnectionStatus(status),
+      // 会话层写的是运维提示（信令失效但还有在途传输），必须能压住连接数统计。
+      setConnectionStatus: (status) => pushConnectionStatus(status),
       setMetadata: (next) => setMetadata(next),
       notify: (message, type) => onNotification?.(message, type),
       getActiveTransfers: () => activeTransfersCount.current,
@@ -928,7 +956,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
     peerNegotiatedChunkCapRef.current.clear();
     resetCommittedRouteState();
     setIndividualStats([]);
-    setConnectionStatus('');
+    pushConnectionStatus('');
 
     // 口令登记/续期、TTL 倒计时、ICE 刷新与信令超时重试都在 SenderSession 里，
     // 组件只负责把会话状态映射回 UI。
@@ -1025,7 +1053,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
               return;
           }
 
-          setConnectionStatus('');
+          applyRoutineConnectionStatus('');
           setState(TransferState.WAITING_FOR_PEER);
       }
   };
@@ -1503,7 +1531,7 @@ export const Sender: React.FC<SenderProps> = ({ onNotification, deviceName, onBu
     setIndividualStats([]);
     setPeerNames({});
 
-    setConnectionStatus('');
+    pushConnectionStatus('');
     setPreparingStage('fetching_ice');
     setState(TransferState.IDLE);
     setFileList([]);
