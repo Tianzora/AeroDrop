@@ -36,12 +36,27 @@ import {
   selectReliableIceServers,
 } from '../services/turnCredentials';
 import {
+  SESSION_PROOF_GRACE_MS,
+  buildNextSessionProofHistory,
+  createSessionProof,
+  hashSessionProof,
+  isValidSessionProof,
   isValidSessionSecretHash,
-  shouldAcceptSessionReplacement,
+  shouldAcceptSessionAdmission,
+  type SessionProofHistoryEntry,
 } from '../services/signaling/sessionBinding';
+import {
+  rendezvousShardIndex,
+  resolveSignalingShardCount,
+  signalingShardIndex,
+  signalingShardName,
+} from '../services/signaling/shardRouting';
 
 // 注销后保留 peerId 归属的时间窗。与口令 TTL 上限对齐，覆盖「同一个分享反复启停」。
 const SHARE_CODE_TOMBSTONE_MS = 24 * 60 * 60 * 1000;
+// 会话绑定的保留时间：即使 socket 已断开，同 peerId 的接管仍必须出示 proof。
+// 24h 与口令墓碑对齐，避免分享结束后 peerId 立刻可被无凭证抢注。
+const SIGNALING_SESSION_BINDING_MS = 24 * 60 * 60 * 1000;
 // pagehide 可能只是切后台/被系统挂起，不能立刻永久注销；延迟窗口内允许原凭证恢复。
 const SHARE_CODE_REVOKE_MAX_GRACE_MS = 120_000;
 
@@ -54,6 +69,8 @@ interface Env {
   SIGNALING_HUB: DurableObjectNamespace;
   // 同一出口 IP 的并发信令上限，默认 12；CGNAT 部署可调高。
   SIGNALING_MAX_SESSIONS_PER_CLIENT?: string;
+  // 信令分片数，默认 1（单例 DO，行为不变）；扩容时按 rendezvous 路由到新片。
+  SIGNALING_SHARD_COUNT?: string;
   CF_TURN_TOKEN_ID?: string;
   CF_TURN_KEY_ID?: string;
   CF_TURN_API_TOKEN?: string;
@@ -104,7 +121,7 @@ type NetworkRiskAssessment = {
 };
 
 type SignalingEnvelope =
-  | { type: 'registered'; peerId: string }
+  | { type: 'registered'; peerId: string; sessionProof?: string }
   | { type: 'ping' | 'pong'; ts: number; sourcePeerId?: string }
   | { type: 'error'; code: string; message?: string; connectionId?: string; targetPeerId?: string; kind?: 'data' | 'media' }
   | {
@@ -146,6 +163,9 @@ let inflightCfIceConfig: Promise<IceConfigPayload | null> | null = null;
 
 const SIGNALING_DO_NAME = 'global-signaling-hub';
 const SIGNALING_PATH = '/ws-signaling';
+// 分片之间的内部投递与口令回源查询；只由 worker/其它 DO 调用，不对公网暴露。
+const SIGNALING_DELIVER_DO_PATH = '/internal/deliver-signaling';
+const SIGNALING_SHARE_CODE_LOOKUP_PATH = '/internal/lookup-share-code';
 
 // Per-isolate budget for TURN credential issuance; see iceConfigRateLimitPolicy.
 const iceConfigRateLimiter = createIceConfigRateLimiter();
@@ -650,7 +670,10 @@ const handleSignalingUpgrade = async (request: Request, env: Env): Promise<Respo
     return new Response('Missing peerId', { status: 400 });
   }
 
-  const hubId = env.SIGNALING_HUB.idFromName(SIGNALING_DO_NAME);
+  // 同一个 peerId 永远路由到同一片：注册、消息转发、内部投递都依赖这条不变量。
+  const shardCount = resolveSignalingShardCount(env.SIGNALING_SHARD_COUNT);
+  const shardName = signalingShardName(rendezvousShardIndex(peerId, shardCount));
+  const hubId = env.SIGNALING_HUB.idFromName(shardName);
   const stub = env.SIGNALING_HUB.get(hubId);
   return await stub.fetch(request);
 };
@@ -984,6 +1007,35 @@ type SessionAttachment = {
   sessionSecretHash?: string;
 };
 
+/**
+ * 会话绑定的持久化记录。proof 轮换后 attachment 里不再有分享密钥摘要（重连只带 proof），
+ * 所以「socket 断开后仍要求凭证」只能靠这张表；只存摘要，明文 proof 只下发一次。
+ */
+type SessionBindingRecord = {
+  secretHash: string | null;
+  proofHash: string;
+  recentProofHashes: SessionProofHistoryEntry[];
+};
+
+/** 历史 proof 是 JSON 文本列；解析失败按「没有历史」处理，绝不让坏数据变成放行。 */
+const parseSessionProofHistory = (raw: string | null): SessionProofHistoryEntry[] => {
+  if (!raw) return [];
+  try {
+    const parsed: unknown = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.flatMap((entry) => {
+      if (!entry || typeof entry !== 'object') return [];
+      const candidate = entry as { proofHash?: unknown; expiresAt?: unknown };
+      if (typeof candidate.proofHash !== 'string' || typeof candidate.expiresAt !== 'number') {
+        return [];
+      }
+      return [{ proofHash: candidate.proofHash, expiresAt: candidate.expiresAt }];
+    });
+  } catch {
+    return [];
+  }
+};
+
 const getSignalingClientKey = (request: Request): string => {
   const cfConnectingIp = request.headers.get('CF-Connecting-IP')?.trim();
   if (cfConnectingIp) return `ip:${cfConnectingIp}`;
@@ -994,7 +1046,7 @@ const getSignalingClientKey = (request: Request): string => {
   return 'ip:unknown';
 };
 
-export class SignalingHub extends DurableObject {
+export class SignalingHub extends DurableObject<Env> {
   private sessionsByPeer = new Map<string, WebSocket>();
   private peerBySocket = new Map<WebSocket, string>();
   private clientBySocket = new Map<WebSocket, string>();
@@ -1015,6 +1067,7 @@ export class SignalingHub extends DurableObject {
     );
 
     this.initializeShareCodeSchema();
+    this.initializeSessionBindingSchema();
 
     for (const ws of this.ctx.getWebSockets()) {
       const attachment = ws.deserializeAttachment() as SessionAttachment | null;
@@ -1034,6 +1087,12 @@ export class SignalingHub extends DurableObject {
     if (url.pathname === ICE_LIMIT_DO_PATH) {
       return this.handleIceConfigLimitRequest(request);
     }
+    if (url.pathname === SIGNALING_DELIVER_DO_PATH) {
+      return this.handleSignalingDeliverRequest(request);
+    }
+    if (url.pathname === SIGNALING_SHARE_CODE_LOOKUP_PATH) {
+      return this.handleShareCodeLookupRequest(request);
+    }
 
     const upgradeHeader = request.headers.get('Upgrade');
     if (!upgradeHeader || upgradeHeader.toLowerCase() !== 'websocket') {
@@ -1049,6 +1108,11 @@ export class SignalingHub extends DurableObject {
     if (sessionSecretHash !== undefined && !isValidSessionSecretHash(sessionSecretHash)) {
       return new Response('Invalid sessionSecretHash', { status: 400 });
     }
+    // 轮换凭证：同一格式、不同语义。格式错说明客户端实现有问题，握手阶段就拒绝。
+    const sessionProof = url.searchParams.get('sessionProof')?.trim() || undefined;
+    if (sessionProof !== undefined && !isValidSessionProof(sessionProof)) {
+      return new Response('Invalid sessionProof', { status: 400 });
+    }
     const clientKey = getSignalingClientKey(request);
 
     const pair = new WebSocketPair();
@@ -1062,13 +1126,25 @@ export class SignalingHub extends DurableObject {
     } satisfies SessionAttachment);
     this.ctx.acceptWebSocket(server);
 
+    const codeParam = url.searchParams.get('code');
+    const tokenParam = url.searchParams.get('token');
+    // share_codes 仍只住在 shard 0：本片不是 shard 0 时先回源取一次记录，再交给同步的
+    // resolveShareCodeRegistration 判定。失败按「查不到」处理（fail closed），不放宽校验。
+    const remoteLookup = this.shouldUseRemoteShareCodeLookup();
+    const prefetchedCode = remoteLookup && codeParam ? await this.lookupShareCodeRemotely('code', codeParam) : null;
+    const prefetchedByPeerId =
+      remoteLookup && !codeParam ? await this.lookupShareCodeRemotely('peerId', peerId) : null;
     const registration = await resolveShareCodeRegistration({
       peerId,
-      code: url.searchParams.get('code'),
-      token: url.searchParams.get('token'),
+      code: codeParam,
+      token: tokenParam,
       now: Date.now(),
-      findShareCode: (candidate) => this.findActiveShareCode(candidate, Date.now()),
-      findShareCodeByPeerId: (candidate) => this.findActiveShareCodeByPeerId(candidate, Date.now()),
+      findShareCode: remoteLookup
+        ? () => prefetchedCode
+        : (candidate) => this.findActiveShareCode(candidate, Date.now()),
+      findShareCodeByPeerId: remoteLookup
+        ? () => prefetchedByPeerId
+        : (candidate) => this.findActiveShareCodeByPeerId(candidate, Date.now()),
     });
     if (!registration.allowed) {
       const legacyPeerId = registration.reason === 'legacy-peer-id';
@@ -1097,34 +1173,28 @@ export class SignalingHub extends DurableObject {
     // 再驱逐：否则新连接因出口 IP 满额被 4029 时，旧会话已经被关掉，双方都没人服务。
     const existing = this.sessionsByPeer.get(peerId);
     const isTakeover = existing !== undefined && existing !== server;
-    if (isTakeover) {
-      // 身份绑定：旧会话若绑定了分享密钥，新连接必须出示同一摘要才能接管。否则知道
-      // peerId（分享链接里就有）的人就能顶掉分享者。这里直接拒绝且不碰限流名额与
-      // 会话表——旧会话必须原样继续服务。
-      const existingAttachment = existing.deserializeAttachment() as SessionAttachment | null;
-      const decision = shouldAcceptSessionReplacement({
-        existingSecretHash: existingAttachment?.sessionSecretHash,
-        incomingSecretHash: sessionSecretHash,
-      });
-      if (decision === 'reject') {
-        server.send(
-          JSON.stringify({
-            type: 'error',
-            code: 'session-conflict',
-            message: 'Session is bound to another connection',
-          } satisfies SignalingEnvelope)
-        );
-        // 被拒说明有人拿着分享链接但拿不到会话密钥：留一条日志，便于区分
-        // 「用户重装/换浏览器」与「真的在顶号」。这条路径不占名额，必须限频。
-        const now = Date.now();
-        if (now - (this.lastConflictLogAt.get(peerId) ?? 0) >= 60_000) {
-          if (this.lastConflictLogAt.size > 500) this.lastConflictLogAt.clear();
-          this.lastConflictLogAt.set(peerId, now);
-          console.warn('Rejected signaling session replacement without matching secret', { peerId });
-        }
-        server.close(4010, 'Signaling session conflict');
-        return new Response(null, { status: 101, webSocket: client });
-      }
+    const existingAttachment = isTakeover
+      ? (existing.deserializeAttachment() as SessionAttachment | null)
+      : null;
+    const now = Date.now();
+    // 身份绑定：会话一旦绑定，接管必须出示当前（或宽限期内的上一代）proof；没有绑定
+    // 记录时才回落到首次注册用的分享密钥摘要。判定与限流名额无关——拒绝路径必须让
+    // 旧会话原样继续服务。
+    const binding = this.findSessionBinding(peerId, now);
+    const incomingProofHash = sessionProof ? await hashSessionProof(sessionProof) : undefined;
+    const boundSecretHash =
+      binding?.secretHash ?? existingAttachment?.sessionSecretHash ?? sessionSecretHash;
+    const admission = shouldAcceptSessionAdmission({
+      boundSecretHash,
+      storedProofHash: binding?.proofHash,
+      recentProofHashes: binding?.recentProofHashes,
+      incomingSecretHash: sessionSecretHash,
+      incomingProofHash,
+      now,
+    });
+    if (admission === 'reject') {
+      this.sendSessionConflict(server, peerId, now);
+      return new Response(null, { status: 101, webSocket: client });
     }
     const existingClientKey = isTakeover ? this.clientBySocket.get(existing) : undefined;
     if (isTakeover && existingClientKey === clientKey) {
@@ -1175,11 +1245,35 @@ export class SignalingHub extends DurableObject {
     this.sessionsByPeer.set(peerId, server);
     this.peerBySocket.set(server, peerId);
     this.clientBySocket.set(server, clientKey);
-    server.send(JSON.stringify({ type: 'registered', peerId } satisfies SignalingEnvelope));
+    // 绑定过密钥的会话在每次成功注册后轮换 proof：客户端下一次重连只带 proof，静态
+    // 分享密钥摘要不再出现在 WS URL 上。明文 proof 只在这一帧里出现一次，落库的是摘要。
+    let issuedProof: string | undefined;
+    if (binding !== null || boundSecretHash !== undefined) {
+      issuedProof = createSessionProof();
+      this.saveSessionBinding({
+        peerId,
+        secretHash: boundSecretHash ?? null,
+        proofHash: await hashSessionProof(issuedProof),
+        recentProofHashes: buildNextSessionProofHistory({
+          storedProofHash: binding?.proofHash,
+          recentProofHashes: binding?.recentProofHashes,
+          now,
+          graceMs: SESSION_PROOF_GRACE_MS,
+        }),
+        now,
+      });
+    }
+    server.send(
+      JSON.stringify({
+        type: 'registered',
+        peerId,
+        ...(issuedProof ? { sessionProof: issuedProof } : {}),
+      } satisfies SignalingEnvelope)
+    );
     return new Response(null, { status: 101, webSocket: client });
   }
 
-  webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): void {
+  async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
     // 计数必须在类型检查之前：否则二进制帧可以绕过节流无限发送。
     const messageWindow = recordSignalingMessage(this.messageWindows.get(ws), Date.now());
     this.messageWindows.set(ws, messageWindow.state);
@@ -1265,18 +1359,16 @@ export class SignalingHub extends DurableObject {
       }
     }
 
-    const target = this.sessionsByPeer.get(payload.targetPeerId);
-    if (!target) {
-      this.sendError(ws, 'peer-unavailable', 'Target peer is unavailable', payload.connectionId, payload.targetPeerId, payload.kind);
-      return;
-    }
-
-    target.send(
+    const delivered = await this.deliverSignaling(
+      payload.targetPeerId,
       JSON.stringify({
         ...payload,
         sourcePeerId,
       } satisfies SignalingEnvelope)
     );
+    if (!delivered) {
+      this.sendError(ws, 'peer-unavailable', 'Target peer is unavailable', payload.connectionId, payload.targetPeerId, payload.kind);
+    }
   }
 
   webSocketClose(ws: WebSocket): void {
@@ -1359,6 +1451,202 @@ export class SignalingHub extends DurableObject {
       'DELETE FROM share_code_tombstones WHERE revoked_at <= ?',
       now - SHARE_CODE_TOMBSTONE_MS
     );
+  }
+
+  private initializeSessionBindingSchema(): void {
+    this.ctx.storage.sql.exec(
+      'CREATE TABLE IF NOT EXISTS signaling_session_bindings (' +
+        'peer_id TEXT PRIMARY KEY, ' +
+        'secret_hash TEXT, ' +
+        'proof_hash TEXT NOT NULL, ' +
+        "recent_hashes TEXT NOT NULL DEFAULT '[]', " +
+        'updated_at INTEGER NOT NULL, ' +
+        'expires_at INTEGER NOT NULL)'
+    );
+    this.ctx.storage.sql.exec(
+      'CREATE INDEX IF NOT EXISTS idx_signaling_session_bindings_expires ' +
+        'ON signaling_session_bindings(expires_at)'
+    );
+  }
+
+  private findSessionBinding(peerId: string, now: number): SessionBindingRecord | null {
+    const rows = this.ctx.storage.sql
+      .exec<{
+        secret_hash: string | null;
+        proof_hash: string;
+        recent_hashes: string | null;
+        expires_at: number;
+      }>(
+        'SELECT secret_hash, proof_hash, recent_hashes, expires_at ' +
+          'FROM signaling_session_bindings WHERE peer_id = ?',
+        peerId
+      )
+      .toArray();
+    const row = rows[0];
+    if (!row) return null;
+    if (row.expires_at <= now) {
+      // 过期绑定立刻清掉：否则 peerId 会被一个没人持有的会话一直锁住。
+      this.ctx.storage.sql.exec('DELETE FROM signaling_session_bindings WHERE peer_id = ?', peerId);
+      return null;
+    }
+    return {
+      secretHash: row.secret_hash,
+      proofHash: row.proof_hash,
+      recentProofHashes: parseSessionProofHistory(row.recent_hashes),
+    };
+  }
+
+  private saveSessionBinding(input: {
+    peerId: string;
+    secretHash?: string | null;
+    proofHash: string;
+    recentProofHashes: SessionProofHistoryEntry[];
+    now: number;
+  }): void {
+    // 顺手清理过期行：注册频率远低于查询频率，不值得单独开 alarm。
+    this.ctx.storage.sql.exec(
+      'DELETE FROM signaling_session_bindings WHERE expires_at <= ?',
+      input.now
+    );
+    this.ctx.storage.sql.exec(
+      'INSERT INTO signaling_session_bindings ' +
+        '(peer_id, secret_hash, proof_hash, recent_hashes, updated_at, expires_at) ' +
+        'VALUES (?, ?, ?, ?, ?, ?) ' +
+        'ON CONFLICT(peer_id) DO UPDATE SET ' +
+        'secret_hash = excluded.secret_hash, ' +
+        'proof_hash = excluded.proof_hash, ' +
+        'recent_hashes = excluded.recent_hashes, ' +
+        'updated_at = excluded.updated_at, ' +
+        'expires_at = excluded.expires_at',
+      input.peerId,
+      input.secretHash ?? null,
+      input.proofHash,
+      JSON.stringify(input.recentProofHashes),
+      input.now,
+      input.now + SIGNALING_SESSION_BINDING_MS
+    );
+  }
+
+  private getSignalingShardCount(): number {
+    return resolveSignalingShardCount(this.env.SIGNALING_SHARD_COUNT);
+  }
+
+  /** 本实例的 DO 名（idFromName 创建的 id 在 DO 内可读回 name）。 */
+  private getSignalingShardName(): string | null {
+    return this.ctx.id.name ?? null;
+  }
+
+  private isShardZero(): boolean {
+    const name = this.getSignalingShardName();
+    return name === null || signalingShardIndex(name) === 0;
+  }
+
+  /** 分片 > 1 且本片不是 shard 0 时，口令表（share_codes）必须回 shard 0 查。 */
+  private shouldUseRemoteShareCodeLookup(): boolean {
+    return this.getSignalingShardCount() > 1 && !this.isShardZero();
+  }
+
+  private signalingStub(shardName: string): DurableObjectStub {
+    return this.env.SIGNALING_HUB.get(this.env.SIGNALING_HUB.idFromName(shardName));
+  }
+
+  private async lookupShareCodeRemotely(
+    kind: 'code' | 'peerId',
+    value: string
+  ): Promise<ShareCodeRecord | null> {
+    try {
+      const response = await this.signalingStub(signalingShardName(0)).fetch(
+        new Request(`https://signaling.internal${SIGNALING_SHARE_CODE_LOOKUP_PATH}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ kind, value, now: Date.now() }),
+        })
+      );
+      if (!response.ok) return null;
+      const body = (await response.json()) as { record?: ShareCodeRecord | null } | null;
+      return body?.record ?? null;
+    } catch (error) {
+      // 查询失败必须按「没查到」处理：宁可让本次注册被拒，也不能放宽身份校验。
+      console.warn('signaling share-code lookup failed', error);
+      return null;
+    }
+  }
+
+  private async handleSignalingDeliverRequest(request: Request): Promise<Response> {
+    if (request.method !== 'POST') {
+      return new Response('Method Not Allowed', { status: 405 });
+    }
+    let body: { targetPeerId?: unknown; message?: unknown } | null = null;
+    try {
+      body = (await request.json()) as { targetPeerId?: unknown; message?: unknown };
+    } catch {
+      body = null;
+    }
+    const targetPeerId = typeof body?.targetPeerId === 'string' ? body.targetPeerId : '';
+    const message = typeof body?.message === 'string' ? body.message : '';
+    if (!targetPeerId || !message || isSignalingMessageTooLarge(message)) {
+      return json({ delivered: false }, { status: 400 });
+    }
+    const target = this.sessionsByPeer.get(targetPeerId);
+    if (!target) {
+      return json({ delivered: false });
+    }
+    target.send(message);
+    return json({ delivered: true });
+  }
+
+  private async handleShareCodeLookupRequest(request: Request): Promise<Response> {
+    if (request.method !== 'POST') {
+      return new Response('Method Not Allowed', { status: 405 });
+    }
+    let body: { kind?: unknown; value?: unknown; now?: unknown } | null = null;
+    try {
+      body = (await request.json()) as { kind?: unknown; value?: unknown; now?: unknown };
+    } catch {
+      body = null;
+    }
+    const kind = body?.kind;
+    const value = typeof body?.value === 'string' ? body.value : '';
+    const now = typeof body?.now === 'number' && Number.isFinite(body.now) ? body.now : Date.now();
+    if ((kind !== 'code' && kind !== 'peerId') || !value) {
+      return json({ record: null }, { status: 400 });
+    }
+    const record =
+      kind === 'code' ? this.findActiveShareCode(value, now) : this.findActiveShareCodeByPeerId(value, now);
+    return json({ record });
+  }
+
+  /**
+   * 投递一条信令：本片有该会话就直接发；否则按 peerId 的分片路由转发给目标片。
+   * 分片数为 1 时退化为原来的「本片查不到就 peer-unavailable」。
+   */
+  private async deliverSignaling(targetPeerId: string, message: string): Promise<boolean> {
+    const target = this.sessionsByPeer.get(targetPeerId);
+    if (target) {
+      target.send(message);
+      return true;
+    }
+    const shardCount = this.getSignalingShardCount();
+    if (shardCount <= 1) return false;
+    const ownShardName = this.getSignalingShardName();
+    if (ownShardName === null) return false;
+    const targetShardName = signalingShardName(rendezvousShardIndex(targetPeerId, shardCount));
+    if (targetShardName === ownShardName) return false;
+    try {
+      const response = await this.signalingStub(targetShardName).fetch(
+        new Request(`https://signaling.internal${SIGNALING_DELIVER_DO_PATH}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ targetPeerId, message }),
+        })
+      );
+      if (!response.ok) return false;
+      const body = (await response.json()) as { delivered?: unknown } | null;
+      return body?.delivered === true;
+    } catch (error) {
+      console.warn('signaling cross-shard delivery failed', error);
+      return false;
+    }
   }
 
   private findActiveShareCode(code: string, now: number): ShareCodeRecord | null {
@@ -1659,5 +1947,29 @@ export class SignalingHub extends DurableObject {
         kind,
       } satisfies SignalingEnvelope)
     );
+  }
+
+  /**
+   * 拒绝一次无法证明身份的接管：发终态 error 后直接关闭。
+   *
+   * 这条路径发生在名额检查之前（被拒的连接不占会话名额），所以日志必须限频，否则
+   * 拿着分享链接的扫描者可以把日志打满。4010 是客户端约定的「会话冲突」终态码。
+   */
+  private sendSessionConflict(server: WebSocket, peerId: string, now: number): void {
+    server.send(
+      JSON.stringify({
+        type: 'error',
+        code: 'session-conflict',
+        message: 'Session is bound to another connection',
+      } satisfies SignalingEnvelope)
+    );
+    if (now - (this.lastConflictLogAt.get(peerId) ?? 0) >= 60_000) {
+      if (this.lastConflictLogAt.size > 500) this.lastConflictLogAt.clear();
+      this.lastConflictLogAt.set(peerId, now);
+      console.warn('Rejected signaling session replacement without a valid session proof', {
+        peerId,
+      });
+    }
+    server.close(4010, 'Signaling session conflict');
   }
 }

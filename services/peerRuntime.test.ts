@@ -448,6 +448,42 @@ test('分享会话密钥摘要随信令注册 URL 上行，未提供时不出现
   }
 });
 
+test('服务端下发的 sessionProof 轮换后替换静态摘要，并出现在重连 URL 上', async () => {
+  FakeWebSocket.instances.length = 0;
+
+  const { scheduledTimeouts, restore } = installFakeTimers();
+
+  try {
+    const { default: WorkerSignaledPeer } = await import('./peerRuntime.ts');
+    const sessionSecretHash = 'a'.repeat(64);
+    const proof = 'b'.repeat(64);
+    const peer = new WorkerSignaledPeer({ debug: 0, sessionSecretHash });
+
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.onmessage?.({
+      data: JSON.stringify({ type: 'registered', peerId: 'AERO-ABC123', sessionProof: proof }),
+    });
+
+    // 正常掉线 → 按退避重连。
+    socket.close(1006, 'abnormal close');
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    const reconnectTimers = scheduledTimeouts.filter((entry) => entry.delayMs === 1_000);
+    assert.equal(reconnectTimers.length, 1);
+    reconnectTimers[0].fn();
+    assert.equal(FakeWebSocket.instances.length, 2);
+
+    const reconnectUrl = new URL(FakeWebSocket.instances[1].url);
+    assert.equal(reconnectUrl.searchParams.get('sessionProof'), proof);
+    // 首次注册之后静态 bearer 不再重复出现：服务端只认 proof。
+    assert.equal(reconnectUrl.searchParams.has('sessionSecretHash'), false);
+
+    peer.destroy();
+  } finally {
+    restore();
+  }
+});
+
 test('session-conflict 是终态：断开且不再重连，recoveryState 标记为 rejected', async () => {
   FakeWebSocket.instances.length = 0;
 

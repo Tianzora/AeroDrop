@@ -31,6 +31,11 @@ type PeerOptions = {
    * 同 peerId 的会话接管必须出示同一摘要；不传则保持历史行为（文件传输走这条）。
    */
   sessionSecretHash?: string;
+  /**
+   * 服务端在 `registered` 帧里下发的轮换凭证。调用方通常不需要传：PeerRuntime 收到后
+   * 自动保存，并在下一次重连时带上。只有恢复持久化会话时才需要显式提供。
+   */
+  sessionProof?: string;
   config?: RTCConfiguration;
   host?: string;
   port?: number;
@@ -68,7 +73,12 @@ type MediaConnectionEvents = {
   error: (error: PeerRuntimeError) => void;
 };
 
-type RegisteredEnvelope = { type: 'registered'; peerId: string };
+type RegisteredEnvelope = {
+  type: 'registered';
+  peerId: string;
+  /** 分享会话的下一代会话凭证；文件传输等未绑定的会话不带。 */
+  sessionProof?: string;
+};
 type ErrorEnvelope = {
   type: 'error';
   code: PeerRuntimeErrorType | string;
@@ -227,9 +237,9 @@ const toWebSocketUrl = (base: string): string => {
   return `${window.location.protocol === 'https:' ? 'wss://' : 'ws://'}${base}`;
 };
 
-// 信令 URL 里的 token / sessionSecretHash 等价于凭证：只允许真正用于建连，日志/指标一律脱敏。
+// 信令 URL 里的 token / sessionSecretHash / sessionProof 等价于凭证：只允许真正用于建连，日志/指标一律脱敏。
 const redactSignalingUrl = (url: string): string =>
-  url.replace(/([?&](?:token|sessionSecretHash)=)[^&]*/gi, '$1<redacted>');
+  url.replace(/([?&](?:token|sessionSecretHash|sessionProof)=)[^&]*/gi, '$1<redacted>');
 
 const createSignalingUrl = (peerId: string, options: PeerOptions = {}): string => {
   const baseUrl = new URL(toWebSocketUrl(SIGNALING_BASE));
@@ -239,6 +249,9 @@ const createSignalingUrl = (peerId: string, options: PeerOptions = {}): string =
   if (options.signalingToken) wsUrl.searchParams.set('token', options.signalingToken);
   if (options.sessionSecretHash) {
     wsUrl.searchParams.set('sessionSecretHash', options.sessionSecretHash);
+  }
+  if (options.sessionProof) {
+    wsUrl.searchParams.set('sessionProof', options.sessionProof);
   }
   return wsUrl.toString();
 };
@@ -745,6 +758,11 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
   private awaitingPong = false;
   private registrationRejected = false;
   /**
+   * 分享会话的轮换凭证。首连用 `sessionSecretHash`，服务端在 `registered` 帧里换发 proof；
+   * 之后的自动重连只带 proof，静态摘要不再出现在 WS URL 上。值本身是 bearer，不落日志。
+   */
+  private sessionProof: string | null;
+  /**
    * 信令 WS 短暂断开时，answer 与 trickle ICE 候选会无处可发。直接丢弃会让纯中继
    * 路径彻底失败（relay 候选恰好是在断开窗口里 gather 出来的），这里先排队，
    * 同一条信令会话重连成功后再补发；超过上限则丢最旧的，避免内存无限增长。
@@ -759,6 +777,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     this.id = typeof idOrOptions === 'string' ? idOrOptions : createId('peer');
     this.options = (typeof idOrOptions === 'string' ? maybeOptions : idOrOptions) ?? {};
     this.config = this.options.config ?? {};
+    this.sessionProof = this.options.sessionProof ?? null;
     this.readyPromise = this.createReadyPromise();
     this.connectSignaling();
   }
@@ -850,7 +869,14 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     // 终态拒绝只针对「被拒的那一次注册」。自动重连不会走到这里（终态路径直接 return），
     // 所以在这里复位不会重新制造重连循环；反之不复位会让一个实例被拒一次后永久失联。
     this.registrationRejected = false;
-    const url = createSignalingUrl(this.id, this.options);
+    const url = createSignalingUrl(
+      this.id,
+      this.sessionProof
+        ? // 拿到 proof 之后就不再发静态摘要：服务端此时只认 proof，多带一份长期 bearer
+          // 只会让它在 URL/日志里重复出现。
+          { ...this.options, sessionProof: this.sessionProof, sessionSecretHash: undefined }
+        : this.options
+    );
     this.log('info', 'signaling_ws_connect_start', {
       url: redactSignalingUrl(url),
       signalingBase: SIGNALING_BASE,
@@ -1032,6 +1058,13 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     if (message.type === 'registered') {
       this.disconnected = false;
       this.id = message.peerId;
+      if (typeof message.sessionProof === 'string' && message.sessionProof.length > 0) {
+        // 每次注册轮换：下一次重连带最新值；旧值只在服务端宽限期内可用，避免静态 bearer。
+        this.sessionProof = message.sessionProof;
+        this.log('info', 'signaling_session_proof_rotated', {
+          sessionProofLength: message.sessionProof.length,
+        });
+      }
       this.log('info', 'signaling_registered', { registeredPeerId: message.peerId });
       if (!this.openedOnce) {
         this.openedOnce = true;
