@@ -25,6 +25,7 @@ import {
   createSignalingHandshakeBudget,
   getSignalingHandshakeRetryAfterSeconds,
 } from '../services/signaling/handshakeBudget';
+import { createSignalingTelemetry } from '../services/signaling/signalingTelemetry';
 import {
   createSignalingRateLimiter,
   createSignalingSessionLimiter,
@@ -167,6 +168,9 @@ let cachedCfIceConfigExpiresAt = 0;
 let inflightCfIceConfig: Promise<IceConfigPayload | null> | null = null;
 
 const SIGNALING_DO_NAME = 'global-signaling-hub';
+
+// Workers Logs 就是这个进程的指标管道：一行一个 JSON，按 event 计数即可。
+const signalingTelemetry = createSignalingTelemetry((line) => console.log(line));
 const SIGNALING_PATH = '/ws-signaling';
 // 分片之间的内部投递与口令回源查询；只由 worker/其它 DO 调用，不对公网暴露。
 const SIGNALING_DELIVER_DO_PATH = '/internal/deliver-signaling';
@@ -686,7 +690,12 @@ const handleSignalingUpgrade = async (request: Request, env: Env): Promise<Respo
 
   // 同一个 peerId 永远路由到同一片：注册、消息转发、内部投递都依赖这条不变量。
   const shardCount = resolveSignalingShardCount(env.SIGNALING_SHARD_COUNT);
-  const shardName = signalingShardName(rendezvousShardIndex(peerId, shardCount));
+  const shardIndex = rendezvousShardIndex(peerId, shardCount);
+  const shardName = signalingShardName(shardIndex);
+  // 单例模式每个握手都记一条纯属噪声，只在真正分片时记录。
+  if (shardCount > 1) {
+    signalingTelemetry.record('signal_shard_selected', { shard: shardIndex, shardCount });
+  }
   const hubId = env.SIGNALING_HUB.idFromName(shardName);
   const stub = env.SIGNALING_HUB.get(hubId);
   return await stub.fetch(request);
@@ -1157,6 +1166,9 @@ export class SignalingHub extends DurableObject<Env> {
     if (remoteLookup) {
       const budget = signalingHandshakeBudget.consume(clientKey, Date.now());
       if (!budget.allowed) {
+        signalingTelemetry.record('signal_handshake_budget_exhausted', {
+          retryAfterMs: budget.retryAfterMs,
+        });
         return new Response('Too Many Requests', {
           status: 429,
           headers: { 'Retry-After': String(getSignalingHandshakeRetryAfterSeconds(budget.retryAfterMs)) },
@@ -1267,6 +1279,9 @@ export class SignalingHub extends DurableObject<Env> {
       sessionSlotId =
         isTakeover && existingAttachment?.slotId ? existingAttachment.slotId : crypto.randomUUID();
       if (!(await this.reserveSignalingSessionSlot(sessionSlotId, clientKey))) {
+        signalingTelemetry.record('signal_session_slot_rejected', {
+          shardCount: this.getSignalingShardCount(),
+        });
         server.send(
           JSON.stringify({
             type: 'error',
@@ -1552,6 +1567,10 @@ export class SignalingHub extends DurableObject<Env> {
       'CREATE INDEX IF NOT EXISTS idx_share_code_tombstones_revoked ' +
         'ON share_code_tombstones(revoked_at)'
     );
+    // 分片回源会按 peer_id 查活跃口令（续期 / 重连探测），没有索引就是全表扫。
+    this.ctx.storage.sql.exec(
+      'CREATE INDEX IF NOT EXISTS idx_share_codes_peer_id ON share_codes(peer_id)'
+    );
   }
 
   private deleteExpiredShareCodes(now: number): void {
@@ -1707,6 +1726,7 @@ export class SignalingHub extends DurableObject<Env> {
       return body?.record ?? null;
     } catch (error) {
       // 查询失败必须按「没查到」处理：宁可让本次注册被拒，也不能放宽身份校验。
+      signalingTelemetry.record('signal_share_code_lookup_failed', { kind });
       console.warn('signaling share-code lookup failed', error);
       return null;
     }
@@ -1770,7 +1790,8 @@ export class SignalingHub extends DurableObject<Env> {
     if (shardCount <= 1) return false;
     const ownShardName = this.getSignalingShardName();
     if (ownShardName === null) return false;
-    const targetShardName = signalingShardName(rendezvousShardIndex(targetPeerId, shardCount));
+    const targetShardIndex = rendezvousShardIndex(targetPeerId, shardCount);
+    const targetShardName = signalingShardName(targetShardIndex);
     if (targetShardName === ownShardName) return false;
     try {
       const response = await this.signalingStub(targetShardName).fetch(
@@ -1780,10 +1801,29 @@ export class SignalingHub extends DurableObject<Env> {
           body: JSON.stringify({ targetPeerId, message }),
         })
       );
-      if (!response.ok) return false;
+      if (!response.ok) {
+        signalingTelemetry.record('signal_cross_shard_failed', {
+          targetShard: targetShardIndex,
+          reason: 'rpc_status',
+          status: response.status,
+        });
+        return false;
+      }
       const body = (await response.json()) as { delivered?: unknown } | null;
-      return body?.delivered === true;
+      if (body?.delivered === true) {
+        signalingTelemetry.record('signal_cross_shard_delivered', { targetShard: targetShardIndex });
+        return true;
+      }
+      signalingTelemetry.record('signal_cross_shard_failed', {
+        targetShard: targetShardIndex,
+        reason: 'unknown_target',
+      });
+      return false;
     } catch (error) {
+      signalingTelemetry.record('signal_cross_shard_failed', {
+        targetShard: targetShardIndex,
+        reason: 'rpc_error',
+      });
       console.warn('signaling cross-shard delivery failed', error);
       return false;
     }
@@ -2296,6 +2336,7 @@ export class SignalingHub extends DurableObject<Env> {
         message: 'Session is bound to another connection',
       } satisfies SignalingEnvelope)
     );
+    signalingTelemetry.record('signal_session_conflict', { shardCount: this.getSignalingShardCount() });
     if (now - (this.lastConflictLogAt.get(peerId) ?? 0) >= 60_000) {
       if (this.lastConflictLogAt.size > 500) this.lastConflictLogAt.clear();
       this.lastConflictLogAt.set(peerId, now);
