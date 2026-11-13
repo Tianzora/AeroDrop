@@ -10,6 +10,7 @@ import {
   writeScreenShareViewSession,
 } from '../services/screenShareViewerSession';
 import { ScreenShareUI, ScreenShareViewerConnectingStage } from './screen-share/ScreenShareUI';
+import { createSessionSecretHash } from '../services/signaling/sessionBinding';
 import { logDebug } from '../services/diagnostics';
 import { SIGNALING_UNREACHABLE_MESSAGE } from '../services/connectionGuidance';
 import { CONNECTION_TIMINGS, SCREEN_SHARE_LIMITS } from '../constants/transfer';
@@ -211,6 +212,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const viewerConnectAttemptRef = useRef(0);
   // 分享会话令牌：停止分享后让仍在 await 中的 initializePeer 作废，避免迟到注册占住会话名额。
   const peerSessionTokenRef = useRef(0);
+  // 分享会话的密钥摘要：每次开始分享生成一次，重建 peer / 信令重连必须复用同一个，
+  // 否则服务端会把「自己」当成顶替者拒掉。停止分享即清空，下次分享换新身份。
+  const sharerSessionSecretHashRef = useRef<string | null>(null);
 
   // 同一个 viewer 可能在旧 call 的 ICE 宽限期内重连，新的 MediaConnection 会复用同一个
   // peerId。监控器必须绑定到具体的 PeerConnection，否则新连接会继承旧 PC 的定时器。
@@ -766,12 +770,18 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     const { default: PeerRuntime } = await loadPeerRuntime();
     // 用户可能在拉配置期间停止共享；此时再注册会留下一个空信令会话占用每 IP 名额。
     if (peerSessionTokenRef.current !== sessionToken) return;
+    // 会话密钥摘要只生成一次：重建 peer / 信令重连复用同一个，服务端才认这是同一会话。
+    const sessionSecretHash =
+      sharerSessionSecretHashRef.current ?? (await createSessionSecretHash());
+    if (peerSessionTokenRef.current !== sessionToken) return;
+    sharerSessionSecretHashRef.current = sessionSecretHash;
     const id = generatePeerId();
     const useSecurePeerServer = window.location.protocol === 'https:';
     const peer = new PeerRuntime(id, {
       debug: 0,
       secure: useSecurePeerServer,
       pingInterval: 5000, // 缩短心跳间隔以保持 VPN 隧道活跃
+      sessionSecretHash,
       config: {
         iceServers: iceConfig.iceServers,
         iceCandidatePoolSize: iceConfig.iceCandidatePoolSize,
@@ -851,12 +861,16 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       // close/error 必须在 answer 之前挂上：viewer 可能在 answer 在途时断开，
       // 而 answer() 对已关闭的 call 会正常 resolve，晚挂的监听永远不会触发。
+      // viewerGone 让 answer 的 then 能分辨「观众已经走了」和「还没连上」。
+      let viewerGone = false;
       call.on('close', () => {
+        viewerGone = true;
         removeActiveCall(call);
       });
 
       call.on('error', (err) => {
         console.error('Call error:', err);
+        viewerGone = true;
         removeActiveCall(call);
       });
 
@@ -876,7 +890,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       // 被计入门槛与带宽监控，观看者却永远收不到流。失败时立即关闭并释放名额。
       void call.answer(stream)
         .then(() => {
-          if (!call.open) {
+          // 不能拿 call.open 当门槛：answer() 在 ICE 连上之前就 resolve，这时 open 还是
+          // false，用它过滤会让观看人数、MAX_VIEWERS 与带宽监控永远不生效（E2E 实测
+          // 观众已有画面，分享端仍显示 0 人）。观众在 answer 途中离开由 viewerGone 兜住。
+          if (viewerGone) {
             peerQualityLevelRef.current.delete(call.peer);
             return;
           }
@@ -897,7 +914,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
             applyBitrateConstraints(call.peerConnection, currentQuality, initialCap);
             // 某些浏览器在初始协商后才完全挂载 sender 参数，短延迟重复应用可减少前几秒模糊
             setTimeout(() => {
-              if (call.peerConnection && call.open) {
+              if (call.peerConnection && !viewerGone) {
                 const quality = peerQualityLevelRef.current.get(call.peer) || 'high';
                 applyBitrateConstraints(
                   call.peerConnection,
@@ -918,6 +935,13 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     peer.on('error', (err) => {
       console.error('Peer error:', err);
+      if (err?.type === 'session-conflict') {
+        // 同 peerId 的已有会话不接受这次接管：要么本浏览器丢了会话密钥，要么有人拿着
+        // 分享链接顶号但拿不到密钥。重连只会反复被拒（两个方向互踢），交给用户重开。
+        setError('分享会话已被其他连接占用，请重新开始共享');
+        setIsPeerReady(false);
+        return;
+      }
       if (err?.type === 'disconnected') {
         // 信令重连预算耗尽：peerRuntime 自己不会再发 disconnected 事件，靠 tick 让恢复
         // effect 再跑一次，由它决定重建 peer 还是放弃。
@@ -1816,6 +1840,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const stopScreenShare = () => {
     // 让仍在 await 的 initializePeer 作废，避免停止后又有新 peer 注册。
     peerSessionTokenRef.current += 1;
+    // 分享结束即销毁会话密钥：下次分享必须是新身份，旧链接不能凭旧密钥接管。
+    sharerSessionSecretHashRef.current = null;
     broadcastShareEnded('stopped');
     if (sharerReconnectTimerRef.current) {
       clearTimeout(sharerReconnectTimerRef.current);

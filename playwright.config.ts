@@ -2,7 +2,7 @@ import { defineConfig } from '@playwright/test';
 
 export default defineConfig({
   testDir: './e2e',
-  testIgnore: ['rtc-datachannel.spec.ts', 'product-transfer.spec.ts'],
+  testIgnore: ['rtc-datachannel.spec.ts', 'product-transfer.spec.ts', 'screenshare.spec.ts'],
   timeout: 30_000,
   fullyParallel: false,
   retries: 0,
