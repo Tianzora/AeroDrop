@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
@@ -22,7 +23,7 @@ const referencedCounts = (source: string, pattern: RegExp): number[] =>
 
 test('screenshare 用例数与被引用处一致', () => {
   const actual = countTests('e2e/screenshare.spec.ts');
-  assert.equal(actual, 10, '改了 e2e/screenshare.spec.ts 的用例数，就要同步 CI 注释与白名单理由');
+  assert.equal(actual, 12, '改了 e2e/screenshare.spec.ts 的用例数，就要同步 CI 注释与白名单理由');
 
   const ci = readRepoFile('.github/workflows/ci.yml');
   assert.deepEqual(
@@ -62,4 +63,63 @@ test('product-transfer 用例数与被引用处一致', () => {
     [actual],
     '.github/workflows/ci.yml 的用例清单里的数字必须等于真实用例数'
   );
+});
+
+// `--list` 只读取配置与 spec 文件、不启动 preview/worker，也不会占用 8787/3401；
+// 它验证的是「testMatch 实际选中的就是这两个文件、条数就是 13」，比数 `test(` 更接近
+// CI 真正会跑的东西（例如 spec 被移出 testDir 时，计数仍然 13 但实际一条都不跑）。
+const listProductTests = (): { total: number; files: number } | null => {
+  const npx = process.platform === 'win32' ? 'npx.cmd' : 'npx';
+  const result = spawnSync(
+    npx,
+    ['playwright', 'test', '--list', '--config=playwright.product.config.ts'],
+    {
+      cwd: ROOT,
+      encoding: 'utf8',
+      timeout: 60_000,
+      // Windows 上 .cmd 必须经过 shell 才能执行（Node 的 spawn 安全策略）。
+      shell: process.platform === 'win32',
+    }
+  );
+  if (result.error || result.status !== 0) return null;
+  const match = `${result.stdout ?? ''}\n${result.stderr ?? ''}`.match(
+    /Total:\s+(\d+)\s+tests?\s+in\s+(\d+)\s+files?/i
+  );
+  return match ? { total: Number(match[1]), files: Number(match[2]) } : null;
+};
+
+test('product 配置的 testMatch 同时选中两个 spec，并能列出 15 条用例', () => {
+  const config = readRepoFile('playwright.product.config.ts');
+  const testMatch = config.match(/testMatch:\s*\[([^\]]*)\]/);
+  assert.ok(testMatch, 'playwright.product.config.ts 里找不到 testMatch 数组');
+  const patterns = Array.from(testMatch[1].matchAll(/['"]([^'"]+)['"]/g), (match) => match[1]);
+  for (const spec of ['screenshare.spec.ts', 'product-transfer.spec.ts']) {
+    assert.ok(
+      patterns.includes(spec),
+      `playwright.product.config.ts 的 testMatch 少了 ${spec}：` +
+        '删掉它不会让任何测试变红，只会让整个文件从产品级 E2E 里静默消失'
+    );
+  }
+
+  const listed = listProductTests();
+  if (listed) {
+    assert.equal(
+      listed.total,
+      15,
+      `--list 解析出 ${listed.total} 条产品级用例，期望 15 条（product-transfer 3 + screenshare 12）`
+    );
+    assert.equal(listed.files, 2, 'testMatch 必须恰好覆盖两个 spec 文件');
+    return;
+  }
+
+  // 降级：本机 `npx` / Playwright 起不来（离线、未安装、Windows 下 .cmd 被安全策略挡住）
+  // 时不把「工具链不可用」误报成门禁回归，改为解析 spec 里的 `test(` 计数。降级只校验
+  // 条数与文件存在性，覆盖不到 testMatch 的选取范围 —— 上面那段已经单独钉住两个 pattern。
+  const specs = ['e2e/product-transfer.spec.ts', 'e2e/screenshare.spec.ts'];
+  const total = specs.reduce((sum, file) => sum + countTests(file), 0);
+  for (const file of specs) {
+    assert.ok(countTests(file) > 0, `${file} 里解析不到任何 test(，用例清单可能已被改坏`);
+  }
+  assert.equal(total, 15, `降级计数得到 ${total} 条产品级用例，期望 15 条`);
+  assert.equal(specs.length, 2, '产品级套件必须恰好由两个 spec 文件组成');
 });

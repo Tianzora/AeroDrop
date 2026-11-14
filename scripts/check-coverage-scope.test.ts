@@ -29,6 +29,9 @@ test('--self-test 校验解析、判定、白名单预算与理由规则', () =>
   // 会漏掉全部 *.test.*，那条检查原本永远为真）。
   assert.match(result.stdout, /\d+ 个白名单预算 fixture/);
   assert.match(result.stdout, /\d+ 个理由 fixture/);
+  // 阈值政策 fixture（门槛数字 + 白名单预算）是后加的一组：没有它，把 85 改成 50、
+  // maxEntries 2 改成 5 之后自检依然全绿，规则没坏但门槛被静默放宽。
+  assert.match(result.stdout, /\d+ 个阈值政策 fixture/);
   assert.match(result.stdout, /白名单预算上限、理由引用测试文件的存在性检查/);
 });
 

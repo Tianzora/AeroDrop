@@ -52,7 +52,7 @@ jobs:
   # 而且先撞上的是「≤3 条」的条目上限。
   # 为什么不放在 verify 里：verify 是 e2e / e2e-product 的前置（`needs: verify`）。这个
   # job 的红绿取决于白名单预算，一旦有人再往白名单里塞文件（或把上限改小）它就是红的；
-  # 把它塞进 verify 会连带让浏览器用例（含 10 条屏幕共享）整批跳过，那正好抵消了把
+  # 把它塞进 verify 会连带让浏览器用例（含 12 条屏幕共享）整批跳过，那正好抵消了把
   # screenshare E2E 接进 CI 的意义。独立 job 的好处是：红灯一眼看得到，其余 job 照常跑。
   coverage-components:
     name: 'coverage gate (components, allowlist budget)'
@@ -173,7 +173,7 @@ jobs:
 
       # test:e2e:product-transfer = `npm run build` + `wrangler dev`(:8787) + playwright
       # --config=playwright.product.config.ts，覆盖 product-transfer.spec.ts（3 条：SEO 元数据、
-      # 2 MiB 真实传输、口令撤销宽限恢复）与 screenshare.spec.ts（10 条：分享/观看帧增长、
+      # 2 MiB 真实传输、口令撤销宽限恢复）与 screenshare.spec.ts（12 条：分享/观看帧增长、
       # 信令被拒终态、登记限流、瞬时失败恢复、卡住终态、房号过期、停止后立即重启、观众媒体失败、
       # 无活跃分享者的死链终态、第 7 位观众满员提示）。屏幕共享用 Chromium 的 fake display capture（flag 见
       # playwright.product.config.ts），因此 runner 上不需要 X server 或真实屏幕。

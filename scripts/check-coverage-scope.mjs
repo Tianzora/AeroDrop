@@ -135,7 +135,7 @@ const SCOPES = {
       ],
       [
         'components/ScreenShare.tsx',
-        '没有任何组件测试 import 它 —— 注意不是「加载不了」：signaling 基址惰性化之后它已经能在 Node 里 import（实测通过），缺的是加载它的测试。渲染依赖真实屏幕采集 getDisplayMedia、RTCPeerConnection 与信令握手，没有这些 API 的替身就跑不出状态机（只会是 0% 行覆盖率）；共享/恢复/满员流程由 test:e2e:product-transfer 的 10 条 screenshare 用例覆盖',
+        '没有任何组件测试 import 它 —— 注意不是「加载不了」：signaling 基址惰性化之后它已经能在 Node 里 import（实测通过），缺的是加载它的测试。渲染依赖真实屏幕采集 getDisplayMedia、RTCPeerConnection 与信令握手，没有这些 API 的替身就跑不出状态机（只会是 0% 行覆盖率）；共享/恢复/满员流程由 test:e2e:product-transfer 的 12 条 screenshare 用例覆盖',
       ],
       [
         'components/Sender.tsx',
@@ -652,6 +652,24 @@ const BUDGET_CASES = [
   },
 ];
 
+// 阈值政策 fixture：只比对「真实 SCOPES 与文档口径」。没有这一组，把 services 的 85 改成
+// 50、把 maxEntries 2 改成 5 之后，所有解析/判定 fixture 依然全绿 —— 规则没坏，门槛却被
+// 静默放宽了。放宽门槛是政策变更，必须同时改这里（并在评审里解释），改一个数字过不了自检。
+const POLICY_CASES = [
+  { scope: 'services', path: ['defaults', 'minLines'], expected: 85 },
+  { scope: 'services', path: ['defaults', 'minBranches'], expected: 78 },
+  { scope: 'services', path: ['defaults', 'minFunctions'], expected: 75 },
+  { scope: 'services', path: ['allowlistBudget', 'maxEntries'], expected: 2 },
+  { scope: 'services', path: ['allowlistBudget', 'maxExcludedLineShare'], expected: 0.05 },
+  { scope: 'components', path: ['defaults', 'minLines'], expected: 60 },
+  { scope: 'components', path: ['defaults', 'minBranches'], expected: 58 },
+  { scope: 'components', path: ['defaults', 'minFunctions'], expected: 40 },
+  { scope: 'components', path: ['allowlistBudget', 'maxEntries'], expected: 3 },
+  { scope: 'components', path: ['allowlistBudget', 'maxExcludedLineShare'], expected: 0.8 },
+];
+
+const readPolicyValue = (scope, keys) => keys.reduce((node, key) => node?.[key], scope);
+
 // 白名单理由的 fixture：knownPaths 是合成的，只验证「引用的测试文件必须存在」。
 const REASON_CASES = [
   {
@@ -808,6 +826,17 @@ const runSelfTest = () => {
     }
   }
 
+  for (const testCase of POLICY_CASES) {
+    const actual = readPolicyValue(SCOPES[testCase.scope], testCase.path);
+    const label = `${testCase.scope}.${testCase.path.join('.')}`;
+    if (!Number.isFinite(Number(actual)) || Number(actual) !== testCase.expected) {
+      failures.push(
+        `[政策] ${label} 期望 ${testCase.expected}，实际 ${JSON.stringify(actual)}：` +
+          '放宽覆盖率/白名单预算属于政策变更，必须同步文档口径与评审，不能只改一个数字'
+      );
+    }
+  }
+
   for (const testCase of REASON_CASES) {
     const problems = auditAllowlistReason({
       reason: testCase.reason,
@@ -830,7 +859,7 @@ const runSelfTest = () => {
     process.exit(1);
   }
   console.log(
-    `check-coverage-scope: self-test passed —— ${SELF_TEST_CASES.length} 个报告 fixture + ${BUDGET_CASES.length} 个白名单预算 fixture + ${REASON_CASES.length} 个理由 fixture 全部符合预期（含缺失文件、0% 行、行数不足、同名遮蔽、范围外文件污染、门槛口径六条失败路径，以及白名单预算上限、理由引用测试文件的存在性检查）`
+    `check-coverage-scope: self-test passed —— ${SELF_TEST_CASES.length} 个报告 fixture + ${BUDGET_CASES.length} 个白名单预算 fixture + ${REASON_CASES.length} 个理由 fixture + ${POLICY_CASES.length} 个阈值政策 fixture 全部符合预期（含缺失文件、0% 行、行数不足、同名遮蔽、范围外文件污染、门槛口径六条失败路径，以及白名单预算上限、理由引用测试文件的存在性检查、阈值政策未被放宽）`
   );
 };
 
