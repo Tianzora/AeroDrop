@@ -20,6 +20,7 @@ const baseProps: React.ComponentProps<typeof ScreenShareUI> = {
   cancelConnecting: () => {},
   retryConnection: () => {},
   dismissConnectionError: () => {},
+  dismissError: () => {},
   viewerVideoRef: () => {},
   needsPlayClick: false,
   onViewerPlayClick: () => {},
@@ -325,4 +326,69 @@ test('房号过期卡说明「重新开始共享」会断开现有观众', () =>
   assert.match(markup, /重新开始共享/);
   // 只说「新观众进不来」会让用户以为现有观众不受影响。
   assert.match(markup, /观众会断开/);
+});
+
+test('冷却期内主按钮禁用并显示倒计时：关掉终态卡也绕不过去', () => {
+  const markup = render({ shareRoomRetrySeconds: 27, hasBeenReady: true });
+
+  assert.match(markup, /开始共享屏幕/);
+  assert.match(markup, /27 秒后可重试/);
+  // 光断言 disabled="" 会被同屏的其它禁用按钮蒙混过去：要确认禁用的就是这颗主按钮。
+  assert.match(markup, /<button[^>]*disabled=""[^>]*>(?:(?!<button)[\s\S])*?开始共享屏幕/);
+});
+
+test('冷却结束后主按钮恢复可用且不显示倒计时', () => {
+  const markup = render({ shareRoomRetrySeconds: null, hasBeenReady: true });
+
+  assert.match(markup, /开始共享屏幕/);
+  assert.doesNotMatch(markup, /秒后可重试/);
+  assert.doesNotMatch(markup, /disabled=""/);
+});
+
+test('房号过期卡的「重新开始共享」在冷却期内同样禁用', () => {
+  const markup = render({
+    isSharing: true,
+    isShareLive: false,
+    isPeerReady: false,
+    hasBeenReady: true,
+    shareRoomExpired: true,
+    shareRoomRetrySeconds: 12,
+    shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
+  });
+
+  assert.match(markup, /12 秒后可重试/);
+  // 同屏的复制/分享按钮本来就是禁用的，必须确认禁用的是「重新开始共享」这颗。
+  assert.match(markup, /<button[^>]*disabled=""[^>]*>(?:(?!<button)[\s\S])*?重新开始共享/);
+});
+
+test('通用错误条带关闭入口：信令抖一下留下的红条不该一直占着版面', () => {
+  const markup = render({ error: '信令服务拒绝了当前会话，请重新开始共享' });
+
+  assert.match(markup, /关闭提示/);
+});
+
+test('只是信令抖动时链接标题写「暂不可用」而不是「已失效」', () => {
+  const markup = render({
+    isSharing: true,
+    isShareLive: false,
+    isPeerReady: false,
+    hasBeenReady: true,
+    shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
+  });
+
+  assert.match(markup, /title="分享链接暂不可用"/);
+  assert.doesNotMatch(markup, /分享链接已失效/);
+});
+
+test('分享状态变化会被读屏播报：徽标区是 role=status 的实时区域', () => {
+  const markup = render({
+    isSharing: true,
+    isShareLive: true,
+    isPeerReady: true,
+    shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
+  });
+
+  assert.match(markup, /正在共享/);
+  assert.match(markup, /role="status"/);
+  assert.match(markup, /aria-live="polite"/);
 });

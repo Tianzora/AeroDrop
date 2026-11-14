@@ -96,6 +96,13 @@ export const CONNECTION_TIMINGS = {
   SENDER_HARD_HEARTBEAT_TIMEOUT_MS: 5 * 60 * 1000,
   SCREEN_SHARE_CONNECT_TIMEOUT_MS: 20_000,
   SCREEN_SHARE_MAX_RECONNECT_ATTEMPTS: 5,
+  /**
+   * 观众收到 peer-unavailable 时的有限重试：分享端重建 Peer 的几秒窗口里，复用的房号
+   * 会短暂查不到绑定（components/ScreenShare.tsx 的恢复流程重建后链接仍然有效）。
+   * 直接判「链接已失效」会把一次正常恢复说成死链，所以先等一个窗口再下一次结论。
+   */
+  SCREEN_SHARE_SHARE_UNAVAILABLE_RETRY_MS: 3_000,
+  SCREEN_SHARE_SHARE_UNAVAILABLE_MAX_RETRIES: 1,
   // 信令预算耗尽后重建 PeerRuntime 的次数上限：每次重建都会拿到新的信令预算，不限次
   // 就会变成「重建-耗尽-重建」的慢循环。
   SCREEN_SHARE_MAX_PEER_REBUILDS: 2,

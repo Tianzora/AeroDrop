@@ -18,7 +18,8 @@ import {
   SIGNALING_UNREACHABLE_MESSAGE,
   VIEWER_RECONNECT_EXHAUSTED_MESSAGE,
   VIEWER_SESSION_LIMIT_MESSAGE,
-  VIEWER_SHARE_GONE_MESSAGE,
+  VIEWER_SHARE_UNAVAILABLE_MESSAGE,
+  VIEWER_SHARE_UNAVAILABLE_RETRY_MESSAGE,
   describeViewerReconnectWait,
   getMediaConnectionErrorMessage,
   getPeerRuntimeErrorMessage,
@@ -73,6 +74,8 @@ import {
 } from '../services/screenShare/screenCaptureGuidance';
 import { planViewerCallEndOutcome } from '../services/screenShare/viewerShareFullFallback';
 import { planViewerPeerError } from '../services/screenShare/viewerPeerErrorPolicy';
+import { planViewerErrorSurface } from '../services/screenShare/viewerErrorSurface';
+import { releaseCapturedStream } from '../services/screenShare/shareStreamLifecycle';
 import { createShareFullTelemetry } from '../services/screenShare/shareFullTelemetry';
 import {
   planSharerFirstConnectWatchdog,
@@ -101,6 +104,12 @@ const hasUserActivation = (): boolean => {
     .userActivation;
   return activation ? activation.isActive : true;
 };
+
+/**
+ * 观众的媒体连接是否还在跑。信令错误要不要落红条看这一条（见 viewerErrorSurface）。
+ */
+const viewerMediaIsHealthy = (connection: MediaConnection | null): boolean =>
+  connection?.peerConnection?.connectionState === 'connected';
 
 /**
  * 信令层把 Retry-After 挂在 error 上（`retryAfterMs`）。
@@ -225,6 +234,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const remoteShareFullRef = useRef(false);
   // 本次建连是否被信令层限流拒绝过：决定「call 被关」是按限流解释还是推测满员。
   const viewerRateLimitedRef = useRef(false);
+  // 本次观众连接已经因为「分享者暂时查不到」重试过几次（分享端重建 Peer 期间会这样）。
+  const shareUnavailableAttemptsRef = useRef(0);
   const remoteShareEndHandledRef = useRef(false);
   const sharerReconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const sharerReconnectAttemptsRef = useRef(0);
@@ -236,6 +247,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     SCREEN_SHARE_CONNECT_TIMEOUT_MS,
     SCREEN_SHARE_MAX_RECONNECT_ATTEMPTS,
     SCREEN_SHARE_MAX_PEER_REBUILDS,
+    SCREEN_SHARE_SHARE_UNAVAILABLE_MAX_RETRIES,
+    SCREEN_SHARE_SHARE_UNAVAILABLE_RETRY_MS,
     SCREEN_SHARE_RECONNECT_BASE_DELAY_MS,
     SCREEN_SHARE_RECONNECT_MAX_DELAY_MS,
     SCREEN_SHARE_HEARTBEAT_INTERVAL_MS,
@@ -1733,6 +1746,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     // 新的一次建连：上一次的限流结论不再适用（冷却结束后才允许点重试）。
     viewerRateLimitedRef.current = false;
     setViewerRetryAt(null);
+    // 有限重试的预算按「一次观众连接」计：用户重新打开链接就重新给一次机会。
+    shareUnavailableAttemptsRef.current = 0;
 
     if (peerRef.current) {
       peerRef.current.destroy();
@@ -1845,6 +1860,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         peer.destroy();
         return;
       }
+      // 信令又通了说明服务器可达：之前那条「信令不可达」类的红条已经过期。
+      // 限流文案例外——它带着冷却倒计时，清掉就等于放用户立刻重试。
+      setError((prev) => (prev === RATE_LIMITED_CONNECTION_MESSAGE ? prev : null));
       if (dataConnectionRef.current) return; // 已经建过会话，恢复事件只代表信令可用
       logDebug('log', 'Viewer peer opened, calling:', sharerId);
       // 信令 open 不代表媒体连通：这里不重置重连预算，否则 ICE 反复失败时会永远重连。
@@ -2050,6 +2068,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           return;
         }
         hasReceivedStream = true;
+        // 画面到了说明分享端就在：清掉重试预算，以及之前信令抖动留下的红条。
+        shareUnavailableAttemptsRef.current = 0;
+        setError(null);
 
 
         const audioTracks = remoteStream.getAudioTracks();
@@ -2222,17 +2243,34 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         retryAfterMs: readRetryAfterMs(err),
         fallbackRetryAfterMs: SIGNALING_OFFER_RATE_LIMIT.blockMs,
         limit: readRateLimitLayer(err),
+        shareUnavailableAttempts: shareUnavailableAttemptsRef.current,
+        maxShareUnavailableRetries: SCREEN_SHARE_SHARE_UNAVAILABLE_MAX_RETRIES,
       });
 
       if (peerErrorPlan.kind === 'ignore') return;
 
-      if (peerErrorPlan.kind === 'share-gone') {
-        // 分享者已经不在了：这条链重试 5 次也只会回到同一个结果，还会留下
-        // 「达到最大重试次数，请手动重试」这种把死链说成网络问题的终态。
-        // 顺手清掉持久化 viewId（stopViewing(true) 会做），刷新后不再自动重连。
+      if (peerErrorPlan.kind === 'share-unavailable-retry') {
+        // 分享端重建 Peer 时会复用同一个房号：这几秒里房号查不到，但恢复后旧链接仍然有效。
+        // 所以先等一个窗口再连一次，不判死、也不清持久化会话（否则用户要重新打开链接）。
+        shareUnavailableAttemptsRef.current += 1;
+        stopViewing(false);
+        setIsConnecting(true);
+        onNotification(VIEWER_SHARE_UNAVAILABLE_RETRY_MESSAGE, 'info');
+        if (reconnectTimerRef.current) {
+          clearTimeout(reconnectTimerRef.current);
+        }
+        reconnectTimerRef.current = setTimeout(() => {
+          connectToSharer(sharerId, true);
+        }, SCREEN_SHARE_SHARE_UNAVAILABLE_RETRY_MS);
+        return;
+      }
+
+      if (peerErrorPlan.kind === 'share-unavailable') {
+        // 重试用完仍然查不到：进终态，但只描述「暂时不可用」——分享端可能正在重连，
+        // 旧链接恢复后还能用，所以不让用户去索取新链接。
         stopViewing(true);
-        setError(VIEWER_SHARE_GONE_MESSAGE);
-        onNotification(VIEWER_SHARE_GONE_MESSAGE, 'info');
+        setError(VIEWER_SHARE_UNAVAILABLE_MESSAGE);
+        onNotification(VIEWER_SHARE_UNAVAILABLE_MESSAGE, 'info');
         return;
       }
 
@@ -2246,6 +2284,18 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
       if (peerErrorPlan.kind === 'rate-limited') {
         reportViewerRateLimited(peerErrorPlan.retryAfterMs);
+        return;
+      }
+
+      // 画面还在放的时候，信令层的一条错误不该把 UI 打成红色终态：用户看得见画面，
+      // 红条只会自相矛盾，而且信令恢复后没有任何代码会去清它。
+      if (
+        planViewerErrorSurface({
+          hasMediaConnection: Boolean(mediaConnectionRef.current),
+          mediaHealthy: viewerMediaIsHealthy(mediaConnectionRef.current),
+        }) === 'suppress'
+      ) {
+        logDebug('warn', 'Viewer signaling error while media still healthy, suppressed');
         return;
       }
 
@@ -2273,6 +2323,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     onNotification('已取消连接', 'info');
   }, [stopViewing, onNotification]);
 
+
+  const dismissViewerError = useCallback(() => {
+    setError(null);
+  }, []);
 
   const retryConnection = useCallback(() => {
     // 冷却期内点重试只会再吃一次限流：按钮在 UI 上已禁用，这里再兜一层。
@@ -2495,6 +2549,18 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
   }, []);
 
+  /**
+   * 丢弃当前预览流：先摘 onended 再停轨道。
+   *
+   * 只 stop 不摘绑定的旧实现里，旧轨的 onended 仍指向 stopScreenShare：用户关掉原来
+   * 那个窗口（或旧源被系统结束）时，会把刚刚重启/切换后的新分享一起停掉。
+   */
+  const releaseShareStream = useCallback(() => {
+    const previous = streamRef.current;
+    streamRef.current = null;
+    releaseCapturedStream(previous);
+  }, []);
+
   const replaceActiveCallTracks = useCallback((stream: MediaStream) => {
     const nextVideoTrack = stream.getVideoTracks()[0];
     const nextAudioTrack = stream.getAudioTracks()[0];
@@ -2519,6 +2585,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   }, []);
 
   const startScreenShare = async () => {
+    // 冷却期内发起登记只会再吃一次 429，还会把静默期往后推：按钮已禁用，这里再兜一层。
+    if (shareRoomRetryCooldown.secondsLeft !== null) return;
     setError(null);
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
@@ -2532,6 +2600,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         await navigator.mediaDevices.getDisplayMedia(buildDisplayMediaConstraints())
       );
 
+      // 重启前先彻底丢弃旧流（摘 onended + 停轨）：旧轨还活着的话，它的 onended 仍会
+      // 调 stopScreenShare，把这次新分享一起停掉。
+      releaseShareStream();
       attachSharePreviewStream(stream, 'Share preview playback failed');
       peerSessionTokenRef.current += 1;
       // 新分享是全新会话：清掉上一次的终态标记与重试预算。
@@ -2543,7 +2614,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       shareRoomRenewalFailuresRef.current = 0;
       setShareRoomRenewalWarning(false);
       setShareRoomExpired(false);
-      setShareRoomRetryAt(null);
+      // 冷却还在走就别清：清了之后「关闭」终态卡再点主按钮就能绕过倒计时去撞 429。
+      if (shareRoomRetryCooldown.secondsLeft === null) {
+        setShareRoomRetryAt(null);
+      }
       // 上一轮链接已经作废（过期/被拒）：丢掉死房号，重新登记一个，而不是拿它去撞。
       if (shareRoomExpired) {
         shareRoomRef.current = null;
@@ -2587,10 +2661,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       );
       const audioSuffix = newStream.getAudioTracks().length > 0 && canCarryAudio ? '（含音频）' : '';
 
-      if (streamRef.current) {
-        streamRef.current.getTracks().forEach((track) => track.stop());
-      }
-
+      releaseShareStream();
       attachSharePreviewStream(newStream, 'Window switch preview playback failed');
       replaceActiveCallTracks(newStream);
       onNotification(`已切换共享窗口${audioSuffix}`, 'success');
@@ -2634,6 +2705,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     setShareRoomRenewalWarning(false);
     setShareRoomExpired(false);
     setSharerFailure(null);
+    // 停止共享就结束这一轮限流上下文：冷却不该跨「用户主动停止」继续生效。
+    setShareRoomRetryAt(null);
 
     if (streamRef.current) {
       streamRef.current.getTracks().forEach((track) => track.stop());
@@ -2686,6 +2759,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         setTargetSharerId(null);
         setError(null);
       }}
+      dismissError={dismissViewerError}
       viewerVideoRef={viewerVideoRef}
       needsPlayClick={needsPlayClick}
       onViewerPlayClick={() => {

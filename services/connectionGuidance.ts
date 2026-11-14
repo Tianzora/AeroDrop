@@ -43,13 +43,16 @@ export const VIEWER_RECONNECT_EXHAUSTED_MESSAGE =
   '连接断开，已达到最大重试次数，请手动重试';
 
 /**
- * 观众点开一个已经停止/过期的链接：信令直接回「这个分享者不存在」。
+ * 观众点开一个已经停止/过期的链接：信令一直回「这个分享者不存在」。
  *
- * 这跟网络故障是两回事——重试永远不会成功，所以不能走「N 秒后尝试重连 → 请手动重试」
- * 那条链（用户会在死链上一直点）。终态必须说清楚「分享没了」，并顺手清掉持久化的
- * viewId，免得下次打开站点又自动连一次。
+ * 不能说「链接已失效」，也不能让用户去索取新链接：分享端重建 Peer 时复用同一个房号，
+ * 恢复完成后旧链接仍然有效。所以终态只描述「暂时不可用」，并允许稍后重新打开。
  */
-export const VIEWER_SHARE_GONE_MESSAGE = '分享已结束或链接已失效，请向分享者索取新链接';
+export const VIEWER_SHARE_UNAVAILABLE_MESSAGE =
+  '分享暂时不可用（可能已结束，或分享者正在重连），请稍后重新打开此链接';
+
+/** 分享者暂时查不到时的等待文案：有限重试期间的提示，不是终态。 */
+export const VIEWER_SHARE_UNAVAILABLE_RETRY_MESSAGE = '分享者暂时不在线，正在重试...';
 
 /** 自动重连等待期的文案：把秒数写进同一处，避免组件里各拼一份。 */
 export const describeViewerReconnectWait = (delayMs: number): string => {

@@ -11,8 +11,18 @@ const base = {
   fallbackRetryAfterMs: 60_000,
 };
 
-test('分享者不存在（链接已死）直接终态，不再花重连预算', () => {
-  assert.deepEqual(planViewerPeerError(base), { kind: 'share-gone' });
+test('分享者先查不到时有限重试一次：分享端重建 Peer 期间链接仍然有效', () => {
+  const input = { ...base, maxShareUnavailableRetries: 1 };
+  assert.deepEqual(planViewerPeerError(input), { kind: 'share-unavailable-retry' });
+  // 重试用完才进终态——但终态文案不再宣称链接失效（见 connectionGuidance）。
+  assert.deepEqual(planViewerPeerError({ ...input, shareUnavailableAttempts: 1 }), {
+    kind: 'share-unavailable',
+  });
+  // 没给预算（默认 0）时行为退回旧语义：一次就终态，不会无限重试。
+  assert.deepEqual(planViewerPeerError(base), { kind: 'share-unavailable' });
+  assert.deepEqual(planViewerPeerError({ ...base, maxShareUnavailableRetries: 0 }), {
+    kind: 'share-unavailable',
+  });
 });
 
 test('被信令层限流时给出冷却时长，而不是满员/网络结论', () => {

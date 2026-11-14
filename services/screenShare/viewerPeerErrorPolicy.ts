@@ -12,9 +12,10 @@
  *    要等限流窗口过去。限流必须优先于满员推断：限流是「等一下就好」，满员是
  *    「等人走」，两种行动完全相反。
  *
- * 代价说明：分享端重建 peer 的几秒窗口里，观众也可能收到 peer-unavailable。
- * 这时直接进终态、要求重新打开链接，比把死链包装成网络故障更可接受——真正还会
- * 回来的只有分享端的信令断线（peerRuntime 自己重连，不发这个错误）。
+ * 3) 分享端重建 peer 时会复用同一个房号，那几秒里观众拿到 peer-unavailable，
+ *    但恢复完成后旧链接仍然有效。所以 peer-unavailable 不再一次判死：先有限重试
+ *    （次数与间隔来自 constants/transfer.ts），仍失败才进终态，且终态文案只说
+ *    「暂时不可用」，不宣称链接失效。
  */
 
 export type ViewerPeerErrorInput = {
@@ -29,11 +30,16 @@ export type ViewerPeerErrorInput = {
   fallbackRetryAfterMs: number;
   /** 服务端标明的额度层级；`session` 是每出口会话数，等再久也没用。 */
   limit?: 'session' | 'offer' | null;
+  /** 本次连接已经因为 peer-unavailable 重试过几次（调用方自己数）。 */
+  shareUnavailableAttempts?: number;
+  /** peer-unavailable 的有限重试次数上限；0 表示不重试直接终态。 */
+  maxShareUnavailableRetries?: number;
 };
 
 export type ViewerPeerErrorPlan =
   | { kind: 'ignore' }
-  | { kind: 'share-gone' }
+  | { kind: 'share-unavailable-retry' }
+  | { kind: 'share-unavailable' }
   | { kind: 'rate-limited'; retryAfterMs: number }
   | { kind: 'session-limit' }
   | { kind: 'report' };
@@ -50,11 +56,23 @@ export const planViewerPeerError = ({
   retryAfterMs,
   fallbackRetryAfterMs,
   limit,
+  shareUnavailableAttempts = 0,
+  maxShareUnavailableRetries = 0,
 }: ViewerPeerErrorInput): ViewerPeerErrorPlan => {
   // 分享方主动结束 / 用户自己取消：都不是错误，交给调用方走各自的收尾。
   if (shareEnded || manualStop) return { kind: 'ignore' };
-  // 链接指向一个不存在的分享者：重试没有意义，直接终态并清掉持久化会话。
-  if (type === 'peer-unavailable') return { kind: 'share-gone' };
+  // 分享者暂时查不到：分享端重建 Peer 期间同样会这样，先有限重试再下结论。
+  if (type === 'peer-unavailable') {
+    const attempts =
+      Number.isFinite(shareUnavailableAttempts) && shareUnavailableAttempts > 0
+        ? Math.floor(shareUnavailableAttempts)
+        : 0;
+    const maxRetries =
+      Number.isFinite(maxShareUnavailableRetries) && maxShareUnavailableRetries > 0
+        ? Math.floor(maxShareUnavailableRetries)
+        : 0;
+    return attempts < maxRetries ? { kind: 'share-unavailable-retry' } : { kind: 'share-unavailable' };
+  }
   if (type === 'rate-limited') {
     // 每出口会话数被占满：倒计时和「稍后再试」都是错的，用户要关掉占名额的设备。
     if (limit === 'session') return { kind: 'session-limit' };

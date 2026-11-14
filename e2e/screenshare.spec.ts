@@ -108,8 +108,11 @@ const openViewer = async (browser: Browser, shareLink: string): Promise<Page> =>
 
 /**
  * 真正试一次采集，而不是查 WebIDL 方法是否存在：`getDisplayMedia` 在任何 Chromium 里都是
- * 存在的函数，但「没有可采集的桌面」只会在调用时抛错。只有真抓到一帧才算支持，否则 skip
- * 并打印原因——缺采集源时 CI 上是一条 skip，而不是 9 条硬红。
+ * 存在的函数，但「没有可采集的桌面」只会在调用时抛错。只有真抓到一帧才算支持。
+ *
+ * 本机开发者没有显示服务时允许 skip（否则本地/无头环境寸步难行）；但 CI 里
+ * fake-capture flag（playwright.product.config.ts）一旦回归，9 条用例会整组 skip
+ * 而 job 依旧全绿——所以 CI 下把探测结果当断言，必须为 true。
  */
 const ensureDisplayCapture = async (page: Page): Promise<void> => {
   const supported = await page.evaluate(async () => {
@@ -121,6 +124,13 @@ const ensureDisplayCapture = async (page: Page): Promise<void> => {
       return false;
     }
   });
+  if (process.env.CI) {
+    expect(
+      supported,
+      'CI 里必须能捕获采集源：检查 playwright.product.config.ts 的 fake-capture flags 与 --with-deps 安装'
+    ).toBe(true);
+    return;
+  }
   test.skip(
     !supported,
     'this Chromium cannot capture a display surface (missing fake-capture flags or no display server)'

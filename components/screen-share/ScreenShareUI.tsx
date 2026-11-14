@@ -14,6 +14,8 @@ interface ScreenShareUIProps {
   cancelConnecting: () => void;
   retryConnection: () => void;
   dismissConnectionError: () => void;
+  /** 只收起通用错误条：不动会话/观众状态。 */
+  dismissError: () => void;
   viewerVideoRef: (video: HTMLVideoElement | null) => void;
   needsPlayClick: boolean;
   onViewerPlayClick: () => void;
@@ -58,6 +60,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   cancelConnecting,
   retryConnection,
   dismissConnectionError,
+  dismissError,
   viewerVideoRef,
   needsPlayClick,
   onViewerPlayClick,
@@ -277,9 +280,18 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
         )}
 
         {error && !(targetSharerId && !isConnecting && !isViewing && !isSharing) && (
-          <div className="mb-6 p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-card flex items-center gap-3">
+          <div className="mb-6 p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-card flex items-start gap-3">
             <AlertCircle size={20} className="text-red-500 flex-shrink-0" />
-            <span className="min-w-0 text-sm break-words text-red-700 dark:text-red-300">{error}</span>
+            <span className="min-w-0 flex-1 text-sm break-words text-red-700 dark:text-red-300">{error}</span>
+            {/* 信令抖一下就会落一条错误：没有关闭入口的话它会一直占着版面，
+                而且和真实状态（画面还在）互相矛盾。 */}
+            <button
+              onClick={dismissError}
+              className="inline-flex min-w-8 min-h-8 shrink-0 items-center justify-center rounded-full text-red-500 transition-colors hover:bg-red-100 dark:hover:bg-red-500/20"
+              aria-label="关闭提示"
+            >
+              <X size={16} />
+            </button>
           </div>
         )}
 
@@ -526,7 +538,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                     onClick={copyShareLink}
                     disabled={!linkUsable}
                     className="inline-flex min-w-11 min-h-11 shrink-0 items-center justify-center rounded-control text-slate-500 transition-colors hover:bg-slate-200/70 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-night-400 dark:hover:bg-night-750/70 dark:hover:text-night-200"
-                    title={linkUsable ? '复制分享链接' : '分享链接已失效'}
+                    title={linkUsable ? '复制分享链接' : shareRoomExpired ? '分享链接已失效' : '分享链接暂不可用'}
                     aria-label="复制分享链接"
                   >
                     {copied ? (
@@ -539,7 +551,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                     onClick={shareLinkToApps}
                     disabled={!linkUsable}
                     className="inline-flex min-w-11 min-h-11 shrink-0 items-center justify-center rounded-control text-slate-500 transition-colors hover:bg-slate-200/70 hover:text-slate-700 disabled:cursor-not-allowed disabled:opacity-40 dark:text-night-400 dark:hover:bg-night-750/70 dark:hover:text-night-200"
-                    title={linkUsable ? '分享链接' : '分享链接已失效'}
+                    title={linkUsable ? '分享链接' : shareRoomExpired ? '分享链接已失效' : '分享链接暂不可用'}
                     aria-label="分享链接"
                   >
                     <Share2 size={18} />
@@ -551,11 +563,17 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                         不能只剩一行「需要重新开始共享」让用户自己去找。 */}
                     <button
                       onClick={startScreenShare}
-                      className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-brand-600 px-4 text-sm font-medium text-white transition-colors hover:bg-brand-700"
+                      disabled={shareRoomRetrySeconds !== null}
+                      className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-brand-600 px-4 text-sm font-medium text-white transition-colors hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-brand-600"
                     >
                       <RefreshCw size={16} />
                       重新开始共享
                     </button>
+                    {shareRoomRetrySeconds !== null && (
+                      <span className="text-xs text-amber-600 dark:text-amber-400 tabular-nums">
+                        {shareRoomRetrySeconds} 秒后可重试
+                      </span>
+                    )}
                     <span className="text-xs text-amber-600 dark:text-amber-400">
                       分享链接已失效，需要重新开始共享才能让新观众加入；重新开始会新建房间，正在观看的观众会断开
                     </span>
@@ -595,7 +613,12 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                 {/* 状态直接叠进画面：原来共享状态独占一行、与预览脱节。
                     现在改为画面内的 LIVE 徽标，右上角只保留画质胶囊；观看人数放到
                     链接卡片的标题行（那本来就是链接/观看者语义），避免窄屏挤爆。 */}
-                <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/60 via-black/25 to-transparent p-2.5">
+                {/* 分享状态会自己变（正在共享 / 链接已失效 / 正在重连），读屏用户拿不到这个变化。 */}
+                <div
+                  role="status"
+                  aria-live="polite"
+                  className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/60 via-black/25 to-transparent p-2.5"
+                >
                   {linkUsable ? (
                     <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-sm">
                       <span className="relative flex h-2 w-2">
@@ -629,14 +652,25 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
 
             {/* 终态卡里已经有「重新开始共享」：同一屏再放一颗「开始共享屏幕」是重复 CTA。 */}
             {!isSharing && !sharerFailure && (
-              <div className="mt-2 flex justify-center">
+              <div className="mt-2 flex flex-col items-center gap-2">
                 <button
                   onClick={startScreenShare}
-                  className="flex items-center justify-center gap-3 w-full max-w-xs bg-brand-600 hover:bg-brand-700 text-white font-bold py-3.5 px-6 rounded-full shadow-card transition-ui motion-fast active:scale-[0.99]"
+                  disabled={shareRoomRetrySeconds !== null}
+                  aria-describedby={shareRoomRetrySeconds !== null ? 'share-room-cooldown-hint' : undefined}
+                  className="flex items-center justify-center gap-3 w-full max-w-xs bg-brand-600 hover:bg-brand-700 text-white font-bold py-3.5 px-6 rounded-full shadow-card transition-ui motion-fast active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-brand-600"
                 >
                   <Play size={20} fill="currentColor" />
                   开始共享屏幕
                 </button>
+                {/* 冷却必须活过「关闭」终态卡：否则关掉卡片再点主按钮就绕过了倒计时。 */}
+                {shareRoomRetrySeconds !== null && (
+                  <span
+                    id="share-room-cooldown-hint"
+                    className="text-xs text-slate-500 dark:text-night-400 tabular-nums"
+                  >
+                    {shareRoomRetrySeconds} 秒后可重试
+                  </span>
+                )}
               </div>
             )}
 
