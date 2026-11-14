@@ -88,20 +88,32 @@ const result = spawnSync(
 );
 
 const output = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
-const reportLines = output.split('\n');
+// 去掉 ANSI 颜色；CI 上的日志前缀偶尔会把行首标记替换掉（本地是 `ℹ`，CI 观察到 `#`），
+// 所以只要求行首是「可选标记 + 文件名 + 竖线」，不把标记字符写死。
+const reportLines = output.replace(/\x1b\[[0-9;]*m/g, '').split('\n');
+const REPORT_ROW = /^\s*(?:[ℹ#]\s*)?([^\s|]+\.tsx?)\s+\|/;
 
-// 报告行形如 `ℹ   worker.ts   | 71.53 | 75.62 | 53.33 | ...`；嵌套目录会多缩进，
-// 但文件名总是最后一段，所以只取 basename 做存在性判断。
 const reportedNames = new Set();
 for (const line of reportLines) {
-  const match = line.match(/^\s*ℹ\s+(.+?\.tsx?)\s+\|/);
+  const match = line.match(REPORT_ROW);
   if (match) reportedNames.add(match[1].trim().split('/').pop());
 }
 
 const missingAll = expected.filter((file) => !reportedNames.has(file.split('/').pop()));
 const missing = missingAll.filter((file) => !ALLOWED_UNCOVERED.has(file));
 const allowedMissing = missingAll.filter((file) => ALLOWED_UNCOVERED.has(file));
-const reportedCount = reportLines.filter((line) => /^\s*ℹ\s+.+?\.tsx?\s+\|/.test(line)).length;
+const reportedCount = reportLines.filter((line) => REPORT_ROW.test(line)).length;
+
+// 第二道校验：报告行数必须覆盖「期望文件 - 已知例外」。解析正则一旦被上游输出格式
+// 改动打破，这一条会直接失败，而不是安静地漏掉一批文件。
+const minimumReported = expected.length - ALLOWED_UNCOVERED.size;
+if (reportedCount > 0 && reportedCount < minimumReported) {
+  console.error(
+    `check-coverage-scope: 报告只出现 ${reportedCount} 行，少于期望的 ${minimumReported} 行（解析规则可能已失效）`
+  );
+  if (result.stdout) process.stdout.write(result.stdout.slice(-4000));
+  process.exit(1);
+}
 
 console.log(
   `check-coverage-scope: ${expected.length} 个生产源文件，报告里出现 ${reportedCount} 行` +
