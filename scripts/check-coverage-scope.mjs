@@ -94,7 +94,7 @@ const SCOPES = {
     coverageExclude: ['components/**', 'constants/**', 'types/**', 'e2e/**', 'scripts/**'],
     suiteTargets: ['services'],
     defaults: { minLines: '85', minBranches: '78', minFunctions: '75' },
-    // 白名单预算：2 条 / 5% 行。现在是 2 条共 152 行（0.88%），余量只留给「Node 里
+    // 白名单预算：2 条 / 5% 行。现在是 2 条共 152 行（0.87%），余量只留给「Node 里
     // 真的加载不了」的新文件；超了说明有人在把整块逻辑挪出分母。
     allowlistBudget: { maxEntries: 2, maxExcludedLineShare: 0.05 },
     allowedUncovered: new Map([

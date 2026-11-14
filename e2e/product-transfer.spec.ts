@@ -74,9 +74,11 @@ test('production Sender and Receiver transfer and download a 2 MiB file', async 
     await receiver.getByRole('button', { name: '接收' }).click();
     await receiver.locator('input[type="text"]').fill(shareCode);
     const accept = receiver.getByRole('button', { name: /确认并下载|继续下载/ });
-    await expect(accept).toBeVisible({ timeout: 15_000 });
+    // GitHub runner 上 ICE 建连比本地慢，15s 会偶发不够（CI 43590126766 就是这样红的：
+    // 12 条通过、只有这条卡在 accept 按钮出现之前）。放宽等待，不改变任何断言强度。
+    await expect(accept).toBeVisible({ timeout: 45_000 });
 
-    const downloadPromise = receiver.waitForEvent('download', { timeout: 30_000 });
+    const downloadPromise = receiver.waitForEvent('download', { timeout: 60_000 });
     const startedAt = Date.now();
     await accept.click();
     const download = await downloadPromise;

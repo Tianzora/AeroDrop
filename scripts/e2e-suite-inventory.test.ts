@@ -10,8 +10,9 @@ const ROOT = join(import.meta.dirname, '..');
 
 const countTests = (file: string): number => {
   const source = readFileSync(join(ROOT, file), 'utf8');
-  // 顶层用例（product-transfer）与 describe 内的用例（screenshare，两空格缩进）都算。
-  return source.match(/^ {0,2}test\(/gm)?.length ?? 0;
+  // 顶层用例（product-transfer）与 describe 内的用例（screenshare）都算，缩进深度不限：
+  // 旧正则只认 0–2 空格，往 describe 里挪一层（4 空格）就会少数一条而测试仍然绿。
+  return source.match(/^[ 	]*test\(/gm)?.length ?? 0;
 };
 
 const readRepoFile = (file: string): string => readFileSync(join(ROOT, file), 'utf8');
@@ -39,12 +40,16 @@ test('screenshare 用例数与被引用处一致', () => {
     [actual],
     '覆盖率白名单理由里的数字必须等于真实用例数'
   );
-  // 这个文件自己的头注释也写着「N 条用例会整组 skip」，同样会漂。
+  // 头注释写的是「N 条走 ensureDisplayCapture 的用例会整组 skip」：这些用例靠真采一次验证
+  // 能力，探测失败就整体 skip。它和别的引用一样会漂，所以绑到真实调用点数量上。
+  const spec = readRepoFile('e2e/screenshare.spec.ts');
+  const probed = spec.match(/await ensureDisplayCapture\(/g)?.length ?? 0;
   assert.deepEqual(
-    referencedCounts(readRepoFile('e2e/screenshare.spec.ts'), /一旦回归，(\d+) 条用例会整组 skip/g),
-    [actual],
-    'e2e/screenshare.spec.ts 头注释里的数字必须等于真实用例数'
+    referencedCounts(spec, /一旦回归，(\d+) 条走 ensureDisplayCapture 的用例会整组 skip/g),
+    [probed],
+    'e2e/screenshare.spec.ts 头注释里的数字必须等于真正调用 ensureDisplayCapture 的用例数'
   );
+  assert.ok(probed > 0 && probed <= actual, '探测点数量必须落在 1..用例数之间');
 });
 
 test('product-transfer 用例数与被引用处一致', () => {
