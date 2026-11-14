@@ -596,9 +596,10 @@ test.describe('screen share', () => {
     const shareLink = await getShareLink(page);
 
     // 每个观众要发两条 offer（数据通道 + 媒体），而 SignalingHub 的 offer 限流是
-    // 每出口 IP 每分钟 10 条（services/signalingRateLimitPolicy.ts）。E2E 里所有页面
-    // 共享 127.0.0.1 这一个 clientKey，所以 6 个名额必须跨两个窗口占：先 4 个，
-    // 等窗口翻篇再补 2 个，否则第 5 个观众就会被限流成「连接请求过多」。
+    // 每出口 IP 每窗口 24 条（constants/signaling.ts 的 SIGNALING_OFFER_RATE_LIMIT）。
+    // E2E 里所有页面共享 127.0.0.1 这一个 clientKey，所以「坐满 6 个 + 第 7 个被拒」
+    // 必须能在一个窗口里跑完：配额若退回每分钟 10 条（低于产品容量），第 6 个观众
+    // 会先被出口限流挡住，这里就会在「连接请求过多」断言上红。
     const viewers: Page[] = [];
     const openViewerWithFrames = async (): Promise<Page> => {
       const viewer = await openViewer(browser, shareLink);
@@ -606,17 +607,14 @@ test.describe('screen share', () => {
       await dismissAutoplayOverlay(viewer);
       const sample = await waitForViewerFrames(viewer);
       expect(sample.frames).toBeGreaterThan(0);
+      // 出口限流是「等一分钟再试」的问题，不能混进满员或网络故障的判定。
+      await expect(viewer.getByText(/连接请求过多/)).toHaveCount(0);
       return viewer;
     };
 
     try {
-      // 先把 6 个名额真正占满：每个人都要收到画面，否则它只是「正在连接」，
-      // 分享端的 activeViewers 不会计入，第 7 个就不会被拒。
-      for (let index = 0; index < 4; index += 1) {
-        await openViewerWithFrames();
-      }
-      await page.waitForTimeout(65_000);
-      for (let index = 0; index < 2; index += 1) {
+      // 6 个名额都要真正收到画面，分享端的 activeViewers 才会计入，第 7 个才会被拒。
+      for (let index = 0; index < 6; index += 1) {
         await openViewerWithFrames();
       }
       await expect(page.getByText('6 人观看')).toBeVisible({ timeout: 30_000 });

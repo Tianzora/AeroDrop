@@ -36,6 +36,8 @@ interface ScreenShareUIProps {
   dismissSharerFailure: () => void;
   /** 限流冷却剩余秒数；null = 没有冷却。有值时不能重新登记房号，按钮要禁用并显示倒计时。 */
   shareRoomRetrySeconds: number | null;
+  /** 观众建连被限流后的冷却剩余秒数；null = 没有冷却。有值时禁用「重试连接」并显示倒计时。 */
+  viewerRetrySeconds: number | null;
   recommendedViewerCount: number;
   maxViewerCount: number;
   viewerCount: number;
@@ -72,6 +74,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   sharerFailure,
   dismissSharerFailure,
   shareRoomRetrySeconds,
+  viewerRetrySeconds,
   recommendedViewerCount,
   maxViewerCount,
   viewerCount,
@@ -306,10 +309,11 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               <AlertCircle size={20} className="text-red-500 flex-shrink-0" />
               <span className="min-w-0 text-sm break-words text-red-700 dark:text-red-300">{error}</span>
             </div>
-            <div className="flex justify-center gap-3">
+            <div className="flex flex-wrap items-center justify-center gap-3">
               <button
                 onClick={retryConnection}
-                className="flex items-center justify-center gap-2 px-5 py-2.5 bg-brand-600 hover:bg-brand-700 text-white font-medium rounded-full transition-colors"
+                disabled={viewerRetrySeconds !== null}
+                className="flex items-center justify-center gap-2 px-5 py-2.5 bg-brand-600 hover:bg-brand-700 text-white font-medium rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-brand-600"
               >
                 <RefreshCw size={16} />
                 重试连接
@@ -321,6 +325,12 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                 <X size={16} />
                 取消
               </button>
+              {/* 被出口限流时立刻重试只会再吃一次 429：把还要等多久摆出来，按钮同时禁用。 */}
+              {viewerRetrySeconds !== null && (
+                <span className="text-xs text-red-600/80 dark:text-red-400/80 tabular-nums">
+                  {viewerRetrySeconds} 秒后可重试
+                </span>
+              )}
             </div>
           </div>
         )}
@@ -547,7 +557,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                       重新开始共享
                     </button>
                     <span className="text-xs text-amber-600 dark:text-amber-400">
-                      分享链接已失效，需要重新开始共享才能让新观众加入
+                      分享链接已失效，需要重新开始共享才能让新观众加入；重新开始会新建房间，正在观看的观众会断开
                     </span>
                   </div>
                 )}

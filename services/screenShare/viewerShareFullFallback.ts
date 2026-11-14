@@ -8,6 +8,10 @@
  *
  * 判定必须保守：只有「从没收到画面」且「数据通道一次都没打开过」才算疑似满员。
  * 否则任何早期断链都会被误报成人数问题，把真正的网络故障藏起来。
+ *
+ * 但保守还不够：同一出口（CGNAT）观众多时，offer 会被信令层限流，连接同样建不起来。
+ * 那种情况重试有效（等窗口过去），满员重试则是白撞——所以限流必须先判，不能一律
+ * 归进「疑似满员」。
  */
 
 export interface ViewerCallEndInput {
@@ -21,12 +25,15 @@ export interface ViewerCallEndInput {
   receivedStream: boolean;
   /** 观众→分享端的数据通道是否曾经 open（open 过说明不是被名额挡下的）。 */
   dataChannelOpened: boolean;
+  /** 结束前收到过信令层的限流拒绝：连接压根没建起来，和「名额满了」是两回事。 */
+  rateLimited?: boolean;
 }
 
 export type ViewerCallEndOutcome =
   | 'share-ended'
   | 'share-full'
   | 'manual-stop'
+  | 'rate-limited'
   | 'suspected-share-full'
   | 'reconnect';
 
@@ -36,11 +43,14 @@ export const planViewerCallEndOutcome = ({
   shareFull,
   receivedStream,
   dataChannelOpened,
+  rateLimited = false,
 }: ViewerCallEndInput): ViewerCallEndOutcome => {
   // 共享方主动结束优先：它同时会关 call，别把「结束」当成断链去重连。
   if (shareEnded) return 'share-ended';
   if (shareFull) return 'share-full';
   if (manualStop) return 'manual-stop';
+  // 限流优先于满员推断：等窗口过去就能连上，跟「名额满了」是相反的行动。
+  if (rateLimited && !receivedStream) return 'rate-limited';
   if (!receivedStream && !dataChannelOpened) return 'suspected-share-full';
   return 'reconnect';
 };

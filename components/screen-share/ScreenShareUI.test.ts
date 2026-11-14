@@ -37,6 +37,7 @@ const baseProps: React.ComponentProps<typeof ScreenShareUI> = {
   sharerFailure: null,
   dismissSharerFailure: () => {},
   shareRoomRetrySeconds: null,
+  viewerRetrySeconds: null,
   recommendedViewerCount: 4,
   maxViewerCount: 6,
   viewerCount: 0,
@@ -284,4 +285,44 @@ test('首次连接不说「信令中断」：还没连上过和掉线是两回�
     shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
   });
   assert.match(reconnecting, /信令中断，新观众暂时无法加入/);
+});
+
+test('观众被出口限流时「重试连接」禁用并显示倒计时', () => {
+  const markup = render({
+    error: '连接请求过多，请稍后再试',
+    targetSharerId: 'sharer-1',
+    viewerRetrySeconds: 27,
+  });
+
+  assert.match(markup, /重试连接/);
+  assert.match(markup, /27 秒后可重试/);
+  // 冷却期内按钮还能点的话，用户点一次就再吃一次 429，永远出不来。
+  assert.match(markup, /disabled=""/);
+});
+
+test('观众没有冷却时不显示倒计时，也不禁用重试', () => {
+  const markup = render({
+    error: '连接请求过多，请稍后再试',
+    targetSharerId: 'sharer-1',
+    viewerRetrySeconds: null,
+  });
+
+  assert.match(markup, /重试连接/);
+  assert.doesNotMatch(markup, /秒后可重试/);
+  assert.doesNotMatch(markup, /disabled=""/);
+});
+
+test('房号过期卡说明「重新开始共享」会断开现有观众', () => {
+  const markup = render({
+    isSharing: true,
+    isShareLive: false,
+    isPeerReady: false,
+    hasBeenReady: true,
+    shareRoomExpired: true,
+    shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
+  });
+
+  assert.match(markup, /重新开始共享/);
+  // 只说「新观众进不来」会让用户以为现有观众不受影响。
+  assert.match(markup, /观众会断开/);
 });

@@ -1,3 +1,4 @@
+import { SIGNALING_OFFER_RATE_LIMIT } from '../constants/signaling.ts';
 import { createFixedWindowRateLimiter } from './fixedWindowRateLimit.ts';
 
 export type SignalingRateLimitDecision =
@@ -18,11 +19,12 @@ type RecordOfferAttemptInput = {
 
 // 只保留 client 维度。6 位码改为服务端签发后，码空间 90 万，target 桶既挡不住枚举，
 // 又会把同一出口（CGNAT/校园网）正常用户的重连归零；故删除 target 桶只留 client 上限。
+// 配额与静默期的取值理由见 constants/signaling.ts 的 SIGNALING_OFFER_RATE_LIMIT。
 const DEFAULT_OPTIONS: SignalingRateLimiterOptions = {
-  blockMs: 10 * 60 * 1000,
-  maxAttemptsPerClientWindow: 10,
+  blockMs: SIGNALING_OFFER_RATE_LIMIT.blockMs,
+  maxAttemptsPerClientWindow: SIGNALING_OFFER_RATE_LIMIT.maxAttemptsPerClientWindow,
   maxTrackedBuckets: 1024,
-  windowMs: 60 * 1000,
+  windowMs: SIGNALING_OFFER_RATE_LIMIT.windowMs,
 };
 
 /**

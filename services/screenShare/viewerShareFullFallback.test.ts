@@ -49,9 +49,27 @@ test('数据通道开过就没被名额挡下：早期断链仍走重连，不�
   );
 });
 
+test('同一出口被限流时先判限流，不能报成满员：等窗口过去就能连上', () => {
+  // 反证点：把 rateLimited 分支删掉，这条会掉到 'suspected-share-full'，
+  // 用户就会看到「可能人数已满」并放弃等待——而实际上等一分钟就能进。
+  assert.equal(
+    planViewerCallEndOutcome({
+      ...base,
+      receivedStream: false,
+      dataChannelOpened: false,
+      rateLimited: true,
+    }),
+    'rate-limited',
+  );
+});
+
+test('已经收到过画面再被限流：仍按断链重连，限流只解释「一次都没连上」', () => {
+  assert.equal(planViewerCallEndOutcome({ ...base, rateLimited: true }), 'reconnect');
+});
+
 test('只有 reconnect 允许自动重连：满员不会自己空出名额', () => {
   assert.equal(shouldReconnectAfterCallEnd('reconnect'), true);
-  for (const outcome of ['share-ended', 'share-full', 'manual-stop', 'suspected-share-full'] as const) {
+  for (const outcome of ['share-ended', 'share-full', 'manual-stop', 'rate-limited', 'suspected-share-full'] as const) {
     assert.equal(shouldReconnectAfterCallEnd(outcome), false, outcome);
   }
 });

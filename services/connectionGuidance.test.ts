@@ -11,6 +11,8 @@ import {
   SIGNALING_MESSAGE_TOO_LARGE_MESSAGE,
   SIGNALING_UNREACHABLE_MESSAGE,
   UNKNOWN_CONNECTION_ERROR_MESSAGE,
+  VIEWER_RECONNECT_EXHAUSTED_MESSAGE,
+  VIEWER_SHARE_GONE_MESSAGE,
 } from './connectionGuidance.ts';
 
 test('信令错误文案区分「连不上」「消息超限」「被占用」，不再泄漏英文技术标识', () => {
@@ -96,4 +98,13 @@ test('分享端 unauthorized / unavailable-id 用自己的凭证文案，不抄�
     getSharerPeerRuntimeErrorMessage('disconnected'),
     SIGNALING_UNREACHABLE_MESSAGE,
   );
+});
+
+test('分享已结束的观众进终态：不说成网络问题，也不提示「手动重试」', () => {
+  // 旧行为是重试 5 次（2/4/6/8/10s）后报「已达到最大重试次数，请手动重试」，
+  // 而死链重试永远不会成功，用户只能在两个都错的文案之间来回点。
+  assert.match(VIEWER_SHARE_GONE_MESSAGE, /分享已结束/);
+  assert.match(VIEWER_SHARE_GONE_MESSAGE, /链接已失效/);
+  assert.doesNotMatch(VIEWER_SHARE_GONE_MESSAGE, /网络|防火墙|重试次数|稍后重试/);
+  assert.notEqual(VIEWER_SHARE_GONE_MESSAGE, VIEWER_RECONNECT_EXHAUSTED_MESSAGE);
 });

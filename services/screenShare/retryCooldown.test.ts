@@ -1,36 +1,37 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
-import { describeShareRoomRetryCooldown } from './shareRoomRetryCooldown.ts';
+import { describeRetryCooldown } from './retryCooldown.ts';
 
-const now = 1_700_000_000_000;
-
-test('没有 Retry-After：不进入冷却，重试按钮可用', () => {
-  assert.deepEqual(describeShareRoomRetryCooldown(null, now), { secondsLeft: null, canRetry: true });
+test('没有冷却时返回 null 且允许重试', () => {
+  const now = 1_000_000;
+  assert.deepEqual(describeRetryCooldown(null, now), { secondsLeft: null, canRetry: true });
 });
 
-test('冷却中：给出向上取整的剩余秒数并禁用重试', () => {
-  // 反证点：把 ceil 改成 floor（或丢掉 canRetry=false），1.5s 会显示「1 秒」或按钮仍可点，
-  // 用户点了还是立刻吃一次 429。
-  assert.deepEqual(describeShareRoomRetryCooldown(now + 1_500, now), {
+test('冷却中按整秒向上取整，避免显示「0 秒」却点不动', () => {
+  const now = 1_000_000;
+  assert.deepEqual(describeRetryCooldown(now + 1_500, now), {
     secondsLeft: 2,
     canRetry: false,
   });
 });
 
-test('冷却刚好结束：解除禁用', () => {
-  assert.deepEqual(describeShareRoomRetryCooldown(now, now), { secondsLeft: null, canRetry: true });
+test('冷却到点（剩余 0）立刻放行，不需要再等一拍', () => {
+  const now = 1_000_000;
+  assert.deepEqual(describeRetryCooldown(now, now), { secondsLeft: null, canRetry: true });
 });
 
-test('冷却时间已过（后台标签页节流）：不再拦重试', () => {
-  assert.deepEqual(describeShareRoomRetryCooldown(now - 30_000, now), {
+test('过去的截止时间视为已解除冷却', () => {
+  const now = 1_000_000;
+  assert.deepEqual(describeRetryCooldown(now - 30_000, now), {
     secondsLeft: null,
     canRetry: true,
   });
 });
 
-test('retryAt 不是有限数：按无冷却处理，不显示 NaN 秒', () => {
-  assert.deepEqual(describeShareRoomRetryCooldown(Number.NaN, now), {
+test('NaN 截止时间不允许把按钮永久禁用', () => {
+  const now = 1_000_000;
+  assert.deepEqual(describeRetryCooldown(Number.NaN, now), {
     secondsLeft: null,
     canRetry: true,
   });

@@ -1,6 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
+import { SIGNALING_OFFER_RATE_LIMIT } from '../constants/signaling.ts';
+import { SCREEN_SHARE_LIMITS } from '../constants/transfer.ts';
 import {
   createSignalingRateLimiter,
   createSignalingSessionLimiter,
@@ -150,4 +152,27 @@ test('restored sockets are counted even past the cap, so hibernation cannot wide
   assert.equal(limiter.tryAcquire('ip:a'), false);
   limiter.release('ip:a');
   assert.equal(limiter.tryAcquire('ip:a'), true, '降到上限以下后恢复准入');
+});
+
+test('默认配额容得下同一出口坐满 6 个观众：每人 2 条 offer（数据通道 + 媒体）', () => {
+  const offersPerViewer = 2;
+  const seats =
+    Math.floor(SIGNALING_OFFER_RATE_LIMIT.maxAttemptsPerClientWindow / offersPerViewer);
+  // 配额低于产品容量时，第 6 个观众会先被出口限流挡下，再被观众侧误报成「人数已满」——
+  // 也就是把「你等一分钟」说成「这房间满了」。
+  assert.ok(
+    seats >= SCREEN_SHARE_LIMITS.MAX_VIEWERS,
+    `seats=${seats} 小于容量 ${SCREEN_SHARE_LIMITS.MAX_VIEWERS}`,
+  );
+
+  const limiter = createSignalingRateLimiter();
+  for (let i = 0; i < SIGNALING_OFFER_RATE_LIMIT.maxAttemptsPerClientWindow; i += 1) {
+    assert.equal(limiter.recordOfferAttempt({ clientKey: 'ip:a', now: 1_000 + i }).allowed, true);
+  }
+
+  const blocked = limiter.recordOfferAttempt({ clientKey: 'ip:a', now: 2_000 });
+  assert.equal(blocked.allowed, false);
+  // 静默期收回到一个时间窗：10 分钟的封锁对同一 CGNAT 下的无辜用户是不可自救的。
+  assert.equal(blocked.allowed ? 0 : blocked.retryAfterMs, SIGNALING_OFFER_RATE_LIMIT.blockMs);
+  assert.ok(SIGNALING_OFFER_RATE_LIMIT.blockMs <= 60_000);
 });

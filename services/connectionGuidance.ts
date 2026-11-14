@@ -34,6 +34,15 @@ export const SHARE_EXPIRED_REMAINING_TEXT = '已失效';
 export const VIEWER_RECONNECT_EXHAUSTED_MESSAGE =
   '连接断开，已达到最大重试次数，请手动重试';
 
+/**
+ * 观众点开一个已经停止/过期的链接：信令直接回「这个分享者不存在」。
+ *
+ * 这跟网络故障是两回事——重试永远不会成功，所以不能走「N 秒后尝试重连 → 请手动重试」
+ * 那条链（用户会在死链上一直点）。终态必须说清楚「分享没了」，并顺手清掉持久化的
+ * viewId，免得下次打开站点又自动连一次。
+ */
+export const VIEWER_SHARE_GONE_MESSAGE = '分享已结束或链接已失效，请向分享者索取新链接';
+
 /** 自动重连等待期的文案：把秒数写进同一处，避免组件里各拼一份。 */
 export const describeViewerReconnectWait = (delayMs: number): string => {
   const seconds = Number.isFinite(delayMs) ? Math.max(1, Math.round(delayMs / 1000)) : 1;
