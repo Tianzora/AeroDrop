@@ -29,6 +29,7 @@ import { MAX_SIGNALING_MESSAGES_PER_WINDOW } from '../signalingRateLimitPolicy.t
 import { rendezvousShardIndex } from './shardRouting.ts';
 import {
   applySessionSlotRelease,
+  applySessionSlotReplaceCommit,
   applySessionSlotReserve,
   applySessionSlotRenew,
 } from './sessionStore.ts';
@@ -859,6 +860,14 @@ test('跨 IP 接管时旧 socket 先断开：配额只释放一次，同 IP 的�
           // 否则公共层的上限会把 limiter 的漂移掩盖掉。
           return { status: 200, body: { granted: true } };
         }
+        if (body?.action === 'replace') {
+          // 接管提交：registered 投递成功之后才删被顶替的旧行（reserve 只让出计数）。
+          applySessionSlotReplaceCommit(sql(), {
+            slotId: body.slotId ?? '',
+            releaseToken: typeof body.releaseToken === 'string' ? body.releaseToken : '',
+          });
+          return { status: 200, body: { replaced: true } };
+        }
         if (body?.action === 'release') {
           applySessionSlotRelease(
             sql(),
@@ -989,6 +998,14 @@ test('交错注册竞态：A 的名额 RPC 在途时 B 落定，A 回 session-co
           });
           return { status: 200, body: { granted } };
         }
+        if (body?.action === 'replace') {
+          // 接管提交：registered 投递成功之后才删被顶替的旧行（reserve 只让出计数）。
+          applySessionSlotReplaceCommit(sql(), {
+            slotId: body.slotId ?? '',
+            releaseToken: typeof body.releaseToken === 'string' ? body.releaseToken : '',
+          });
+          return { status: 200, body: { replaced: true } };
+        }
         if (body?.action === 'release') {
           applySessionSlotRelease(
             sql(),
@@ -1105,6 +1122,14 @@ test('并发接管同一会话：事后只剩一条名额，且它归属已注�
             ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
           });
           return { status: 200, body: { granted } };
+        }
+        if (body?.action === 'replace') {
+          // 接管提交：registered 投递成功之后才删被顶替的旧行（reserve 只让出计数）。
+          applySessionSlotReplaceCommit(sql(), {
+            slotId: body.slotId ?? '',
+            releaseToken: typeof body.releaseToken === 'string' ? body.releaseToken : '',
+          });
+          return { status: 200, body: { replaced: true } };
         }
         if (body?.action === 'release') {
           applySessionSlotRelease(
@@ -1520,6 +1545,110 @@ test('接管时名额 RPC 丢响应：本次新铸的 slotId 必须按自己的 
   assert.notEqual(releases[0]!.slotId, reserves[0]!.slotId, '不能删掉旧会话（仍然在线）那一行');
   assert.equal(owner.lastMessage()?.type, 'registered', '接管失败不能影响仍在线的旧会话');
   assert.equal(owner.closed, null, '旧 socket 不该被这次失败的接管关掉');
+});
+
+test('接管方在名额 RPC 期间断开：旧会话的名额不能被这次放弃吞掉', async () => {
+  // 安全评审 MF-1：reserve 里「判定通过就删旧行」+ 只回滚自己那一行，意味着接管方在
+  // RPC 在途时断开（刷新/关标签/切网）会永久删掉旧会话的全局名额。旧会话还在收发，
+  // 但计数少一条，且它的续期从此永远失败——分片模式下这是唯一的跨片上限，可被反复放大。
+  // 现在 reserve 只把旧行排除在计数外，删行发生在 registered 投递成功之后的 replace。
+  const handle: { current: Awaited<ReturnType<typeof createHub>> | null } = { current: null };
+  const replacesSeen: { slotId: string; releaseToken: string }[] = [];
+  let abortedTakeover = false;
+
+  const created = await createHub({
+    shardCount: '2',
+    shardName: 'signaling-shard-1',
+    maxSessions: '12',
+    signalingHub: {
+      respond: async (call) => {
+        const body = call.body as
+          | {
+              action?: string;
+              slotId?: string;
+              clientKey?: string;
+              releaseToken?: string;
+              replaces?: { slotId?: string; releaseToken?: string };
+            }
+          | null;
+        const current = handle.current!;
+        const sql = () => createSqlite(current.db);
+        if (body?.action === 'reserve') {
+          const replaces =
+            body.replaces?.slotId && body.replaces?.releaseToken
+              ? { slotId: body.replaces.slotId, releaseToken: body.replaces.releaseToken }
+              : undefined;
+          if (replaces) {
+            replacesSeen.push(replaces);
+            // RPC 在途时客户端放弃：关机/刷新在真实环境里就是这样。
+            const pending = current.sockets.at(-1);
+            if (pending) {
+              pending.close(1001, 'client aborted');
+              current.hub.webSocketClose(pending as never);
+              await current.settle();
+              abortedTakeover = true;
+            }
+          }
+          const granted = applySessionSlotReserve(sql(), {
+            slotId: body.slotId ?? '',
+            clientKey: body.clientKey ?? '',
+            releaseToken: typeof body.releaseToken === 'string' ? body.releaseToken : '',
+            ...(replaces ? { replaces } : {}),
+            now: Date.now(),
+            maxSessions: 12,
+            ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
+          });
+          return { status: 200, body: { granted } };
+        }
+        if (body?.action === 'replace') {
+          applySessionSlotReplaceCommit(sql(), {
+            slotId: body.slotId ?? '',
+            releaseToken: typeof body.releaseToken === 'string' ? body.releaseToken : '',
+          });
+          return { status: 200, body: { replaced: true } };
+        }
+        if (body?.action === 'release') {
+          applySessionSlotRelease(
+            sql(),
+            body.slotId ?? '',
+            typeof body.releaseToken === 'string' ? body.releaseToken : undefined
+          );
+          return { status: 200, body: { released: true } };
+        }
+        return { status: 200, body: { allowed: true } };
+      },
+    },
+  });
+  handle.current = created;
+
+  const owner = serverOf(
+    (await upgrade(created.hub, 'peerId=AERO-ABORTTAKE', '203.0.113.75')).webSocket
+  );
+  await created.settle();
+  assert.equal(owner.lastMessage()?.type, 'registered');
+  assert.equal(readSlotRows(created.db).length, 1, '旧会话先占一个名额');
+
+  const takeover = await upgrade(created.hub, 'peerId=AERO-ABORTTAKE', '203.0.113.76');
+  await created.settle();
+
+  assert.equal(abortedTakeover, true, '用例必须真的在 RPC 在途时断开了接管方');
+  assert.equal(replacesSeen.length, 1, '接管必须在 reserve 里声明要顶替旧会话的名额');
+  // 服务端侧：升级仍成功（既有结构里 accept 早于名额判定），但没有任何 registered 发出。
+  assert.equal(takeover.status, 101);
+  assert.equal(serverOf(takeover.webSocket).lastMessage(), null, '放弃的接管不得投递 registered');
+  assert.equal(owner.closed, null, '旧会话必须继续在线，不能被这次放弃关掉');
+  const slots = readSlotRows(created.db);
+  assert.equal(slots.length, 1, '旧会话的名额必须还在，实际被这次放弃吞掉了');
+  assert.equal(slots[0]!.release_token, replacesSeen[0]!.releaseToken, '留下的必须是旧会话那一行');
+  assert.equal(
+    applySessionSlotRenew(createSqlite(created.db), {
+      slotId: slots[0]!.slot_id,
+      now: Date.now(),
+      ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
+    }),
+    true,
+    '旧会话的续期必须还能成功，否则全局计数会凭空虚少一条'
+  );
 });
 
 test('口令重登记撞车：旧活跃码必须原样保留，只有分配成功后才清理自己的旧码', async () => {

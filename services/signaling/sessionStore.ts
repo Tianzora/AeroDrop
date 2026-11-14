@@ -420,8 +420,10 @@ export const initializeSessionSlotSchema = (sql: SqlLike): void => {
 /**
  * 原子语义的近似：先清过期槽位，再数一次、插一条。DO 内单线程执行，无并发窗口。
  *
- * slotId 由 worker 每条连接现铸，接管也不例外；接管通过 `replaces` 在一次决策里让出
- * 旧行（先判断上限、通过后才按 token 条件删除）。因此这里**没有**「接管复用旧 slotId」
+ * slotId 由 worker 每条连接现铸，接管也不例外；接管通过 `replaces` 在计数时把被顶替的
+ * 旧行排除（「一个换一个」），但**这里不删它**——删行必须晚到接收方真的拿到 registered
+ * （见 `applySessionSlotReplaceCommit`），否则接管方在 RPC 在途时断开就会吞掉旧会话的名额。
+ * 因此这里**没有**「接管复用旧 slotId」
  * 的路径：命中已存在的 slotId 只可能是同一条连接带着同一个 slotId 重试（例如 RPC 重试）。
  * 那种情况只允许 token 相同的续期，token 不符一律拒绝——按 slotId 改写归属正是
  * 「并发接管的落败方删掉胜出方名额」的成因，不要再把这个分支放回来。
@@ -438,7 +440,7 @@ export const applySessionSlotReserve = (
     now: number;
     maxSessions: number;
     ttlMs: number;
-    /** 接管时被顶替的旧会话名额：同一次决策里先让出一个计数，再接新的。 */
+    /** 接管时被顶替的旧会话名额：计数时让出一格，但行本身留到 commit 阶段才删。 */
     replaces?: { slotId: string; releaseToken: string };
   }
 ): boolean => {
@@ -469,7 +471,10 @@ export const applySessionSlotReserve = (
     )
     .toArray();
   // 接管是「一个换一个」：被顶替的旧行还在表里时先把它从计数里扣掉，否则 IP 正好
-  // 满额时连重连都会被拒。真正删旧行放在判定之后，失败时旧会话的名额不会被白白吃掉。
+  // 满额时连重连都会被拒。这里**只扣计数、不删行**：删行由 commit 阶段（registered
+  // 投递成功之后）按 token 条件执行；放在这里的话，接管方在名额 RPC 在途时断开、
+  // rollbackQuota 只回滚自己那一行，旧行就被永久吞掉——旧会话还在收发，但全局计数
+  // 少一条，且它的续期从此永远失败。
   //
   // 扣减必须确认旧行也算在本次 clientKey 的计数里：账本按出口 IP 记账，而接管可以
   // 发生在两个不同 IP 之间（A 的会话被 B 接管）。如果拿别人的行去扣自己 IP 的数，
@@ -488,13 +493,6 @@ export const applySessionSlotReserve = (
   const occupied = Number(rows[0]?.count ?? 0) - (replacedSameClient ? 1 : 0);
   if (occupied >= input.maxSessions) {
     return false;
-  }
-  if (input.replaces && replaced.length > 0) {
-    sql.exec(
-      'DELETE FROM signaling_session_slots WHERE slot_id = ? AND release_token = ?',
-      input.replaces.slotId,
-      input.replaces.releaseToken
-    );
   }
   sql.exec(
     'INSERT OR REPLACE INTO signaling_session_slots (slot_id, client_key, release_token, expires_at) VALUES (?, ?, ?, ?)',
@@ -528,6 +526,28 @@ export const applySessionSlotRelease = (
     return;
   }
   sql.exec('DELETE FROM signaling_session_slots WHERE slot_id = ?', slotId);
+};
+
+/**
+ * 接管提交：把被顶替的旧会话名额行真正删掉。
+ *
+ * reserve 只把旧行从计数里排除，删行要晚到「接收方已经拿到 registered」之后：旧实现把
+ * 删除放在 reserve 里，接管方在名额 RPC 在途时断开（rollbackQuota 只回滚自己那一行）
+ * 就会永久吞掉旧会话的名额——旧会话还在收发，但全局计数少一条，30 分钟续期从此永远
+ * 失败，6h TTL 也救不回（行已经不存在）。
+ *
+ * 条件删除同样按 token：token 不符说明那行已经不是「被顶替的那一行」（例如旧会话在
+ * 期间重连过），此时什么都不做。
+ */
+export const applySessionSlotReplaceCommit = (
+  sql: SqlLike,
+  replaces: { slotId: string; releaseToken: string }
+): void => {
+  sql.exec(
+    'DELETE FROM signaling_session_slots WHERE slot_id = ? AND release_token = ?',
+    replaces.slotId,
+    replaces.releaseToken
+  );
 };
 
 /** 常驻连接续期；槽位已被清掉（例如 TTL 过期或被别人接管）时返回 false。 */

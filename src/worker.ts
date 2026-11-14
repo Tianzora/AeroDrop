@@ -69,6 +69,7 @@ import {
   appendPendingSessionProof,
   applySessionSlotRelease,
   applySessionSlotRenew,
+  applySessionSlotReplaceCommit,
   applySessionSlotReserve,
   commitSessionBindingRotation,
   deferShareCodeRevoke as applyDeferredShareCodeRevoke,
@@ -1137,6 +1138,10 @@ export class SignalingHub extends DurableObject<Env> {
     // 名额归属凭证：每条连接自己铸一个随机串（clientKey 是出口 IP，同一 CGNAT 下完全相同，
     // 拿它做归属判定会让落败方的回滚删掉胜出方的名额）。
     const slotReleaseToken = crypto.randomUUID();
+    // 接管时被顶替的旧名额。reserve 只在计数里把它排除，真正的删除要等 registered 投递
+    // 成功之后（见 commitSlotReplace）：放在 reserve 里的话，接管方在名额 RPC 在途时断开，
+    // 旧会话的名额会被永久吞掉。
+    let pendingSlotReplace: { slotId: string; releaseToken: string } | undefined;
     let seatAcquired = false;
     // transfer 分支的两种落空：旧 socket 在 await 期间自己断开（席位已被 release），
     // 或补领席位失败。前者要补领，后者必须在注册落定前拒绝——否则这条连接不计数，
@@ -1245,6 +1250,8 @@ export class SignalingHub extends DurableObject<Env> {
           return null;
         }
         sessionSlotId = slotId;
+        // 旧行此刻还在表里，只是被排除在计数之外：等 registered 真的投递出去再删。
+        pendingSlotReplace = replaces;
         this.slotBySocket.set(server, slotId);
         return slotId;
       },
@@ -1375,6 +1382,11 @@ export class SignalingHub extends DurableObject<Env> {
           signalingTelemetry.record('signal_session_registration_send_failed', {
             shardCount: this.getSignalingShardCount(),
           });
+        } else if (pendingSlotReplace) {
+          // registered 已经投递成功，这条连接确实接手了会话：现在才真正删掉被顶替的
+          // 旧名额行。反过来（在 reserve 里就删）会让「接管方中途放弃」把旧会话的
+          // 名额永久吞掉——旧会话还在收发，全局计数却少了一条。
+          await this.commitSignalingSessionSlotReplace(pendingSlotReplace);
         }
       },
       sendRateLimited: () => (slotUnavailable ? respondSlotUnavailable() : respondRateLimited()),
@@ -2066,6 +2078,15 @@ export class SignalingHub extends DurableObject<Env> {
       applySessionSlotRelease(this.getSql(), slotId, releaseToken);
       return json({ released: true });
     }
+    if (body?.action === 'replace') {
+      // 接管已投递 registered：此刻才按 token 删掉被顶替的旧行。reserve 阶段不动它，
+      // 否则接管方中途放弃会让旧会话的名额永久消失。
+      applySessionSlotReplaceCommit(this.getSql(), {
+        slotId,
+        releaseToken: typeof body?.releaseToken === 'string' ? body.releaseToken : '',
+      });
+      return json({ replaced: true });
+    }
     const now = typeof body?.now === 'number' && Number.isFinite(body.now) ? body.now : Date.now();
     if (body?.action === 'renew') {
       return json({
@@ -2184,6 +2205,42 @@ export class SignalingHub extends DurableObject<Env> {
     } catch (error) {
       // 续期失败不影响连接：名额 TTL 还在，下次 ping 会再试。
       console.warn('signaling session slot renew failed', error);
+    }
+  }
+
+  /**
+   * 接管提交：删掉被顶替的旧会话名额行。必须在 registered 投递成功之后调用
+   * （见 `applySessionSlotReplaceCommit` 的注释：提前删会在接管方放弃时吞掉旧名额）。
+   */
+  private async commitSignalingSessionSlotReplace(replaces: {
+    slotId: string;
+    releaseToken: string;
+  }): Promise<void> {
+    if (this.getSignalingShardCount() <= 1) return;
+    if (this.isShardZero()) {
+      applySessionSlotReplaceCommit(this.getSql(), replaces);
+      return;
+    }
+    try {
+      const response = await this.signalingStub(signalingShardName(0)).fetch(
+        new Request(`https://signaling.internal${SIGNALING_SESSION_SLOT_PATH}`, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ action: 'replace', ...replaces }),
+        })
+      );
+      if (!response.ok) {
+        signalingTelemetry.record('signal_session_slot_replace_failed', {
+          shardCount: this.getSignalingShardCount(),
+          status: response.status,
+        });
+        console.warn('signaling session slot replace commit failed', response.status);
+      }
+    } catch (error) {
+      signalingTelemetry.record('signal_session_slot_replace_failed', {
+        shardCount: this.getSignalingShardCount(),
+      });
+      console.warn('signaling session slot replace commit failed', error);
     }
   }
 

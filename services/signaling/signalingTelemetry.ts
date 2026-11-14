@@ -34,6 +34,8 @@ export type SignalingTelemetryEvent =
   /** 迟到的 proof 轮换落库发现绑定已被更晚的注册接管，放弃写入（CAS 失配）。 */
   | 'signal_session_binding_commit_superseded'
   | 'signal_session_registration_send_failed'
+  /** 接管提交（删被顶替的旧名额行）失败：旧行会留到 TTL，期间只占计数不占连接。 */
+  | 'signal_session_slot_replace_failed'
   /** 口令查询未命中（含全局未知码预算耗尽）：只记标量，不记码/peerId。 */
   | 'share_code_lookup_miss';
 

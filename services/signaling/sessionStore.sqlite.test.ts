@@ -6,6 +6,7 @@ import { createSqlite } from '../../scripts/test-stubs/sqlite-adapter.ts';
 import {
   appendPendingSessionProof,
   applySessionSlotRelease,
+  applySessionSlotReplaceCommit,
   applySessionSlotReserve,
   applySessionSlotRenew,
   commitSessionBindingRotation,
@@ -257,6 +258,14 @@ test('接管换名额：旧行靠 token 条件让出，并发接管事后只剩�
     true,
     '接管是「一个换一个」，不能因为旧会话还占着名额就把重连拒掉'
   );
+  // 关键：reserve 只让出计数，旧行必须原样留着。删行要等 registered 真的投递出去
+  // （commitSlotReplace）；提前删的话，接管方在名额 RPC 在途时断开就会吞掉旧会话的名额。
+  assert.equal(
+    countRows(db, 'signaling_session_slots'),
+    2,
+    'reserve 阶段不许删被顶替的旧行：接管随时可能放弃'
+  );
+  applySessionSlotReplaceCommit(sql, { slotId: 'slot-old', releaseToken: 'tok-old' });
   const remaining = db
     .prepare('SELECT slot_id, client_key, release_token FROM signaling_session_slots')
     .all() as unknown as { slot_id: string; client_key: string; release_token: string }[];
@@ -351,6 +360,9 @@ test('跨出口接管：别人的名额不能拿来抵自己的上限', () => {
     }),
     true
   );
+  // 同上：reserve 不删旧行，成功提交后才删。
+  assert.equal(countRows(db, 'signaling_session_slots'), 3);
+  applySessionSlotReplaceCommit(sql, { slotId: 'slot-b', releaseToken: 'tok-b' });
   assert.equal(countRows(db, 'signaling_session_slots'), 2);
   db.close();
 });
