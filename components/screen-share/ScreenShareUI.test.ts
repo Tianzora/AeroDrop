@@ -424,15 +424,24 @@ test('分享终态卡是 assertive 的 live region：分享已经停了，必须
   assert.match(markup, /role="alert"[^>]*aria-live="assertive"/);
 });
 
-/** 从 `from` 位置开始量 `<div>` 的嵌套深度，用来判断某段文本是否落在某个元素内部。 */
-const divDepthAt = (markup: string, from: number, at: number): number => {
+/**
+ * 取出包含 `attrAt` 的那个 `<div>` 的整段 markup（按标签配对切，不靠数偏移）。
+ * 断言「某段内容不在 live region 里」必须对元素子树做否定匹配：算嵌套深度很容易把
+ * 「alert 自己的开标签」漏掉，从而把「直接子节点」误判成「在外部」。
+ */
+const elementHtmlAt = (markup: string, attrAt: number): string => {
+  const openStart = markup.lastIndexOf('<div', attrAt);
+  assert.ok(openStart >= 0, '找不到包含该属性的 <div>');
   let depth = 0;
-  const tag = /<\/?(div)/g;
-  tag.lastIndex = from;
-  for (let match = tag.exec(markup); match && match.index < at; match = tag.exec(markup)) {
-    depth += match[0] === '</div' ? -1 : 1;
+  const tag = /<\/?div(\s|>)/g;
+  tag.lastIndex = openStart;
+  for (let match = tag.exec(markup); match; match = tag.exec(markup)) {
+    depth += match[0].startsWith('</div') ? -1 : 1;
+    if (depth === 0) {
+      return markup.slice(openStart, match.index + match[0].length);
+    }
   }
-  return depth;
+  throw new Error('unbalanced <div> in markup');
 };
 
 test('没有冷却时不会渲染出 undefined 秒后可重试', () => {
@@ -453,11 +462,18 @@ test('终态卡的冷却倒计时不在 live region 里：每秒变一次，进�
   const alertAt = markup.indexOf('role="alert"');
   const countdownAt = markup.indexOf('60 秒后可重试');
   assert.ok(alertAt >= 0 && countdownAt > alertAt, '终态卡与倒计时应当同时出现');
-  assert.equal(
-    divDepthAt(markup, alertAt, countdownAt),
-    0,
-    '倒计时必须是终态卡的兄弟节点：放在 role=alert 子树里会让读屏每秒重播整段原因'
+
+  const alertHtml = elementHtmlAt(markup, alertAt);
+  assert.match(alertHtml, /共享已中断/);
+  assert.doesNotMatch(
+    alertHtml,
+    /秒后可重试/,
+    '倒计时每秒变一次，放进 role=alert 子树会让读屏每秒重播整段原因'
   );
+  assert.doesNotMatch(alertHtml, /重新开始共享/, '可聚焦按钮也不该被当成状态通告播报');
+  // 倒计时本身仍然可见，只是搬到了 live region 外面，并被按钮用 aria-describedby 引用。
+  assert.match(markup, /id="share-terminal-cooldown-hint"[^>]*>\s*60 秒后可重试/);
+  assert.match(markup, /aria-describedby="share-terminal-cooldown-hint"/);
   assert.match(markup, /重新开始共享/);
   assert.match(markup, /disabled/);
 });
@@ -478,6 +494,8 @@ test('「取消连接」按钮不在 live region 子树里：按钮不该被当�
   const statusAt = markup.indexOf('role="status"');
   const cancelAt = markup.indexOf('取消连接');
   assert.ok(statusAt >= 0 && cancelAt > statusAt, '连接阶段与取消按钮应当同时出现');
-  // 0 = status 容器已经闭合、按钮在自己的 wrapper 里；若塞进 status 子树这里会是 1。
-  assert.equal(divDepthAt(markup, statusAt, cancelAt), 0, '取消按钮必须在 role=status 容器外部');
+
+  const statusHtml = elementHtmlAt(markup, statusAt);
+  assert.match(statusHtml, /正在连接/);
+  assert.doesNotMatch(statusHtml, /取消连接/, '取消按钮必须在 role=status 容器外部');
 });

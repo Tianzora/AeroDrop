@@ -346,6 +346,9 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               <button
                 onClick={retryConnection}
                 disabled={typeof viewerRetrySeconds === 'number'}
+                aria-describedby={
+                  typeof viewerRetrySeconds === 'number' ? 'viewer-retry-cooldown-hint' : undefined
+                }
                 className="flex items-center justify-center gap-2 px-5 py-2.5 bg-brand-600 hover:bg-brand-700 text-white font-medium rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-brand-600"
               >
                 <RefreshCw size={16} />
@@ -370,7 +373,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               {/* 倒计时本身每秒都在变，直接进 live region 会变成每秒一次播报；
                   这里按 10 秒一档播一次，视觉上的秒数用 aria-hidden 挡住。 */}
               {typeof viewerRetrySeconds === 'number' && (
-                <span className="sr-only" role="status" aria-live="polite">
+                <span id="viewer-retry-cooldown-hint" className="sr-only" role="status" aria-live="polite">
                   {`${Math.ceil(viewerRetrySeconds / 10) * 10} 秒内可重试`}
                 </span>
               )}
@@ -495,47 +498,51 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
             {sharerFailure && !isSharing && (
               /* 信令终态：不能只弹 toast。绿色 LIVE 消失、预览停止、链接作废，
                  这里说明原因并给一条重新开始的路。 */
-              /* 终态卡是「分享已经停了」：比普通错误更严重，必须立刻播报。 */
-              <div
-                role="alert"
-                aria-live="assertive"
-                className="mb-4 rounded-card border border-red-200 bg-red-50 p-4 dark:border-red-500/30 dark:bg-red-500/10"
-              >
-                <div className="flex items-start gap-3">
-                  <AlertTriangle size={20} className="mt-0.5 shrink-0 text-red-500" />
-                  <div className="min-w-0">
-                    <p className="text-sm font-semibold text-red-700 dark:text-red-300">共享已中断</p>
-                    <p className="mt-1 break-words text-sm text-red-700/90 dark:text-red-300/90">{sharerFailure.message}</p>
-                    <p className="mt-1 text-xs text-red-600/80 dark:text-red-400/80">
-                      此前分享的链接已失效，观众无法再加入。
-                    </p>
-                    <div className="mt-3 flex flex-wrap items-center gap-2">
-                      <button
-                        onClick={startScreenShare}
-                        disabled={typeof shareRoomRetrySeconds === 'number'}
-                        className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-brand-600 px-4 text-sm font-medium text-white transition-colors hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-brand-600"
-                      >
-                        <Play size={16} fill="currentColor" />
-                        重新开始共享
-                      </button>
-                      <button
-                        onClick={dismissSharerFailure}
-                        className="inline-flex h-9 items-center justify-center gap-2 rounded-full border border-slate-300 px-4 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 dark:border-night-700 dark:text-night-300 dark:hover:bg-night-750"
-                      >
-                        <X size={16} />
-                        关闭
-                      </button>
+              <div className="mb-4 rounded-card border border-red-200 bg-red-50 p-4 dark:border-red-500/30 dark:bg-red-500/10">
+                {/* live region 只包住「发生了什么」：按钮和每秒变化的倒计时都不能进来，
+                    否则读屏会把可聚焦控件当通告、或每秒重播整段原因。 */}
+                <div role="alert" aria-live="assertive">
+                  <div className="flex items-start gap-3">
+                    <AlertTriangle size={20} className="mt-0.5 shrink-0 text-red-500" />
+                    <div className="min-w-0">
+                      <p className="text-sm font-semibold text-red-700 dark:text-red-300">共享已中断</p>
+                      <p className="mt-1 break-words text-sm text-red-700/90 dark:text-red-300/90">{sharerFailure.message}</p>
+                      <p className="mt-1 text-xs text-red-600/80 dark:text-red-400/80">
+                        此前分享的链接已失效，观众无法再加入。
+                      </p>
                     </div>
                   </div>
                 </div>
-                {/* 服务端已经告诉我们还要等多久：把秒数显示出来，比只留一个灰按钮有用。
-                    这行必须留在 role=alert 之外：倒计时每秒变一次，放进 live region 会让
-                    读屏用户每秒听一遍整张终态卡（共 ~10 次），把真正的原因盖掉。 */}
-                {typeof shareRoomRetrySeconds === 'number' && (
-                  <p className="mt-2 text-xs text-red-600/80 dark:text-red-400/80 tabular-nums">
-                    {shareRoomRetrySeconds} 秒后可重试
-                  </p>
-                )}
+                <div className="mt-3 flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={startScreenShare}
+                    disabled={typeof shareRoomRetrySeconds === 'number'}
+                    aria-describedby={
+                      typeof shareRoomRetrySeconds === 'number' ? 'share-terminal-cooldown-hint' : undefined
+                    }
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-brand-600 px-4 text-sm font-medium text-white transition-colors hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-brand-600"
+                  >
+                    <Play size={16} fill="currentColor" />
+                    重新开始共享
+                  </button>
+                  <button
+                    onClick={dismissSharerFailure}
+                    className="inline-flex h-9 items-center justify-center gap-2 rounded-full border border-slate-300 px-4 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 dark:border-night-700 dark:text-night-300 dark:hover:bg-night-750"
+                  >
+                    <X size={16} />
+                    关闭
+                  </button>
+                  {/* 服务端已经告诉我们还要等多久：把秒数显示出来，比只留一个灰按钮有用。
+                      它在 alert 之外、并被按钮的 aria-describedby 引用。 */}
+                  {typeof shareRoomRetrySeconds === 'number' && (
+                    <span
+                      id="share-terminal-cooldown-hint"
+                      className="text-xs text-red-600/80 dark:text-red-400/80 tabular-nums"
+                    >
+                      {shareRoomRetrySeconds} 秒后可重试
+                    </span>
+                  )}
+                </div>
               </div>
             )}
 
