@@ -78,7 +78,72 @@ jobs:
       - name: Install Chromium
         run: npx playwright install --with-deps chromium
 
-      # test:e2e 自带 `vite build --mode e2e` + preview(:3401)，只跑浏览器侧用例；
-      # 屏幕共享用例需要真实 Worker 信令，挂在 test:e2e:product-transfer 里（CI 不跑）。
+      # test:e2e 自带 `vite build --mode e2e` + preview(:3401)，只跑不需要真实 Worker 的浏览器侧用例
+      # （sender-sharing、receiver-recovery）。需要真实 Worker 信令的 product-transfer / screenshare
+      # 用例在下方的 e2e-product job 里跑：两者构建模式不同（e2e vs production），而且产品级用例慢
+      # （本地实测约 2-3 分钟），合进同一个 job 只会拖长反馈时间。
       - name: Browser tests
         run: npm run test:e2e
+
+  e2e-product:
+    name: 'e2e (product: transfer + screenshare, real Worker)'
+    # 与上面的 e2e job 同样的 24.04 理由。
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    env:
+      # `wrangler dev` 在本地模式（workerd）里跑，不需要 Cloudflare 账号或网络；
+      # 关掉遥测、并显式声明 CI，避免它尝试任何交互式提示。
+      CI: 'true'
+      WRANGLER_SEND_METRICS: 'false'
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      # 8787 必须是空的：start-server-and-test 只等这个端口可连，被占用时会误判「服务已就绪」，
+      # 然后把 playwright 指到别人的服务上。
+      - name: Assert port 8787 is free
+        run: |
+          if ss -ltn | grep -q ':8787 '; then
+            echo 'port 8787 is already in use'
+            ss -ltnp | grep ':8787 ' || true
+            exit 1
+          fi
+
+      # test:e2e:product-transfer = `npm run build` + `wrangler dev`(:8787) + playwright
+      # --config=playwright.product.config.ts，覆盖 product-transfer.spec.ts（3 条：SEO 元数据、
+      # 2 MiB 真实传输、口令撤销宽限恢复）与 screenshare.spec.ts（9 条：分享/观看帧增长、
+      # 信令被拒终态、登记限流、瞬时失败恢复、卡住终态、房号过期、停止后立即重启、观众媒体失败、
+      # 第 7 位观众满员提示）。屏幕共享用 Chromium 的 fake display capture（flag 见
+      # playwright.product.config.ts），因此 runner 上不需要 X server 或真实屏幕。
+      - name: Product tests (transfer + screenshare)
+        run: npm run test:e2e:product-transfer
+
+      # start-server-and-test 只 kill 它直接启动的 npm 进程，wrangler 的 workerd 子进程可能活下来。
+      - name: Kill stray worker processes
+        if: always()
+        run: |
+          pkill -f 'wrangler dev' || true
+          pkill -f workerd || true
+
+      - name: Upload Playwright artifacts on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-product-transfer
+          path: |
+            test-results/
+            playwright-report/
+          retention-days: 7
+          if-no-files-found: ignore

@@ -450,3 +450,37 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 - 满员提示分「确定的 share-full」与「疑似推断」两条分支；E2E 只断言 `/人数已满/` 任一命中，推断分支由单测钉住。
 - `components/ScreenShare.tsx`（约 2500 行）与 `components/Receiver.tsx`（约 3400 行）仍在 Node 宿主里无法 import，只能靠 Playwright 覆盖；`noUncheckedIndexedAccess` 实测 176 个错误，本轮未启用。
 - 活跃分享口令行没有全局上限（安全评审判为低危可用性项）：每个 IP 10 次/10s、24h TTL，多 IP 可持续占码。
+
+## 8.9 第七轮复评后的补齐（2026-11-14）
+
+三项复评：安全 **88**（`reachable_95: yes`）、产品 **88**、工程 **93**。三边缺口按下表补齐；本轮不再新增依赖、不改 `package.json`。
+
+### 安全（P1–P5）
+
+| 缺口（复评） | 修法 | 回归测试 |
+| --- | --- | --- |
+| **P1 分片名额 fail-open**：`reserveSignalingSessionSlot` 非 2xx 与异常都返回 `true`，调用侧当作已授予并写入一个从未落库的 slotId。shard 0 抖动时整台出口 IP 绕过全局 12 会话上限（`src/worker.ts:1972-1997`） | 名额判定改三态 `'granted' \| 'exhausted' \| 'unavailable'`；`unavailable` 走新 `respondSlotUnavailable()`：先 `close(1013)` 再回 `503 + Retry-After: SIGNALING_QUOTA_UNAVAILABLE_RETRY_AFTER_SECONDS`（5s，`constants/signaling.ts`），不再注册成功 | `signalingHub.test.ts`「shard 0 名额表不可达：升级回 503 + Retry-After」（断言 `webSocket === null`、`closedCode === 1013`、本地槽位行 0、指标 `signal_session_slot_unavailable` 且无 `..._rejected`）；负对照：把 `unavailable` 当 `granted` ⇒ 503 变 101，红 |
+| **P2 口令重登记先删后插**：`registerShareCode` 先按 peer_id 无条件删旧码再分配新码；自定义码撞车时旧活跃码已被销毁，观众 404、发送端重连 unauthorized（`src/worker.ts:2082-2084`） | `insertShareCode` 改 upsert：`ON CONFLICT(code) DO UPDATE ... WHERE share_codes.peer_id = excluded.peer_id`（同 peerId 原地续期，别家撞车时旧行不动）；`deleteShareCodesByPeerId(sql, peerId, keepCode?)` 只删刚分配成功的同一 peer 的其它码；`registerShareCode` 改为「先分配成功，再删旧码」 | 两条 SQLite 契约用例（抢码时旧行分毫未动、keepCode 保留新码）+ `signalingHub.test.ts`「口令重登记撞车：旧活跃码必须原样保留」（抢码 409、owner 原码 lookup 仍 200）；负对照：恢复先删后插 ⇒ 旧码 404，红 |
+| **P3 凭证在 URL query**：token / sessionProof 落在完整 URL，被边缘与代理日志捕获；先进日志者还能抢先轮换把原持有者锁成 4010（`services/peerRuntime.ts:250-263`、`src/worker.ts:934-942`） | 新增 `services/signaling/wsCredentialTransport.ts`：凭证 JSON → base64url 编进 `Sec-WebSocket-Protocol`（`aerodrop.v1` + 凭证协议），`peerRuntime` 改 `new WebSocket(url, protocols)`、URL 只留 `peerId`；worker 升级路径协议头优先、query 回落（旧页面兜底），`acceptClient()` 统一 101 且只回显非秘密协议 | `wsCredentialTransport.test.ts`（往返、非 ASCII、坏 base64/坏 JSON/字段类型错 → null）+ `signalingHub.test.ts`「只带协议头可注册并保持 4010 语义」「协议头坏掉回落 query」+ `peerRuntime.test.ts`（query 无秘密） |
+| **P4（低）未绑定会话可被无限次接管**：在首次绑定建立前的窗口里，知道 peerId 即可反复踢下线 | 未在本轮修：首次注册也签发 proof 需要改客户端首连与观众路径，风险大于收益；保持「24h 绑定 + 60s 摘要窗口」并把窗口以外的接管全部 4010 | 现状即有覆盖（`sessionBinding.test.ts` 摘要窗口用例；`signalingHub.test.ts` 无凭证接管 4010）。已记入下方已知取舍 |
+| **P5 读路径写库**：`findActiveShareCode` 每次都跑 `deleteExpiredShareCodes`，未认证 `GET /api/share-code/:code` 会在 shard 0 开写事务 | 读路径只按 `expires_at` / `revoke_after` 过滤，不再清理；过期清理由写路径（登记/撤销/恢复前的 `purgeExpiredShareCodes`）与 alarm 承担 | `sessionStore.sqlite.test.ts`「读路径只过滤不写库（行数 1、无墓碑）」；负对照：读路径恢复删除 ⇒ 行数变 0，红 |
+
+### 产品（第七轮 88 → 目标的 3 条）
+
+| 缺口（复评） | 修法 | 回归测试 |
+| --- | --- | --- |
+| **同出口第 5–6 个观众被 offer 限流拦住**（10 条/分、每人 2 条），而且拒绝被当成「人数已满」展示；被误锁的整出口还得等 10 分钟 | `constants/signaling.ts` 新增 `SIGNALING_OFFER_RATE_LIMIT = { windowMs: 60_000, maxAttemptsPerClientWindow: 24, blockMs: 60_000 }`（24 = 6 观众首连 + 各自一次重连；静默期 10 分钟 → 1 个窗口，因为整出口被锁时刷新也救不回来），`services/signalingRateLimitPolicy.ts` 的默认值改为引用它；新增 `services/screenShare/viewerPeerErrorPolicy.ts` 的 `planViewerPeerError` → `ignore`/`share-gone`/`rate-limited`/`report`，观众 `peer.on('error')` 先判限流再判满员；`viewerShareFullFallback` 增加 `rateLimited` 输入与 `'rate-limited'` 结论（顺序：share-ended → share-full → manual-stop → rate-limited → suspected-share-full → reconnect），后续 `call.close` 不会把限流结论覆盖成「可能人数已满」 | `signalingRateLimitPolicy.test.ts`「默认配额容得下同一出口坐满 6 个观众」（负对照：24 改回 10 ⇒ 红）；`viewerShareFullFallback.test.ts`「同一出口被限流时先判限流」（负对照：删 `rateLimited && !receivedStream` 分支 ⇒ 红）；E2E 负对照：`maxAttemptsPerClientWindow` 改回 10 ⇒ 7 观众用例因第 6 个被出口限流而红（`viewer video never produced frames`） |
+| 限流拒绝只有 `code`，客户端拿不到该等多久，只能显示「立刻可重试」，再点又 429 | 端到端下发 `retryAfterMs`：`src/worker.ts` 的 `sendError(...)` 增第 7 参并在 offer 限流分支传 `rateLimitDecision.retryAfterMs`（`SignalingEnvelope` 的 error 变体加可选字段）；`services/peerRuntime.ts` 的 `ErrorEnvelope` 解析该字段并挂到 `PeerRuntimeError.retryAfterMs`；`ScreenShare` 用已有的 `readRetryAfterMs` 读它，缺失时回退 `SIGNALING_OFFER_RATE_LIMIT.blockMs`（倒计时宁可偏长）；`ScreenShareUI` 冷却期禁用「重试连接」并显示「N 秒后可重试」 | `signalingHub.test.ts`「offer 限流的 error 必须带上 retryAfterMs」（负对照：不传第 7 参 ⇒ 红）；`peerRuntime.test.ts`「rate-limited 信封把 retryAfterMs 透给上层」（无字段时保持 `undefined`，不许凭空造值）；`ScreenShareUI.test.ts` 冷却禁用 + 倒计时（负对照：`disabled` 改 false ⇒ 红） |
+| 打开已停止/已过期的链接：自动重试 5 次（2/4/6/8/10s），30s 后落到「请手动重试」，还把这条死链留在 sessionStorage 里，刷新继续重连 | `services/connectionGuidance.ts` 新增 `VIEWER_SHARE_GONE_MESSAGE = '分享已结束或链接已失效，请向分享者索取新链接'`；`planViewerPeerError` 把 `peer-unavailable` 直接判 `share-gone`；观众侧走 `stopViewing(true)`（顺带清掉持久化 viewId，刷新不再自动重连）+ 终态文案，删掉整条重试链 | `viewerPeerErrorPolicy.test.ts`「分享者不存在直接终态」（负对照：该分支改 false ⇒ 红）；`connectionGuidance.test.ts`「分享已结束的观众进终态」（负对照：文案换回「连接超时，请检查网络」⇒ 红） |
+| 房号过期后点「重新开始共享」会新建房间，正在观看的观众全部掉线，而文案只说「新观众无法加入」 | 不做「复用旧房号」（要 bump `peerSessionToken` 并重建 Peer，改动面过大且无法在不改协议的前提下证明观众存活）；把 `ScreenShareUI` 的过期卡文案改为「分享链接已失效，需要重新开始共享才能让新观众加入；重新开始会新建房间，正在观看的观众会断开」 | `ScreenShareUI.test.ts`「过期卡说明会断开现有观众」（负对照：删掉后半句 ⇒ 红） |
+
+顺带把 `services/screenShare/shareRoomRetryCooldown.ts` 泛化为 `retryCooldown.ts`（`describeRetryCooldown`），房号冷却与观众「重试连接」冷却共用一个实现。
+
+### 工程（A / B / D）
+
+| 缺口（复评） | 修法 | 验证 |
+| --- | --- | --- |
+| **A** screenshare 的 9 条 E2E 不在 CI（`ci.yml:82`、`playwright.config.ts:5` 的 `testIgnore`），"产品级回归"只在本地跑过 | `.github/workflows/ci.yml` 新增独立 job `e2e-product`（ubuntu-24.04，timeout 30m）：`npm ci` → 装 chromium → 断言 8787 空闲 → `npm run test:e2e:product-transfer`（内含 `vite build --mode e2e` + `wrangler dev` local:8787）→ `if: always()` 清理 wrangler/workerd → 失败上传 `test-results/` 与 `playwright-report/` | 本地同命令 **12 passed / 3m38.9s**；负对照（改坏满员终态文案断言）同一命令链 exit 1，随后还原；CI YAML 用 PyYAML 解析确认 3 个 job |
+| **B** 覆盖率守卫按 basename 比对，同名文件（如两处 `Receiver.tsx`）会互相遮蔽，缺文件也能过关 | `parseReport` 保留报告里的完整路径；`resolveRowFiles(name, expected)` 先精确匹配相对路径、再按路径后缀匹配；后缀命中多个文件即 `ambiguous` 失败（把遮蔽变成红灯） | `--self-test` 从 9 条扩到 **12/12**（含遮蔽 fixture）；负对照：把脚本复制到 `.tmp/` 改回 basename 语义 ⇒ `--self-test` exit 1；真实树 services（114 文件）与 components（12 文件）两端 OK |
+| **D** `docs/ROADMAP-next.md` 过度声明「CI 覆盖率与 E2E job 完成」 | 改写为准确的三段式：`verify`（typecheck + 单测 + 两个 scope 的分母守卫 + build）、`e2e`（chromium，只跑 sender-sharing / receiver-recovery）、`e2e-product`（真实 workerd + product config），并写明 CI **不拦** Cloudflare Git 集成部署，除非在分支保护里设为必需检查 | 文档与 `ci.yml` 的 job 名一一对应 |
+| **C**（未修，记录）结构债：`components/Receiver.tsx` 3367 行、`ScreenShare.tsx` 2643 行、`Sender.tsx` 1670 行；生产代码 16 处 `as any` 全在这两个组件；`noUncheckedIndexedAccess` 实测 176 个错误 | 本轮不拆（拆 3000 行组件超出「补齐复评缺口」的范围，且会与产品修复抢同一批行）；`noUncheckedIndexedAccess` 实测超门槛不启用 | 数字记在本表，供下一阶段立项 |

@@ -15,10 +15,13 @@
  *                                          [--min-lines=85] [--min-branches=78] [--min-functions=75]
  *   node ./scripts/check-coverage-scope.mjs --self-test   （校验解析/判定规则本身）
  *
- * 说明：只解析人类可读报告里的文件名，不额外引入依赖。同名文件（例如两个
- * bitratePolicy.ts）可能互相遮蔽，因此同时比较「报告行数 >= 期望文件数 - 白名单」，
- * 作为第二道校验：解析正则一旦被上游输出格式改动打破，这里直接失败，而不是安静地
- * 漏掉一批文件。
+ * 说明：只解析人类可读报告里的路径，不额外引入依赖。报告行按「完整相对路径 → 路径
+ * 后缀」映射回 git 清单，而不是只比 basename：两个不同目录的同名文件（例如两个
+ * bitratePolicy.ts）在报告里会互相遮蔽，只比 basename 时行数照样够、检查全绿。后缀
+ * 命中多个文件时直接判定失败。
+ *
+ * 另有第二道校验「报告行数 >= 期望文件数 - 白名单」：解析正则一旦被上游输出格式改动
+ * 打破，这里直接失败，而不是安静地漏掉一批文件。
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
@@ -84,15 +87,15 @@ const SCOPES = {
     allowedUncovered: new Map([
       [
         'components/Receiver.tsx',
-        '模块顶层就访问 document（初始化 DOM 副作用），Node 里 import 即抛 ReferenceError；交互路径由 Playwright e2e 覆盖',
+        'import 链上的 streamsaver 在模块顶层读 document（node_modules/streamsaver/StreamSaver.js 顶部），Node 里 import 即抛 ReferenceError: document is not defined；下载/续传路径由 Playwright e2e 覆盖',
       ],
       [
         'components/ScreenShare.tsx',
-        '模块顶层访问 window（读写全局状态/定时器），Node 里 import 即抛 ReferenceError；屏幕共享流程由 test:e2e:product-transfer 覆盖',
+        '模块顶层 import 的 services/peerRuntime.ts 在模块顶层直接读 window.location.origin（SIGNALING_BASE 初始化），Node 里 import 即抛 ReferenceError: window is not defined；屏幕共享流程由 test:e2e:product-transfer 的 screenshare 用例覆盖',
       ],
       [
         'components/Sender.tsx',
-        '模块顶层访问 window，Node 里 import 即抛 ReferenceError；传输路由/重试已抽到 services/send/ 并有单测，UI 由 e2e 覆盖',
+        '同样在 import 阶段命中 services/peerRuntime.ts 模块顶层读取的 window.location.origin（ReferenceError: window is not defined）；传输路由/重试已抽到 services/send/ 并有单测，UI 由 e2e 覆盖',
       ],
     ]),
   },
@@ -102,7 +105,7 @@ const SCOPES = {
 // 纯函数：解析报告、判定是否失败。--self-test 直接复用它们，避免「测的是另一套逻辑」。
 // ---------------------------------------------------------------------------
 
-/** 解析人类可读覆盖率报告，只保留「文件名 + line%」；表头/分隔线/目录行不计入。 */
+/** 解析人类可读覆盖率报告，只保留「报告里的路径 + line%」；表头/分隔线/目录行不计入。 */
 const parseReport = (output) => {
   const rows = [];
   for (const line of stripAnsi(output).split('\n')) {
@@ -111,24 +114,38 @@ const parseReport = (output) => {
     const cells = line.split('|');
     const percent = Number.parseFloat((cells[1] ?? '').trim());
     rows.push({
-      name: match[1].trim().split('/').pop(),
+      name: match[1].trim(),
       linePercent: Number.isFinite(percent) ? percent : null,
     });
   }
   return rows;
 };
 
+/**
+ * 把报告行映射回 git 清单里的相对路径。
+ * - 先比完整相对路径（`services/x/y.ts` 就是 git 里的相对路径）；
+ * - 再比路径后缀：Node 报告印的是相对「各组公共根」的路径，components 组里
+ *   `components/receiver/ReceiverUI.tsx` 会印成 `receiver/ReceiverUI.tsx`，src 组
+ *   则直接印裸名 `worker.ts`，两种都得认；
+ * - 后缀命中多个文件 = 同名遮蔽：行数校验此时照样通过，只有这一层能拦住。
+ */
+const resolveRowFiles = (name, expected) =>
+  expected.filter((file) => file === name || file.endsWith(`/${name}`));
+
 const inspect = ({ expected, rows, allowedUncovered }) => {
-  const reported = new Set(rows.map((row) => row.name));
-  const missingAll = expected.filter((file) => !reported.has(path.basename(file)));
+  const resolved = rows.map((row) => ({ row, files: resolveRowFiles(row.name, expected) }));
+  const ambiguous = resolved.filter((entry) => entry.files.length > 1);
+  const matched = new Set(
+    resolved.flatMap((entry) => (entry.files.length === 1 ? entry.files : []))
+  );
+  const missingAll = expected.filter((file) => !matched.has(file));
   const allowedMissing = missingAll.filter((file) => allowedUncovered.has(file));
   const missing = missingAll.filter((file) => !allowedUncovered.has(file));
   // 0% 行同样要看白名单：白名单文件的「存在性」已经豁免，覆盖率为 0 也就不再单独报。
-  const zeroLine = rows.filter(
-    (row) =>
-      row.linePercent === 0 &&
-      expected.some((file) => path.basename(file) === row.name && !allowedUncovered.has(file))
-  );
+  const zeroLine = resolved
+    .filter((entry) => entry.files.length === 1 && entry.row.linePercent === 0)
+    .map((entry) => entry.files[0])
+    .filter((file) => !allowedUncovered.has(file));
   return {
     rows,
     rowCount: rows.length,
@@ -136,6 +153,7 @@ const inspect = ({ expected, rows, allowedUncovered }) => {
     missingAll,
     allowedMissing,
     missing,
+    ambiguous,
     zeroLine,
   };
 };
@@ -150,10 +168,19 @@ const describeFailures = (state) => {
         '\n如果确实无法在 Node 里加载，把它登记进该 scope 的 allowedUncovered 并写明理由。'
     );
   }
+  if (state.ambiguous.length > 0) {
+    failures.push(
+      '以下报告行只给出路径后缀，却对应多个生产文件（同名遮蔽，无法判定覆盖率归属）：\n' +
+        state.ambiguous
+          .map((entry) => `  - ${entry.row.name} → ${entry.files.join(' / ')}`)
+          .join('\n') +
+        '\n给同名文件改名，或改成完整相对路径后再放行。'
+    );
+  }
   if (state.zeroLine.length > 0) {
     failures.push(
       '以下文件进了分母但 line 覆盖率为 0%（等于没有回归证据）：\n' +
-        state.zeroLine.map((row) => `  - ${row.name}`).join('\n')
+        state.zeroLine.map((file) => `  - ${file}`).join('\n')
     );
   }
   // 第二道校验：报告行数必须覆盖「期望文件 - 白名单」。解析规则被上游输出格式改动
@@ -244,6 +271,29 @@ const SELF_TEST_CASES = [
     ]),
     wantFailure: '解析规则可能已失效',
   },
+  {
+    name: '报告行给完整相对路径（services 组）能对上',
+    report: 'ℹ services/receive/persistedDirectoryHandle.ts | 100.00 | 100.00 | 100.00 |',
+    expected: ['services/receive/persistedDirectoryHandle.ts'],
+    allowedUncovered: new Map(),
+    wantFailure: null,
+  },
+  {
+    name: '报告行给后缀路径（components 组印成 receiver/X.tsx）能对上',
+    report: 'ℹ receiver/ReceiverUI.tsx | 60.00 | 50.00 | 58.00 |',
+    expected: ['components/receiver/ReceiverUI.tsx'],
+    allowedUncovered: new Map(),
+    wantFailure: null,
+  },
+  {
+    name: '同名文件遮蔽（两个目录同名、报告只给裸名）必须失败',
+    report: 'ℹ Foo.tsx | 100.00 | 100.00 | 100.00 |',
+    // 只比 basename 时这两个文件会被同一个 `Foo.tsx` 行同时「满足」，行数校验
+    // （2 - 1 白名单 = 1 行）也照样通过 —— 这条 fixture 就是拦这个洞的。
+    expected: ['services/a/Foo.tsx', 'services/b/Foo.tsx'],
+    allowedUncovered: new Map([['services/b/Foo.tsx', 'self-test']]),
+    wantFailure: '同名遮蔽',
+  },
 ];
 
 const runSelfTest = () => {
@@ -280,7 +330,7 @@ const runSelfTest = () => {
     process.exit(1);
   }
   console.log(
-    `check-coverage-scope: self-test passed —— ${SELF_TEST_CASES.length} 个 fixture 全部符合预期（含缺失文件、0% 行、行数不足三条失败路径）`
+    `check-coverage-scope: self-test passed —— ${SELF_TEST_CASES.length} 个 fixture 全部符合预期（含缺失文件、0% 行、行数不足、同名遮蔽四条失败路径）`
   );
 };
 
