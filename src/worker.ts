@@ -7,6 +7,7 @@ import {
   MIN_CF_TURN_TTL_SECONDS,
   SHARE_CODE_REVOKE_MAX_GRACE_MS,
   SIGNALING_QUOTA_UNAVAILABLE_RETRY_AFTER_SECONDS,
+  SIGNALING_SHARE_CODE_LOOKUP_UNAVAILABLE_RETRY_AFTER_SECONDS,
   SIGNALING_SESSION_SLOT_REFRESH_MS,
 } from '../constants/signaling';
 
@@ -845,6 +846,17 @@ type SessionAttachment = {
  */
 type SignalingSlotReservation = 'granted' | 'exhausted' | 'unavailable';
 
+/**
+ * 分片模式下按 code/peerId 回源查口令的结果。
+ *
+ * 三态而不是「记录或 null」：答案「这个 peerId 没被占用」只能由 shard 0 给出，
+ * 查询本身失败时必须能和「确认没人占用」区分开，否则分片抖动期就等于无凭证放行。
+ */
+type RemoteShareCodeLookup =
+  | { status: 'found'; record: ShareCodeRecord }
+  | { status: 'missing' }
+  | { status: 'failed' };
+
 type SessionBindingAdmissionInput = {
   peerId: string;
   existingSecretHash?: string;
@@ -1012,26 +1024,42 @@ export class SignalingHub extends DurableObject<Env> {
     const codeParam = readCredential('code');
     const tokenParam = readCredential('token');
     // share_codes 仍只住在 shard 0：本片不是 shard 0 时先回源取一次记录，再交给同步的
-    // resolveShareCodeRegistration 判定。失败按「查不到」处理（fail closed），不放宽校验。
+    // resolveShareCodeRegistration 判定。回源结果分三种：查到 / 确认没有 / 查不通。
     // 本地判定会 normalize 口令，远端预取也必须用同一个值，否则分片模式下
     // 「带首尾空白的码」会被误判成不存在（行为随分片数分裂）。
     const normalizedCodeParam = normalizeShareCode(codeParam);
+    // 「有没有码」必须按 normalize 之后的值判：`code = '   '` 在 registry 里等于没有码，
+    // 按原始值判就会跳过下面的 peerId 问询，于是一个空白码就让「这个 peerId 是否已被某份
+    // 分享占用」这件事整个被跳过，退回无凭证注册——分片模式下，先连上的人就能占住发送方
+    // 的 peerId，接收方 rendezvous 后连到的是它。
     const prefetchedCode =
       remoteLookup && normalizedCodeParam
         ? await this.lookupShareCodeRemotely('code', normalizedCodeParam)
         : null;
     const prefetchedByPeerId =
-      remoteLookup && !codeParam ? await this.lookupShareCodeRemotely('peerId', peerId) : null;
+      remoteLookup && !normalizedCodeParam
+        ? await this.lookupShareCodeRemotely('peerId', peerId)
+        : null;
+    // shard 0 抖动时无法确认 peerId 归属：升级阶段直接 503 + Retry-After，与绑定表、
+    // 名额表两处不可达同构。绝不能在「不知道这个 peerId 有没有主」的情况下放行。
+    if (prefetchedCode?.status === 'failed' || prefetchedByPeerId?.status === 'failed') {
+      return new Response('Signaling temporarily unavailable', {
+        status: 503,
+        headers: {
+          'Retry-After': String(SIGNALING_SHARE_CODE_LOOKUP_UNAVAILABLE_RETRY_AFTER_SECONDS),
+        },
+      });
+    }
     const registration = await resolveShareCodeRegistration({
       peerId,
       code: codeParam,
       token: tokenParam,
       now: Date.now(),
       findShareCode: remoteLookup
-        ? () => prefetchedCode
+        ? () => (prefetchedCode?.status === 'found' ? prefetchedCode.record : null)
         : (candidate) => this.findActiveShareCode(candidate, Date.now()),
       findShareCodeByPeerId: remoteLookup
-        ? () => prefetchedByPeerId
+        ? () => (prefetchedByPeerId?.status === 'found' ? prefetchedByPeerId.record : null)
         : (candidate) => this.findActiveShareCodeByPeerId(candidate, Date.now()),
     });
     // 认证先于绑定判定：非法口令/旧 peerId 的连接不该触发 shard 0 的绑定查询（分片模式
@@ -1619,14 +1647,16 @@ export class SignalingHub extends DurableObject<Env> {
   private async lookupShareCodeRemotely(
     kind: 'code' | 'peerId',
     value: string
-  ): Promise<ShareCodeRecord | null> {
+  ): Promise<RemoteShareCodeLookup> {
     try {
-      return await this.getShareCodeLookupBatcher().request({ kind, value });
+      const record = await this.getShareCodeLookupBatcher().request({ kind, value });
+      return record ? { status: 'found', record } : { status: 'missing' };
     } catch (error) {
-      // 查询失败必须按「没查到」处理：宁可让本次注册被拒，也不能放宽身份校验。
-      signalingTelemetry.record('signal_share_code_lookup_failed', { kind });
+      // 查询失败不能当成「没查到」：shard 0 抖动期那会让每个已绑定的 peerId 都退回
+      // 无凭证路径，攻击者只要在抖动窗口重试即可抢占发送方的 peerId。
+      signalingTelemetry.record('signal_share_code_lookup_unavailable', { kind });
       console.warn('signaling share-code lookup failed', error);
-      return null;
+      return { status: 'failed' };
     }
   }
 

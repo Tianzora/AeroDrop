@@ -24,7 +24,8 @@ export type SignalingTelemetryEvent =
   /** 分片模式的握手预算耗尽。 */
   | 'signal_handshake_budget_exhausted'
   /** 跨片回源查口令失败。 */
-  | 'signal_share_code_lookup_failed'
+  /** 跨片回源查口令不可达：升级按 503 处理，不再把「查不到」当成「没被占用」。 */
+  | 'signal_share_code_lookup_unavailable'
   /** 一次跨片回源同时答复了多条查询（说明合并生效）。 */
   | 'signal_share_code_lookup_batched'
   /** shard 0 的会话绑定表不可达：本次接管按身份不可验证处理。 */

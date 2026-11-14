@@ -108,6 +108,16 @@ export const SIGNALING_BINDING_UNAVAILABLE_RETRY_AFTER_SECONDS = 5;
 export const SIGNALING_QUOTA_UNAVAILABLE_RETRY_AFTER_SECONDS = 5;
 
 /**
+ * 分片模式下按 peerId 回源查口令失败时，WS 升级返回 503 的 Retry-After（秒）。
+ *
+ * 这条查询回答的是「该 peerId 是否已被某份分享占用」。失败若按「没查到」放行，shard 0
+ * 抖动期任何已绑定的 peerId 都会退回无凭证路径：攻击者不必知道口令，只要在抖动窗口
+ * 反复重试就能以接收方身份抢占发送方的 peerId（rendezvous 之后接收方连上的是攻击者）。
+ * 与绑定表、名额表两处不可达保持同一语义：宁可 503，也不在「不知道有没有主」时放行。
+ */
+export const SIGNALING_SHARE_CODE_LOOKUP_UNAVAILABLE_RETRY_AFTER_SECONDS = 5;
+
+/**
  * offer 的每出口配额与静默期。
  *
  * 一个观众要发两条 offer（数据通道 + 媒体），屏幕共享房号又最多 6 个观众，所以

@@ -18,8 +18,10 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { createSqlite } from '../../scripts/test-stubs/sqlite-adapter.ts';
-import { SIGNALING_QUOTA_UNAVAILABLE_RETRY_AFTER_SECONDS } from '../../constants/signaling';
-
+import {
+  SIGNALING_QUOTA_UNAVAILABLE_RETRY_AFTER_SECONDS,
+  SIGNALING_SHARE_CODE_LOOKUP_UNAVAILABLE_RETRY_AFTER_SECONDS,
+} from '../../constants/signaling';
 import {
   SIGNALING_OFFER_RATE_LIMIT,
   SIGNALING_SESSION_SLOT_REFRESH_MS,
@@ -174,6 +176,21 @@ test.after(() => {
 type RpcCall = { shardName: string; url: string; body: unknown };
 type RpcResult = { status: number; body: unknown };
 
+const SHARE_CODE_LOOKUP_URL = '/internal/lookup-share-codes';
+
+/**
+ * 分片模式下未声明口令回源的默认答复：「确认查无记录」。
+ *
+ * 这条查询现在是 fail closed 的（失败 ⇒ 升级 503），所以没写 stub 的用例会在
+ * 升级阶段就被挡住、看不到自己真正要测的东西。默认答复按请求条数返回 null。
+ * 要验证查询失败/命中路径的用例传 `shareCodeLookup: 'stub'` 自己接管。
+ */
+const missShareCodeLookups = (call: RpcCall): RpcResult => {
+  const lookups = (call.body as { lookups?: unknown[] } | null)?.lookups;
+  const count = Array.isArray(lookups) ? lookups.length : 0;
+  return { status: 200, body: { records: Array.from({ length: count }, () => null) } };
+};
+
 /** 建一个 hub：ctx 暴露 sqlite、已接受 socket 列表、waitUntil 收集器与遥测捕获。 */
 const createHub = async (overrides: {
   maxSessions?: string;
@@ -184,6 +201,11 @@ const createHub = async (overrides: {
    * `respond` 可以返回 promise：交错竞态用例需要在 RPC 在途期间启动另一个注册。
    */
   signalingHub?: { respond: (call: RpcCall) => RpcResult | Promise<RpcResult> };
+  /**
+   * 口令回源的应答方式。`miss`（默认）由测试骨架统一回「确认查无记录」，
+   * `stub` 表示用例自己在 `respond` 里处理（命中记录、500、抛错等）。
+   */
+  shareCodeLookup?: 'miss' | 'stub';
   /** 模拟 DO 唤醒：构造前 ctx.getWebSockets() 里已经有 socket，attachment 是唯一状态来源。 */
   restored?: { socket: FakeSocket; attachment: Record<string, unknown> }[];
 } = {}) => {
@@ -233,7 +255,10 @@ const createHub = async (overrides: {
             body: text ? (JSON.parse(text) as unknown) : null,
           };
           rpcCalls.push(call);
-          const result = await respond(call);
+          const result =
+            overrides.shareCodeLookup !== 'stub' && call.url.endsWith(SHARE_CODE_LOOKUP_URL)
+              ? missShareCodeLookups(call)
+              : await respond(call);
           return {
             ok: result.status >= 200 && result.status < 300,
             status: result.status,
@@ -783,6 +808,7 @@ test('注册途中 socket 关闭：不写会话、名额与槽位一起回滚', 
   const created = await createHub({
     shardCount: '2',
     shardName: 'signaling-shard-1',
+    shareCodeLookup: 'stub',
     signalingHub: {
       respond: (call) => {
         const body = call.body as { action?: string; lookups?: unknown[] } | null;
@@ -838,6 +864,7 @@ test('跨 IP 接管时旧 socket 先断开：配额只释放一次，同 IP 的�
     maxSessions: '2',
     shardCount: '2',
     shardName: 'signaling-shard-1',
+    shareCodeLookup: 'stub',
     signalingHub: {
       respond: async (call) => {
         const body = call.body as { action?: string; slotId?: string; clientKey?: string; releaseToken?: string; lookups?: unknown[] } | null;
@@ -975,6 +1002,7 @@ test('交错注册竞态：A 的名额 RPC 在途时 B 落定，A 回 session-co
   const created = await createHub({
     shardCount: '2',
     shardName: 'signaling-shard-1',
+    shareCodeLookup: 'stub',
     signalingHub: {
       respond: async (call) => {
         const body = call.body as
@@ -1081,6 +1109,7 @@ test('并发接管同一会话：事后只剩一条名额，且它归属已注�
   const created = await createHub({
     shardCount: '2',
     shardName: 'signaling-shard-1',
+    shareCodeLookup: 'stub',
     signalingHub: {
       respond: async (call) => {
         const body = call.body as
@@ -1305,6 +1334,7 @@ test('同 IP 接管时旧 socket 在名额 RPC 期间断开：席位要补领，
     maxSessions: '1',
     shardCount: '2',
     shardName: 'signaling-shard-1',
+    shareCodeLookup: 'stub',
     signalingHub: {
       respond: async (call) => {
         const body = call.body as { action?: string; lookups?: unknown[] } | null;
@@ -2034,4 +2064,123 @@ test('offer 限流的 error 必须带上 retryAfterMs：客户端据此显示倒
     'retryAfterMs 不能超过静默期'
   );
   assert.equal(target.sent.filter((frame) => JSON.parse(frame.data).type === 'offer').length, limit);
+});
+
+test('分片模式下空白口令不能跳过「该 peerId 已被分享占用」的判定', async () => {
+  // 分片模式里 share_codes 只住在 shard 0，本片要先回源问「这个 peerId 有没有主」。
+  // 旧实现按**原始** code 判「有没有码」：`code: '   '` 是 truthy，于是这次 peerId 问询
+  // 被整个跳过；而 registry 里 `normalizeShareCode('   ')` 等于没有码，于是走无凭证分支、
+  // 查不到占用 → 放行。结果是先连上的人可以占住发送方的 peerId，接收方 rendezvous 之后
+  // 连到的是它。判据必须用 normalize 之后的值。
+  const bound = {
+    code: '424242',
+    peerId: 'AERO-BOUND001',
+    secretHash: hash('e'),
+    expiresAt: Date.now() + 3_600_000,
+  };
+  const lookupRecords = (call: RpcCall): RpcResult => {
+    const lookups = (call.body as { lookups?: { kind?: string; value?: string }[] } | null)?.lookups ?? [];
+    return {
+      status: 200,
+      body: {
+        records: lookups.map((lookup) =>
+          lookup.kind === 'peerId' && lookup.value === bound.peerId ? bound : null
+        ),
+      },
+    };
+  };
+  const respond = (call: RpcCall): RpcResult => {
+    if (call.url.endsWith(SHARE_CODE_LOOKUP_URL)) return lookupRecords(call);
+    if (call.url.endsWith('/internal/session-binding')) return { status: 200, body: { allowed: true } };
+    return { status: 200, body: { granted: true, delivered: true } };
+  };
+
+  const blankCode = await createHub({
+    shardCount: '2',
+    shardName: 'signaling-shard-1',
+    shareCodeLookup: 'stub',
+    signalingHub: { respond },
+  });
+  const blankCredentials = encodeWsCredentials({ code: '   ' });
+  const rejected = await upgrade(blankCode.hub, 'peerId=AERO-BOUND001', '198.51.100.241', {
+    'Sec-WebSocket-Protocol': `${blankCredentials.baseProtocol}, ${blankCredentials.protocol}`,
+  });
+  await blankCode.settle();
+
+  assert.equal(rejected.status, 101, '拒绝路径先 accept 再回 error 帧');
+  const rejectedServer = serverOf(rejected.webSocket);
+  assert.equal(rejectedServer.lastMessage()?.type, 'error', '空白口令不得注册成功');
+  assert.equal(rejectedServer.lastMessage()?.code, 'unauthorized');
+  assert.equal(closedCode(rejectedServer), 4009);
+  assert.equal(readSlotRows(blankCode.db).length, 0, '被拒的连接不得占用任何名额');
+  const peerIdQueries = blankCode
+    .rpcCalls!.filter((call) => call.url.endsWith(SHARE_CODE_LOOKUP_URL))
+    .flatMap((call) => (call.body as { lookups?: { kind?: string }[] }).lookups ?? [])
+    .filter((lookup) => lookup.kind === 'peerId');
+  assert.equal(peerIdQueries.length, 1, '判据用 normalize 后的值才会发出 peerId 问询');
+
+  // 控制组：同一个 peerId 完全不凭证也必须被拒——证明上面的 mock 绑定真的可达，
+  // 而不是「守卫被咨询时也不生效」的假绿。
+  const control = await createHub({
+    shardCount: '2',
+    shardName: 'signaling-shard-1',
+    shareCodeLookup: 'stub',
+    signalingHub: { respond },
+  });
+  const bare = await upgrade(control.hub, 'peerId=AERO-BOUND001', '198.51.100.242');
+  await control.settle();
+  const bareServer = serverOf(bare.webSocket);
+  assert.equal(bareServer.lastMessage()?.code, 'unauthorized');
+  assert.equal(closedCode(bareServer), 4009);
+});
+
+test('分片模式下口令回源不可达：升级回 503 + Retry-After，而不是当成「没人占用」', async () => {
+  // 这条查询回答的是「这个 peerId 有没有主」。失败按「没查到」放行的后果比可用性更严重：
+  // shard 0 一抖动，任何人只要重试就能以接收方身份抢占发送方的 peerId。
+  const created = await createHub({
+    shardCount: '2',
+    shardName: 'signaling-shard-1',
+    shareCodeLookup: 'stub',
+    signalingHub: {
+      respond: (call) => {
+        if (call.url.endsWith(SHARE_CODE_LOOKUP_URL)) return { status: 500, body: { error: 'boom' } };
+        return { status: 200, body: { allowed: true, granted: true } };
+      },
+    },
+  });
+
+  const response = await upgrade(created.hub, 'peerId=AERO-LOOKUPFAIL', '198.51.100.243');
+  await created.settle();
+
+  assert.equal(response.status, 503, '回源不可达必须在 accept 之前结束升级');
+  assert.equal(response.webSocket, null, '503 不能带 webSocket');
+  assert.equal(
+    response.headers.get('Retry-After'),
+    String(SIGNALING_SHARE_CODE_LOOKUP_UNAVAILABLE_RETRY_AFTER_SECONDS)
+  );
+  assert.equal(created.sockets.length, 0, '不确定归属的连接不得被 accept');
+  assert.equal(readSlotRows(created.db).length, 0, '不可达路径不得写名额');
+  const events = created.metrics().map((entry) => entry.event);
+  assert.ok(events.includes('signal_share_code_lookup_unavailable'), '必须留一条可告警的指标');
+});
+
+test('分片模式下口令回源抛错：同样 503，不得退化成无凭证注册', async () => {
+  const created = await createHub({
+    shardCount: '2',
+    shardName: 'signaling-shard-1',
+    shareCodeLookup: 'stub',
+    signalingHub: {
+      respond: (call) => {
+        if (call.url.endsWith(SHARE_CODE_LOOKUP_URL)) throw new Error('shard 0 unreachable');
+        return { status: 200, body: { allowed: true, granted: true } };
+      },
+    },
+  });
+
+  const response = await upgrade(created.hub, 'peerId=AERO-LOOKUPTHROW', '198.51.100.244');
+  await created.settle();
+
+  assert.equal(response.status, 503);
+  assert.equal(response.webSocket, null);
+  assert.equal(created.sockets.length, 0);
 });
