@@ -128,7 +128,7 @@
 
 对应 `docs/design-scale-out.md` §8.4：commit 自愈、分片回源 fail-closed、并发双开守卫、注册编排 plan、屏幕共享失败路径与 E2E、真实 SQLite 契约测试、CI 覆盖率守卫与浏览器侧 E2E。
 
-CI 覆盖范围（准确说法）：`verify`（typecheck + 单测 + services/src 与 components 两个 scope 的覆盖率分母守卫 + build）、`e2e`（chromium，只跑 sender-sharing / receiver-recovery）、`e2e-product`（真实 `wrangler dev` + workerd，跑 product-transfer 3 条与 screenshare 9 条）。局限：CI 只在 push/PR 上跑，**不拦 Cloudflare Git 集成的部署**——推 main 仍会直接构建发布，CI 红不阻止上线，除非在 GitHub 分支保护里把这几个 job 设为必需检查。
+CI 覆盖范围（**当时（阶段 6）的结构**）：`verify`（typecheck + 单测 + 两个 scope 的覆盖率分母守卫 + build）、`e2e`（chromium，只跑 sender-sharing / receiver-recovery）、`e2e-product`（真实 `wrangler dev` + workerd，跑 product-transfer 3 条与 screenshare 9 条）。后续变化：阶段 10 起组件门禁拆成独立的 `coverage-components` job（不进 `verify`），screenshare 用例增至 10 条——当前结构见 `.github/workflows/ci.yml`。局限：CI 只在 push/PR 上跑，**不拦 Cloudflare Git 集成的部署**——推 main 仍会直接构建发布，CI 红不阻止上线，除非在 GitHub 分支保护里把这几个 job 设为必需检查。
 状态: 完成 (第二轮复评补齐：安全 3 条 / 产品 6 条 / 工程 SQLite 契约 + 覆盖率门槛 + CI E2E, 2026-11-13)
 
 ## 阶段 7：第三轮复评（95 分循环）后的收口（2026-11-14）

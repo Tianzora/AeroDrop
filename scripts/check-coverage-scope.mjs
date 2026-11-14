@@ -135,7 +135,7 @@ const SCOPES = {
       ],
       [
         'components/ScreenShare.tsx',
-        '没有任何组件测试 import 它 —— 注意不是「加载不了」：signaling 基址惰性化之后它已经能在 Node 里 import（实测通过），缺的是加载它的测试。渲染依赖真实屏幕采集 getDisplayMedia、RTCPeerConnection 与信令握手，没有这些 API 的替身就跑不出状态机（只会是 0% 行覆盖率）；共享/恢复/满员流程由 test:e2e:product-transfer 的 9 条 screenshare 用例覆盖',
+        '没有任何组件测试 import 它 —— 注意不是「加载不了」：signaling 基址惰性化之后它已经能在 Node 里 import（实测通过），缺的是加载它的测试。渲染依赖真实屏幕采集 getDisplayMedia、RTCPeerConnection 与信令握手，没有这些 API 的替身就跑不出状态机（只会是 0% 行覆盖率）；共享/恢复/满员流程由 test:e2e:product-transfer 的 10 条 screenshare 用例覆盖',
       ],
       [
         'components/Sender.tsx',
