@@ -181,3 +181,14 @@ WS 凭证移出 URL query（`Sec-WebSocket-Protocol`）、读路径不再写库�
 - 门禁实测：typecheck 0；services 711 / components 46 / scripts 14；`services/signaling` 174/174；两个 scope 覆盖率守卫 OK（services 91.27/83.83/84.69、components 65.30/70.43/42.86，预算 75.44% ≤ 80%）；e2e 9 passed；product-transfer 13 passed；build 716.04 kB。
 
 状态: 完成 (第十二轮复评 must-fix 全部收口；门禁全绿，待推送与复评, 2026-11-14)
+
+## 阶段 12：第十三轮复评后的收口（2026-11-14）
+
+对应 `docs/design-scale-out.md` §8.15。三项复评（安全 92 / 产品 88 / 工程 90）的 must-fix 逐条收口：
+
+- 安全：全局名额的「让出旧行」改成两阶段（reserve 只排除计数、不删行；registered 成功后才按 slotId + releaseToken 条件删除），杜绝「接管方在名额 RPC 途中断开 → 旧会话名额被永久吞掉」；分片模式新增 `action: 'replace'` RPC 与 `signal_session_slot_replace_failed` 指标。
+- 产品：观众把「分享者不在线」单独分类（`sharer-unavailable`），不再先说「人数已满」再说「分享者暂时不在线」；推断分支通知改「可能人数已满」；终态卡的 `hadShareLink` 让「从未生成链接」与「链接已失效」两种失败各自说真话。
+- 工程：CI 注释与设计文档的覆盖率/余量数字改为实测值并纠正「为什么先红」的归因；「当前」指针统一指向 §8.15；新增 `scripts/e2e-suite-inventory.test.ts` 机械绑定 screenshare / product-transfer 用例数（连续三轮漂移终结）；`FRAME_TIMEOUT_MS` 30s → 45s 只吸收抖动。
+- 门禁实测：typecheck 0；services 714 / components 47 / scripts 16；`services/signaling` 175/175；两个 scope 守卫 OK（services 118 文件 91.33/83.76/84.72，components 13 文件 65.43/71.43/42.86，预算 75.44% ≤ 80%）；self-test 19+5+3；e2e 9 passed；product-transfer 13 passed。
+
+状态: 完成 (第十三轮复评 must-fix 全部收口；门禁全绿，待推送与复评, 2026-11-14)
