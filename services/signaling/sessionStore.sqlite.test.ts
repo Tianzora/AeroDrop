@@ -182,15 +182,29 @@ test('槽位在真实库上按 client 计数、同 slot 转移、可续期与释
     '同一个 client 超过上限必须被拒'
   );
 
-  // 同一个 slotId 再领取是「转移/续期」，不是再占一个名额，也不应被上限挡住。
+  // 同一个 slotId + 同一个 token：同一条连接的重试，续期且不改归属。
   assert.equal(
-    applySessionSlotReserve(sql, { slotId: 'slot-a', clientKey: 'ip:2', releaseToken: 'tok-a2', now: now + 1, maxSessions: 2, ttlMs }),
+    applySessionSlotReserve(sql, { slotId: 'slot-a', clientKey: 'ip:1', releaseToken: 'tok-a', now: now + 1, maxSessions: 2, ttlMs }),
     true
   );
-  const transferred = db
-    .prepare("SELECT client_key FROM signaling_session_slots WHERE slot_id = 'slot-a'")
-    .get() as { client_key: string };
-  assert.equal(transferred.client_key, 'ip:2');
+  const retried = db
+    .prepare("SELECT client_key, release_token FROM signaling_session_slots WHERE slot_id = 'slot-a'")
+    .get() as { client_key: string; release_token: string };
+  assert.equal(retried.client_key, 'ip:1');
+  assert.equal(retried.release_token, 'tok-a');
+  assert.equal(countRows(db, 'signaling_session_slots'), 2);
+
+  // 同一个 slotId + 别的 token：拒绝，且不覆盖原归属（这正是并发接管里落败方
+  // 改写胜出方名额、随后把行删掉的旧路径，必须彻底关掉）。
+  assert.equal(
+    applySessionSlotReserve(sql, { slotId: 'slot-a', clientKey: 'ip:2', releaseToken: 'tok-a2', now: now + 1, maxSessions: 2, ttlMs }),
+    false
+  );
+  const untouched = db
+    .prepare("SELECT client_key, release_token FROM signaling_session_slots WHERE slot_id = 'slot-a'")
+    .get() as { client_key: string; release_token: string };
+  assert.equal(untouched.client_key, 'ip:1');
+  assert.equal(untouched.release_token, 'tok-a');
   assert.equal(countRows(db, 'signaling_session_slots'), 2);
 
   assert.equal(applySessionSlotRenew(sql, { slotId: 'slot-a', now: now + 2, ttlMs }), true);
@@ -202,14 +216,10 @@ test('槽位在真实库上按 client 计数、同 slot 转移、可续期与释
   // 归属不符的释放必须是空操作：并发接管里落败的一方复用同一个 slotId 回滚，
   // 裸删会把胜出方刚投递完 registered 的名额一起删掉（全局上限被悄悄放宽）。
   // 归属凭证是每连接自铸的 releaseToken，不是 clientKey（同一 NAT 出口全相同）。
-  const transferredToken = db
-    .prepare("SELECT release_token FROM signaling_session_slots WHERE slot_id = 'slot-a'")
-    .get() as { release_token: string };
-  assert.equal(transferredToken.release_token, 'tok-a2');
-  applySessionSlotRelease(sql, 'slot-a', 'tok-a');
-  assert.equal(countRows(db, 'signaling_session_slots'), 2, '别的连接不能删掉 tok-a2 的名额');
-
   applySessionSlotRelease(sql, 'slot-a', 'tok-a2');
+  assert.equal(countRows(db, 'signaling_session_slots'), 2, '别的连接不能删掉 tok-a 的名额');
+
+  applySessionSlotRelease(sql, 'slot-a', 'tok-a');
   assert.equal(countRows(db, 'signaling_session_slots'), 1);
   assert.equal(applySessionSlotRenew(sql, { slotId: 'slot-a', now: now + 3, ttlMs }), false);
   db.close();
@@ -437,9 +447,19 @@ test('RETURNING 写入的 rowsWritten 取 changes，而不是返回的行数', (
       ttlMs: 60_000,
     });
   assert.equal(reserve('client-1', 1_000), true);
-  // 同 slot 的原地转移只写一行；若 rowsWritten 用 rows.length 而不是 changes，
-  // 「没写进去」也会被当成成功。
-  assert.equal(reserve('client-2', 2_000), true);
+  // 同一条连接重试：只更新过期时间这一行，必须返回 true。
+  assert.equal(reserve('client-1', 2_000), true);
+  // 而「一行都没写」必须能让调用方看出来：rowsWritten 取 changes 而不是
+  // RETURNING 的行数，否则删掉别人的名额也会被当成成功。
+  const noop = sql.exec('DELETE FROM signaling_session_slots WHERE slot_id = ?', 'slot-missing');
+  assert.equal(noop.rowsWritten, 0, '零行写入必须报 0');
+  // 别的连接拿同一个 slotId 换 token 来抢归属：拒绝，且行一个字节都不变。
+  assert.equal(reserve('client-2', 3_000), false);
+  const row = db
+    .prepare("SELECT client_key, release_token FROM signaling_session_slots WHERE slot_id = 'slot-a'")
+    .get() as { client_key: string; release_token: string };
+  assert.equal(row.client_key, 'client-1');
+  assert.equal(row.release_token, 'tok-client-1');
   db.close();
 });
 

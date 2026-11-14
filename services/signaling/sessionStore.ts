@@ -419,8 +419,12 @@ export const initializeSessionSlotSchema = (sql: SqlLike): void => {
 
 /**
  * 原子语义的近似：先清过期槽位，再数一次、插一条。DO 内单线程执行，无并发窗口。
- * 同一个 slotId 已存在时是「接管续期」而不是新占名额：直接改归属与过期时间，
- * 否则接管方要先释放再领取，领取失败就把旧会话的名额白白吃掉。
+ *
+ * slotId 由 worker 每条连接现铸，接管也不例外；接管通过 `replaces` 在一次决策里让出
+ * 旧行（先判断上限、通过后才按 token 条件删除）。因此这里**没有**「接管复用旧 slotId」
+ * 的路径：命中已存在的 slotId 只可能是同一条连接带着同一个 slotId 重试（例如 RPC 重试）。
+ * 那种情况只允许 token 相同的续期，token 不符一律拒绝——按 slotId 改写归属正是
+ * 「并发接管的落败方删掉胜出方名额」的成因，不要再把这个分支放回来。
  *
  * releaseToken 是每条连接自己铸的随机串，用来回答「这行名额是谁的」。不能拿
  * clientKey 代替：它是出口 IP，同一 CGNAT 下多条连接完全相同。
@@ -440,15 +444,21 @@ export const applySessionSlotReserve = (
 ): boolean => {
   sql.exec('DELETE FROM signaling_session_slots WHERE expires_at <= ?', input.now);
   const existing = sql
-    .exec<{ slot_id: string }>('SELECT slot_id FROM signaling_session_slots WHERE slot_id = ?', input.slotId)
+    .exec<{ slot_id: string; release_token: string }>(
+      'SELECT slot_id, release_token FROM signaling_session_slots WHERE slot_id = ?',
+      input.slotId
+    )
     .toArray();
   if (existing.length > 0) {
+    // 只可能是同一条连接的重试：token 对得上就是续期，对不上直接拒（不改写归属）。
+    if (existing[0]?.release_token !== input.releaseToken) {
+      return false;
+    }
     sql.exec(
-      'UPDATE signaling_session_slots SET client_key = ?, release_token = ?, expires_at = ? WHERE slot_id = ?',
-      input.clientKey,
-      input.releaseToken,
+      'UPDATE signaling_session_slots SET expires_at = ? WHERE slot_id = ? AND release_token = ?',
       input.now + input.ttlMs,
-      input.slotId
+      input.slotId,
+      input.releaseToken
     );
     return true;
   }

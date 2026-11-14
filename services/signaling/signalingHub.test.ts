@@ -1059,6 +1059,7 @@ test('并发接管同一会话：事后只剩一条名额，且它归属已注�
   let upgradeB: Promise<FakeResponse> | null = null;
   // 第 1 次是旧会话自己注册，第 2 次才是第一个接管方：此刻让第二个接管方完整落定。
   let reserveCalls = 0;
+  const reserveBodies: { slotId: string; releaseToken: string }[] = [];
 
   const created = await createHub({
     shardCount: '2',
@@ -1077,6 +1078,10 @@ test('并发接管同一会话：事后只剩一条名额，且它归属已注�
           | null;
         const sql = () => createSqlite(handle.current!.db);
         if (body?.action === 'reserve') {
+          reserveBodies.push({
+            slotId: body.slotId ?? '',
+            releaseToken: body.releaseToken ?? '',
+          });
           // 第一个接管方让出事件循环：等第二个接管方完整落定之后再返回自己的 reserve 结果。
           reserveCalls += 1;
           if (reserveCalls === 2) {
@@ -1155,6 +1160,28 @@ test('并发接管同一会话：事后只剩一条名额，且它归属已注�
     }),
     true,
     '胜出方的名额必须还能续期，否则全局计数会退化成每片各算一次'
+  );
+
+  // 归属凭证必须是一条连接一个：如果 worker 这里写成常量（或复用别的连接的值），
+  // 「按 token 条件删除」就退化成「按 slotId 盲删」，并发接管时落败方又会删掉胜出方。
+  assert.equal(reserveBodies.length, 3, '旧会话 + 两个接管方各 reserve 一次');
+  assert.equal(
+    new Set(reserveBodies.map((reserve) => reserve.releaseToken)).size,
+    reserveBodies.length,
+    '每条连接都必须自铸唯一的 releaseToken'
+  );
+  assert.equal(
+    new Set(reserveBodies.map((reserve) => reserve.slotId)).size,
+    reserveBodies.length,
+    '每条连接都必须新铸 slotId，不得复用旧会话的那一个'
+  );
+  const ownerAttachment = owner.deserializeAttachment() as { slotReleaseToken?: string };
+  assert.ok(ownerAttachment.slotReleaseToken !== undefined);
+  assert.ok(
+    reserveBodies
+      .slice(1)
+      .every((reserve) => reserve.releaseToken !== ownerAttachment.slotReleaseToken),
+    '接管方的 token 不能等于被顶替会话的 token'
   );
 });
 

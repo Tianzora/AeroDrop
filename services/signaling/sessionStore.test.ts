@@ -363,17 +363,45 @@ test('slot reserve grants one seat per client, transfers an existing slot, and e
   );
   assert.equal(index, 4, 'reserve runs delete → select → count → insert');
 
-  // 同一个 slotId 已存在：原地转移归属并续期，不再数名额。
-  const transferCalls: string[] = [];
-  const transferSql: SqlLike = {
+  // 同一个 slotId + 同一个 token：同一条连接的重试，续期即可，不再数名额。
+  const retryCalls: string[] = [];
+  const retrySql: SqlLike = {
     exec<T = Record<string, unknown>>(text: string) {
-      transferCalls.push(text);
-      if (text.startsWith('SELECT slot_id')) return { toArray: () => [{ slot_id: 'slot-a' }] as T[] };
+      retryCalls.push(text);
+      if (text.startsWith('SELECT slot_id')) {
+        return { toArray: () => [{ slot_id: 'slot-a', release_token: 'tok-1' }] as T[] };
+      }
       return { toArray: () => [] as T[] };
     },
   };
   assert.equal(
-    applySessionSlotReserve(transferSql, {
+    applySessionSlotReserve(retrySql, {
+      slotId: 'slot-a',
+      clientKey: 'ip:1',
+      releaseToken: 'tok-1',
+      now: 100,
+      maxSessions: 2,
+      ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
+    }),
+    true
+  );
+  assert.ok(retryCalls.some((text) => text.startsWith('UPDATE signaling_session_slots')));
+  assert.ok(!retryCalls.some((text) => text.startsWith('SELECT COUNT(*)')));
+
+  // 同一个 slotId + 别的 token：拒绝，且一个字节都不改。改写归属正是并发接管里
+  // 「落败方删掉胜出方名额」的成因，这条分支不允许存在。
+  const foreignCalls: string[] = [];
+  const foreignSql: SqlLike = {
+    exec<T = Record<string, unknown>>(text: string) {
+      foreignCalls.push(text);
+      if (text.startsWith('SELECT slot_id')) {
+        return { toArray: () => [{ slot_id: 'slot-a', release_token: 'tok-1' }] as T[] };
+      }
+      return { toArray: () => [] as T[] };
+    },
+  };
+  assert.equal(
+    applySessionSlotReserve(foreignSql, {
       slotId: 'slot-a',
       clientKey: 'ip:2',
       releaseToken: 'tok-2',
@@ -381,10 +409,9 @@ test('slot reserve grants one seat per client, transfers an existing slot, and e
       maxSessions: 2,
       ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
     }),
-    true
+    false
   );
-  assert.ok(transferCalls.some((text) => text.startsWith('UPDATE signaling_session_slots')));
-  assert.ok(!transferCalls.some((text) => text.startsWith('SELECT COUNT(*)')));
+  assert.ok(!foreignCalls.some((text) => text.startsWith('UPDATE signaling_session_slots')));
 
   // 名额已满：拒绝，且不落 INSERT。
   const fullCalls: string[] = [];
