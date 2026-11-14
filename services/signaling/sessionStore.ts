@@ -493,10 +493,10 @@ export const applySessionSlotReserve = (
 /**
  * 释放名额。
  *
- * 必须能只删「自己那张」：并发接管时落败的一方也会走回滚，而它复用同一个 slotId，
- * 裸删会把胜出方刚拿到（并已投递 registered）的名额一起删掉——全局上限被悄悄放宽。
- * 传 releaseToken 时按归属条件删除；token 由每条连接自己铸，接管方会用自己的 token
- * 重新领取同一行，所以落败方的回滚永远删不掉胜出方的名额。
+ * 必须能只删「自己那张」：并发接管时落败的一方也会走回滚，裸删（按 slotId 或按
+ * clientKey）会把胜出方刚拿到、并已投递 registered 的名额一起删掉——全局上限被悄悄
+ * 放宽。传 releaseToken 时按归属条件删除；token 由每条连接自己铸，所以落败方的回滚
+ * 永远删不掉胜出方的行。
  */
 export const applySessionSlotRelease = (
   sql: SqlLike,

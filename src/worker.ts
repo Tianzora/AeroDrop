@@ -1210,11 +1210,10 @@ export class SignalingHub extends DurableObject<Env> {
         return acceptClient(client);
       },
       reserveGlobalSlot: async () => {
-        // 接管时复用旧槽位（reserve 会原地续期并转移归属）。先释放再领取的话，一旦领取
-        // 失败，旧会话的名额就白丢了；反复尝试可以把全局上限压到 0。
         // 每条连接都拿一个自己的槽位 id：并发接管时若两条连接共用旧会话的 slotId，
         // 后领的一方会把 release_token 改写成自己，落败方回滚就把胜出方的名额删了。
-        // 旧名额通过 replaces 在一次决策里让出（条件删除，token 必须对得上）。
+        // 旧名额通过 replaces 在一次决策里让出（条件删除，token 必须对得上），所以这里
+        // 不需要「先释放再领取」那种会丢名额的做法。
         const slotId = crypto.randomUUID();
         const replaces =
           isTakeover && existingAttachment?.slotId && existingAttachment.slotReleaseToken
@@ -1234,10 +1233,9 @@ export class SignalingHub extends DurableObject<Env> {
             });
             // 响应丢了，但 shard 0 可能已经写进这张新 slotId。不回收的话，每次重试都留
             // 一行孤儿名额，12 次就能把整片名额占满到 TTL（6h）——下次成功的重试反而被拒。
-            // 只有本次新铸的 id 才回收；接管复用旧会话的 slotId，删它等于删别人的名额。
-            if (!isTakeover) {
-              this.ctx.waitUntil(this.releaseSignalingSessionSlot(slotId, slotReleaseToken));
-            }
+            // 每条连接都新铸 slotId（接管也一样），所以这里无条件按本次 token 回收即可；
+            // token 不匹配时条件删除不会命中别人的行。
+            this.ctx.waitUntil(this.releaseSignalingSessionSlot(slotId, slotReleaseToken));
             slotUnavailable = true;
             return null;
           }
@@ -1515,12 +1513,12 @@ export class SignalingHub extends DurableObject<Env> {
     const slotId = this.slotBySocket.get(ws);
     if (slotId) {
       this.slotBySocket.delete(ws);
-      // 接管会把同一个槽位转给新 socket：旧 socket 退出时只清自己的映射。
+      // 每条连接都有自己新铸的槽位：这里只清自己的映射，别踩到别人。
       if (this.slotOwnerSocket.get(slotId) === ws) {
         this.slotOwnerSocket.delete(slotId);
         // 释放是尽力而为：计数失败最多让名额晚一点回收（有 TTL 兜底），不能影响关闭流程。
-        // 带上本连接自己的 releaseToken 只删自己那张：并发接管时旧 socket 与胜出方
-        // 共用同一个 slotId，而 clientKey 在同一个出口 IP 下完全相同。
+        // 带上本连接自己的 releaseToken 只删自己那张：同一出口 IP 下 clientKey 完全相同，
+        // 靠它做归属等于没有归属（并发接管会互删名额）。
         const releaseToken = (
           ws.deserializeAttachment() as SessionAttachment | null
         )?.slotReleaseToken;

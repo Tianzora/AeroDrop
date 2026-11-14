@@ -1439,6 +1439,62 @@ test('shard 0 名额表不可达：升级回 503 + Retry-After，而不是放行
   assert.ok(!events.includes('signal_session_slot_rejected'), '故障不能被记成「满了」');
 });
 
+test('接管时名额 RPC 丢响应：本次新铸的 slotId 必须按自己的 token 回收，不留孤儿行', async () => {
+  // 每条连接（含接管）都新铸 slotId，所以 unavailable 分支无条件回收是安全的；早期实现
+  // 沿用了「接管复用旧 slotId，删它等于删别人的名额」的旧假设写成 if (!isTakeover)，
+  // 于是接管 + shard 0 抖动时每次都漏一行到 TTL，12 次后同出口全部收 4029。
+  const reserves: { slotId: string; releaseToken: string }[] = [];
+  const releases: { slotId: string; releaseToken: string | undefined }[] = [];
+  const created = await createHub({
+    shardCount: '2',
+    shardName: 'signaling-shard-1',
+    maxSessions: '1',
+    signalingHub: {
+      respond: (call) => {
+        const body = call.body as
+          | { action?: string; slotId?: string; releaseToken?: string }
+          | null;
+        if (call.url.endsWith('/internal/session-binding')) {
+          return { status: 200, body: { allowed: true } };
+        }
+        if (call.url.endsWith('/internal/session-slot') && body?.action === 'release') {
+          releases.push({ slotId: body.slotId ?? '', releaseToken: body.releaseToken });
+          return { status: 200, body: { released: true } };
+        }
+        if (call.url.endsWith('/internal/session-slot') && body?.action === 'reserve') {
+          reserves.push({
+            slotId: body.slotId ?? '',
+            releaseToken: body.releaseToken ?? '',
+          });
+          if (reserves.length === 1) return { status: 200, body: { granted: true } };
+          return { status: 500, body: { error: 'shard 0 lost the response' } };
+        }
+        return { status: 200, body: {} };
+      },
+    },
+  });
+
+  const owner = serverOf((await upgrade(created.hub, 'peerId=AERO-SLOTORPHAN', '203.0.113.62')).webSocket);
+  await created.settle();
+  assert.equal(owner.lastMessage()?.type, 'registered', '第一条会话必须先注册成功');
+  assert.equal(reserves.length, 1);
+
+  // 接管同一条会话，但 shard 0 这次把响应丢了（500）。
+  const takeover = await upgrade(created.hub, 'peerId=AERO-SLOTORPHAN', '203.0.113.63');
+  await created.settle();
+
+  assert.equal(takeover.status, 503, '名额服务不可达必须回 503，让客户端稍后重试');
+  assert.equal(reserves.length, 2);
+  const orphan = reserves[1]!;
+  assert.notEqual(orphan.slotId, reserves[0]!.slotId, '接管也必须新铸 slotId，而不是复用旧会话那个');
+  assert.equal(releases.length, 1, '接管路径也必须回收本次新铸的 slotId，否则每次抖动都漏一行');
+  assert.equal(releases[0]!.slotId, orphan.slotId);
+  assert.equal(releases[0]!.releaseToken, orphan.releaseToken, '回收必须带本次连接的 token');
+  assert.notEqual(releases[0]!.slotId, reserves[0]!.slotId, '不能删掉旧会话（仍然在线）那一行');
+  assert.equal(owner.lastMessage()?.type, 'registered', '接管失败不能影响仍在线的旧会话');
+  assert.equal(owner.closed, null, '旧 socket 不该被这次失败的接管关掉');
+});
+
 test('口令重登记撞车：旧活跃码必须原样保留，只有分配成功后才清理自己的旧码', async () => {
   const created = await createHub({ shardCount: '1' });
   const call = (body: Record<string, unknown>): Promise<Response> =>

@@ -254,7 +254,9 @@ test('接管换名额：旧行靠 token 条件让出，并发接管事后只剩�
   assert.equal(remaining[0].slot_id, 'slot-new');
   assert.equal(remaining[0].release_token, 'tok-new');
 
-  // token 对不上的 replaces 不能删别人的名额，也不能绕过上限。
+  // token 对不上的 replaces 不能删别人的名额，也不能绕过上限：那行现在归属 tok-new。
+  // （旧版本这里把 replaces.slotId 指向已经消失的 slot-old，等于只测了「陈旧 replaces」，
+  // 把 token 条件整个删掉也不会红。）
   assert.equal(
     applySessionSlotReserve(sql, {
       slotId: 'slot-intruder',
@@ -263,12 +265,18 @@ test('接管换名额：旧行靠 token 条件让出，并发接管事后只剩�
       now,
       maxSessions: 1,
       ttlMs,
-      replaces: { slotId: 'slot-old', releaseToken: 'tok-old' },
+      replaces: { slotId: 'slot-new', releaseToken: 'tok-old' },
     }),
     false,
-    '旧行已经消失，第二个接管方必须自己撞上限'
+    'replaces 的 token 对不上就不能让出别人的名额，接管方必须自己撞上限'
   );
   assert.equal(countRows(db, 'signaling_session_slots'), 1);
+  assert.equal(
+    (db.prepare('SELECT release_token FROM signaling_session_slots').get() as { release_token: string })
+      .release_token,
+    'tok-new',
+    '失败的那次 reserve 不许改写别人那行的归属'
+  );
 
   // 并发接管的落败方回滚：只按自己的 token 删，删不到胜出方那一行。
   applySessionSlotRelease(sql, 'slot-new', 'tok-intruder');
