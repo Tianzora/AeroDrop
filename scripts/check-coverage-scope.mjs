@@ -22,11 +22,16 @@
  *
  * 另有第二道校验「报告行数 >= 期望文件数 - 白名单」：解析正则一旦被上游输出格式改动
  * 打破，这里直接失败，而不是安静地漏掉一批文件。
+ *
+ * 白名单本身也有预算（每个 scope 的 `allowlistBudget`）：条目数上限 + 被排除行数占本
+ * scope 总行数的比例上限。没有这条，白名单可以一路自我扩张 —— 每加一条，「报告行数 >=
+ * 期望 - 白名单」这条校验还会自动跟着放宽，最后「组件 60%」只覆盖四分之一的代码。
+ * `--self-test` 校验规则本身（合成 fixture）；行数占比的判定发生在 `--scope=...` 运行时。
  */
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
-import { existsSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
 
@@ -58,6 +63,23 @@ const listTrackedSources = (dirs) => {
 };
 
 /**
+ * 工作树里的全部路径：已跟踪 + 未跟踪但没被 ignore 的文件（测试文件也在内）。
+ * 白名单理由里引用的测试文件属于这一类 —— 它们永远不会出现在 listTrackedSources
+ * 的结果里（那里刻意滤掉了 *.test.*），拿那份清单校验存在性必然把真文件误报成
+ * 「不存在」，于是这条检查永远为真，等于没有检查。
+ */
+const listKnownPaths = () => {
+  const listed = execFileSync('git', ['ls-files', '-co', '--exclude-standard'], {
+    cwd: root,
+    encoding: 'utf8',
+  })
+    .split(NEWLINE)
+    .map((line) => line.trim())
+    .filter(Boolean);
+  return new Set(listed);
+};
+
+/**
  * 允许暂时不进入覆盖率分母的例外。新文件默认必须被测试加载；只有登记在这里、
  * 且写了理由的文件才不会让守卫失败。加新条目等于承认这块没有回归证据，别随手加。
  */
@@ -72,6 +94,9 @@ const SCOPES = {
     coverageExclude: ['components/**', 'constants/**', 'types/**', 'e2e/**', 'scripts/**'],
     suiteTargets: ['services'],
     defaults: { minLines: '85', minBranches: '78', minFunctions: '75' },
+    // 白名单预算：2 条 / 5% 行。现在是 2 条共 152 行（0.88%），余量只留给「Node 里
+    // 真的加载不了」的新文件；超了说明有人在把整块逻辑挪出分母。
+    allowlistBudget: { maxEntries: 2, maxExcludedLineShare: 0.05 },
     allowedUncovered: new Map([
       [
         'services/crc32.worker.ts',
@@ -96,6 +121,13 @@ const SCOPES = {
     // import 它们。没有这条冒烟，它们永远进不了分母，守卫就又变成一句空话。
     suiteTargets: ['components', 'scripts/component-import-smoke.test.ts'],
     defaults: { minLines: '60', minBranches: '58', minFunctions: '40' },
+    // 白名单预算：3 条 / 80% 行。现在是 3 条共 ~7.9k/10.4k 行（约 76%），也就是说组件
+    // 门禁实际只在约四分之一的组件代码上算覆盖率，两个最大的状态机（ScreenShare、
+    // Receiver）没有 Node 级回归网，只有 e2e。上限定在 80% 而不是「比现状松一点」：
+    // 再多挪一个中等文件进来就会红——每加一条白名单，minimumReported 还会自动跟着降，
+    // 60% 的分母会越来越小。要真正降下来，只能把可测的状态机逻辑抽到 services/ 再写
+    // 单测，或补组件渲染测试（需要新增依赖，本项目不加）。
+    allowlistBudget: { maxEntries: 3, maxExcludedLineShare: 0.8 },
     allowedUncovered: new Map([
       [
         'components/Receiver.tsx',
@@ -103,11 +135,11 @@ const SCOPES = {
       ],
       [
         'components/ScreenShare.tsx',
-        '没有任何组件测试 import 它：整棵树依赖真实屏幕采集（getDisplayMedia）、RTCPeerConnection 与信令，Node 里 import 得进来但渲染不出有意义的状态（只会是 0% 行覆盖率）；共享/恢复/满员流程由 test:e2e:product-transfer 的 9 条 screenshare 用例覆盖',
+        '没有任何组件测试 import 它 —— 注意不是「加载不了」：signaling 基址惰性化之后它已经能在 Node 里 import（实测通过），缺的是加载它的测试。渲染依赖真实屏幕采集 getDisplayMedia、RTCPeerConnection 与信令握手，没有这些 API 的替身就跑不出状态机（只会是 0% 行覆盖率）；共享/恢复/满员流程由 test:e2e:product-transfer 的 9 条 screenshare 用例覆盖',
       ],
       [
         'components/Sender.tsx',
-        '没有任何组件测试 import 它：渲染需要真实 RTCPeerConnection、文件选择与 DataChannel，Node 里 import 得进来但跑不出状态机；传输路由/重试/分片已经抽到 services/send/（有单测），组件层由 test:e2e 的 sender-sharing 用例覆盖',
+        '没有任何组件测试 import 它 —— 注意不是「加载不了」：它本身能在 Node 里 import（实测通过），缺的是加载它的测试。渲染需要真实 RTCPeerConnection、文件选择与 DataChannel，没有替身就跑不出状态机；传输路由/重试/分片已经抽到 services/send/ 并有单测，组件层由 test:e2e 的 sender-sharing 用例覆盖',
       ],
     ]),
   },
@@ -219,6 +251,46 @@ const evaluateThresholds = ({ aggregate, thresholds }) => {
 };
 
 /**
+ * 白名单预算：条目会把文件整块挪出分母，而 `minimumReported` 恰好跟着条目数一起
+ * 下降 —— 于是「组件门槛」可以一路变成空话。两个机械上限：条目数（政策）与被排除
+ * 行数占本 scope 总行数的比例（真实口径）。
+ */
+const countSourceLines = (file) => {
+  const content = readFileSync(path.join(root, file), 'utf8');
+  let lines = 0;
+  for (const char of content) if (char === NEWLINE) lines += 1;
+  if (!content.endsWith(NEWLINE)) lines += 1;
+  return lines;
+};
+
+const evaluateAllowlistBudget = ({ entries, totalLines, budget }) => {
+  const entryFailures = [];
+  const shareFailures = [];
+  if (!Number.isFinite(budget.maxEntries)) {
+    entryFailures.push(`白名单条目上限配置不是数字（收到 ${budget.maxEntries}）`);
+  } else if (entries.length > budget.maxEntries) {
+    entryFailures.push(
+      `白名单条目 ${entries.length} 条，超过上限 ${budget.maxEntries} 条：` +
+        '加例外等于承认这块没有回归证据，先删旧条目，或明确提高上限并在评审里解释'
+    );
+  }
+  const excludedLines = entries.reduce((sum, entry) => sum + entry.lines, 0);
+  const share = totalLines > 0 ? excludedLines / totalLines : 0;
+  if (totalLines > 0 && share > budget.maxExcludedLineShare) {
+    shareFailures.push(
+      `白名单把 ${excludedLines}/${totalLines} 行（${(share * 100).toFixed(2)}%）整块挪出了分母，` +
+        `超过上限 ${(budget.maxExcludedLineShare * 100).toFixed(0)}%：` +
+        '要么把这些文件真正加载进 Node 测试，要么把可测的状态机逻辑抽到 services/ 再写单测'
+    );
+  }
+  return { entryFailures, shareFailures, excludedLines, totalLines, share };
+};
+
+const formatAllowlistBudget = ({ excludedLines, totalLines, share }, budget) =>
+  `白名单预算 ${excludedLines}/${totalLines} 行（${(share * 100).toFixed(2)}%，` +
+  `上限 ${(budget.maxExcludedLineShare * 100).toFixed(0)}%），条目上限 ${budget.maxEntries} 条`;
+
+/**
  * 把报告行映射回 git 清单里的相对路径。
  * - 先比完整相对路径（`services/x/y.ts` 就是 git 里的相对路径）；
  * - 再比路径后缀：Node 报告印的是相对「各组公共根」的路径，components 组里
@@ -314,6 +386,23 @@ const describeFailures = (state) => {
 // --self-test：用内联 fixture 固定「报告格式 + 判定规则」，上游输出格式一变就红。
 // ---------------------------------------------------------------------------
 
+/**
+ * 白名单理由的机械校验：理由要够长，且里面引用的测试文件必须真实存在（查工作树，
+ * 含未跟踪文件）。理由里写「已有单测 X」而 X 不存在，是最容易混过去的假理由。
+ */
+const auditAllowlistReason = ({ reason, knownPaths }) => {
+  const failures = [];
+  if (typeof reason !== 'string' || reason.trim().length < 20) {
+    failures.push('理由太短，写清楚真实约束（为什么它不能在 Node 里被测）');
+  }
+  for (const referenced of reason.match(/[\w./-]+\.test\.tsx?/g) ?? []) {
+    if (!knownPaths.has(referenced)) {
+      failures.push(`理由引用了不存在的测试文件 ${referenced}`);
+    }
+  }
+  return failures;
+};
+
 const SELF_TEST_CASES = [
   {
     name: 'ℹ 行（本地 Node 24）能解析',
@@ -396,19 +485,24 @@ const SELF_TEST_CASES = [
     wantFailure: null,
   },
   {
-    name: '分组缩进的裸文件名按目录栈还原（services 组印成 send/X.ts）',
-    report:
-      '\u2139 services                     |        |          |         |' +
-      NEWLINE +
-      '\u2139  send                        |        |          |         |' +
-      NEWLINE +
-      '\u2139   sendFileSequence.ts        |  90.00 |   70.00 |   50.00 |' +
-      NEWLINE +
-      '\u2139 all files                    |  90.00 |   70.00 |   50.00 |',
-    expected: ['services/send/sendFileSequence.ts'],
+    // 这条 fixture 专治「目录栈被绕过」：两个不同目录下都有 sendChunkSize.ts，报告里
+    // 只有目录行 + 裸文件名。目录栈正确时两行各自命中唯一文件；一旦 prefix 失效、裸名
+    // 退化成后缀匹配，两行就会同时命中两个文件（同名遮蔽）而判红。旧版本只放一个文件
+    // 时，后缀兜底会把它认成命中，这条检查其实什么都没测。
+    name: '分组缩进的裸文件名必须按目录栈还原（同名文件在另一目录也存在）',
+    report: [
+      '\u2139 services                  |        |          |         |',
+      '\u2139  transfer                 |        |          |         |',
+      '\u2139   sendChunkSize.ts        |  90.00 |   70.00 |   50.00 |',
+      '\u2139 src                       |        |          |         |',
+      '\u2139  transfer                 |        |          |         |',
+      '\u2139   sendChunkSize.ts        |  80.00 |   60.00 |   40.00 |',
+      '\u2139 all files                 |  85.00 |   65.00 |   45.00 |',
+    ].join(NEWLINE),
+    expected: ['services/transfer/sendChunkSize.ts', 'src/transfer/sendChunkSize.ts'],
     allowedUncovered: new Map(),
     wantFailure: null,
-    wantRowCount: 1,
+    wantRowCount: 2,
   },
   {
     name: '工作树里未跟踪的新文件只提示、不判红',
@@ -487,6 +581,60 @@ const SELF_TEST_CASES = [
   },
 ];
 
+// 白名单预算的 fixture：合成数据，只验证规则本身（条目数上限 / 行数占比上限）。
+const BUDGET_CASES = [
+  {
+    name: '白名单在预算内可以通过',
+    entries: [{ lines: 10 }, { lines: 20 }],
+    totalLines: 1000,
+    limit: { maxEntries: 2, maxExcludedLineShare: 0.7 },
+    wantFailure: null,
+  },
+  {
+    name: '白名单多一条就超条目上限，必须失败',
+    entries: [{ lines: 10 }, { lines: 20 }, { lines: 30 }],
+    totalLines: 1000,
+    limit: { maxEntries: 2, maxExcludedLineShare: 0.7 },
+    wantFailure: '超过上限 2 条',
+  },
+  {
+    name: '被排除行数占比超上限，必须失败',
+    entries: [{ lines: 700 }, { lines: 60 }],
+    totalLines: 1000,
+    limit: { maxEntries: 3, maxExcludedLineShare: 0.7 },
+    wantFailure: '超过上限 70%',
+  },
+  {
+    name: '条目上限配置坏掉，必须失败',
+    entries: [{ lines: 1 }],
+    totalLines: 10,
+    limit: { maxEntries: Number.NaN, maxExcludedLineShare: 0.7 },
+    wantFailure: '条目上限配置不是数字',
+  },
+];
+
+// 白名单理由的 fixture：knownPaths 是合成的，只验证「引用的测试文件必须存在」。
+const REASON_CASES = [
+  {
+    name: '理由引用真实存在的测试文件可以通过',
+    reason: '模块顶层读取 self，算法本体在 services/hashUtils.ts，已有单测 services/hashUtils.test.ts 覆盖',
+    knownPaths: ['services/hashUtils.test.ts'],
+    wantFailure: null,
+  },
+  {
+    name: '理由引用不存在的测试文件必须失败',
+    reason: '模块顶层读取 self，算法本体在 services/hashUtils.ts，已有单测 services/hashUtils.test.ts 覆盖',
+    knownPaths: ['services/connectionPolicy.test.ts'],
+    wantFailure: '不存在的测试文件 services/hashUtils.test.ts',
+  },
+  {
+    name: '理由太短必须失败',
+    reason: '跑不了',
+    knownPaths: [],
+    wantFailure: '理由太短',
+  },
+];
+
 const runSelfTest = () => {
   const failures = [];
   for (const testCase of SELF_TEST_CASES) {
@@ -540,23 +688,17 @@ const runSelfTest = () => {
     }
   }
 
-  // 白名单和排除项的卫生检查：条目过期、理由失真、把本 scope 自己排掉，都会让守卫
-  // 变成一句空话。这些检查是数据驱动的（直接读 git 清单），不是内联 fixture。
+  // 白名单和排除项的卫生检查：条目过期、理由失真、白名单悄悄扩张，都会让守卫变成
+  // 一句空话。这些检查是数据驱动的（直接读 git 清单与源码行数），不是内联 fixture。
   const allTracked = listTrackedSources(['.']);
+  const knownPaths = listKnownPaths();
   for (const [scopeName, scope] of Object.entries(SCOPES)) {
     for (const [file, reason] of scope.allowedUncovered) {
       if (!allTracked.includes(file)) {
         failures.push(`[${scopeName}] 白名单条目 ${file} 不在 git 清单里（条目已过期或路径写错）`);
       }
-      if (typeof reason !== 'string' || reason.trim().length < 20) {
-        failures.push(`[${scopeName}] 白名单条目 ${file} 的理由太短，写清楚真实约束`);
-      }
-      for (const referenced of reason.match(/[\w./-]+\.test\.tsx?/g) ?? []) {
-        if (!allTracked.includes(referenced)) {
-          failures.push(
-            `[${scopeName}] 白名单条目 ${file} 的理由引用了不存在的测试文件 ${referenced}`
-          );
-        }
+      for (const problem of auditAllowlistReason({ reason, knownPaths })) {
+        failures.push(`[${scopeName}] 白名单条目 ${file}：${problem}`);
       }
     }
     for (const pattern of scope.coverageExclude) {
@@ -572,6 +714,60 @@ const runSelfTest = () => {
         );
       }
     }
+    // 条目数上限在这里也判：白名单条数不该悄悄增长，这是政策问题，与当前覆盖率无关。
+    const scopeFiles = scope.listFiles();
+    const entries = scopeFiles
+      .filter((file) => scope.allowedUncovered.has(file))
+      .map((file) => ({ file, lines: countSourceLines(file) }));
+    const totalLines = scopeFiles.reduce((sum, file) => sum + countSourceLines(file), 0);
+    const budgetReport = evaluateAllowlistBudget({
+      entries,
+      totalLines,
+      budget: scope.allowlistBudget,
+    });
+    for (const problem of budgetReport.entryFailures) failures.push(`[${scopeName}] ${problem}`);
+    // 行数占比不在这里判：真实树的数字由 `--scope=...` 运行时判定（components 目前已知
+    // 超标，自检必须保持可跑，否则「先修哪一项」的标志物会一起失效）。但也不能对超标的
+    // 现状沉默，所以把这行数字打出来。
+    if (budgetReport.shareFailures.length > 0) {
+      console.warn(
+        `check-coverage-scope: 注意 [${scopeName}] ${formatAllowlistBudget(budgetReport, scope.allowlistBudget)} —— 该 scope 运行时判定会因此失败`
+      );
+    }
+  }
+
+  for (const testCase of BUDGET_CASES) {
+    const report = evaluateAllowlistBudget({
+      entries: testCase.entries,
+      totalLines: testCase.totalLines,
+      budget: testCase.limit,
+    });
+    const problems = [...report.entryFailures, ...report.shareFailures];
+    if (testCase.wantFailure === null) {
+      if (problems.length > 0) {
+        failures.push(`[${testCase.name}] 期望通过，实际失败：${problems.join('；')}`);
+      }
+    } else if (!problems.some((problem) => problem.includes(testCase.wantFailure))) {
+      failures.push(
+        `[${testCase.name}] 期望失败信息包含「${testCase.wantFailure}」，实际：${problems.join('；') || '（无失败）'}`
+      );
+    }
+  }
+
+  for (const testCase of REASON_CASES) {
+    const problems = auditAllowlistReason({
+      reason: testCase.reason,
+      knownPaths: new Set(testCase.knownPaths),
+    });
+    if (testCase.wantFailure === null) {
+      if (problems.length > 0) {
+        failures.push(`[${testCase.name}] 期望通过，实际失败：${problems.join('；')}`);
+      }
+    } else if (!problems.some((problem) => problem.includes(testCase.wantFailure))) {
+      failures.push(
+        `[${testCase.name}] 期望失败信息包含「${testCase.wantFailure}」，实际：${problems.join('；') || '（无失败）'}`
+      );
+    }
   }
 
   if (failures.length > 0) {
@@ -580,7 +776,7 @@ const runSelfTest = () => {
     process.exit(1);
   }
   console.log(
-    `check-coverage-scope: self-test passed —— ${SELF_TEST_CASES.length} 个 fixture 全部符合预期（含缺失文件、0% 行、行数不足、同名遮蔽、范围外文件污染、门槛口径六条失败路径，以及白名单/排除项卫生检查）`
+    `check-coverage-scope: self-test passed —— ${SELF_TEST_CASES.length} 个报告 fixture + ${BUDGET_CASES.length} 个白名单预算 fixture + ${REASON_CASES.length} 个理由 fixture 全部符合预期（含缺失文件、0% 行、行数不足、同名遮蔽、范围外文件污染、门槛口径六条失败路径，以及白名单预算上限、理由引用测试文件的存在性检查）`
   );
 };
 
@@ -613,6 +809,16 @@ if (expected.length === 0) {
   console.error('check-coverage-scope: git 没有列出任何源文件，检查命令是否在仓库根执行');
   process.exit(2);
 }
+
+// 白名单预算：条目数 + 被排除行数占比。两个上限都在真实树上判，和白名单本身一起
+// 构成「这块到底还有多少在门禁里」的答案。
+const allowlistBudgetReport = evaluateAllowlistBudget({
+  entries: expected
+    .filter((file) => scope.allowedUncovered.has(file))
+    .map((file) => ({ file, lines: countSourceLines(file) })),
+  totalLines: expected.reduce((sum, file) => sum + countSourceLines(file), 0),
+  budget: scope.allowlistBudget,
+});
 
 /**
  * 跑一次覆盖率。`coverageExclude` 决定哪些范围外文件不进报告——这同时决定了
@@ -680,6 +886,9 @@ for (const file of state.untracked) {
 console.log(
   `check-coverage-scope[${scopeName}]: scope 内覆盖率 ${formatAggregate(aggregate)}（门槛 行 ${thresholds.minLines}% / 分支 ${thresholds.minBranches}% / 函数 ${thresholds.minFunctions}%）`
 );
+console.log(
+  `check-coverage-scope[${scopeName}]: ${formatAllowlistBudget(allowlistBudgetReport, scope.allowlistBudget)}`
+);
 
 // 混合口径只作为参考数字打印：它把范围外文件也算进分母，曾经让「组件 60%」变成
 // 混合分母的 60%。成功输出里同时给出两个数字，避免下一个人再被它误导。
@@ -693,7 +902,12 @@ if (scope.coverageExclude.length > 0) {
   );
 }
 
-const failures = [...describeFailures(state), ...evaluateThresholds({ aggregate, thresholds })];
+const failures = [
+  ...describeFailures(state),
+  ...allowlistBudgetReport.entryFailures,
+  ...allowlistBudgetReport.shareFailures,
+  ...evaluateThresholds({ aggregate, thresholds }),
+];
 if (failures.length > 0) {
   for (const failure of failures) console.error(`check-coverage-scope: ${failure}`);
 }

@@ -43,24 +43,56 @@ jobs:
       - name: Unit test coverage gate (services + src)
         run: node ./scripts/check-coverage-scope.mjs --scope=services
 
-      # 组件 scope 有自己的一套阈值，且**只按组件自己的行判定**：范围外的
-      # services/constants/types/src 由 coverageExclude 挡在报告之外，再用 all files 汇总行
-      # 判门槛。实测（2026-11-14，本仓工作树）scope 内 63.35 行 / 68.42 分支 / 42.86 函数；
-      # 不排除时混合口径是 68.60 / 68.37 / 41.94——旧写法拿混合口径判 60% 行门槛，
-      # 组件实际跌到 51.8% 也能过，脚本现在会把两个数字都打出来便于对照。
-      # 组件测试大量走 DOM 桩，函数覆盖率天然偏低，所以阈值比 services 低。
-      # 分母由 git 清单对比保证：components/ 下 12 个生产文件里 Receiver（streamsaver 在
-      # 模块顶层读 document）、ScreenShare 与 Sender（没有任何组件测试 import、渲染依赖真实
-      # WebRTC/采集能力）三个登记为白名单并写明理由；ErrorBoundary 与 PWAInstallPrompt
-      # 由 scripts/component-import-smoke.test.ts 拉进分母。
-      - name: Component coverage gate
-        run: node ./scripts/check-coverage-scope.mjs --scope=components
 
       - name: Build
         run: npm run build
 
+  # 组件覆盖率门禁单独一个 job：它有自己的阈值、自己的白名单预算（见下方注释），而且
+  # 现在实测 75.77% ≤ 80% 上限，是绿的 —— 但余量只够再挪一个中等文件进白名单。
+  # 为什么不放在 verify 里：verify 是 e2e / e2e-product 的前置（`needs: verify`）。这个
+  # job 的红绿取决于白名单预算，一旦有人再往白名单里塞文件（或把上限改小）它就是红的；
+  # 把它塞进 verify 会连带让浏览器用例（含 9 条屏幕共享）整批跳过，那正好抵消了把
+  # screenshare E2E 接进 CI 的意义。独立 job 的好处是：红灯一眼看得到，其余 job 照常跑。
+  coverage-components:
+    name: 'coverage gate (components, allowlist budget)'
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci
+
+      # 组件 scope 有自己的一套阈值，且**只按组件自己的行判定**：范围外的
+      # services/constants/types/src 由 coverageExclude 挡在报告之外，再用 all files 汇总行
+      # 判门槛。成功时会把 scope 口径与混合口径两个数字都打出来便于对照（旧写法拿混合口径
+      # 判 60% 行门槛，组件实际跌到 51.8% 也能过）。
+      # 分母由 git 清单对比保证：components/ 下 12 个生产文件里 Receiver（streamsaver 在
+      # 模块顶层读 document）、ScreenShare 与 Sender（都能在 Node 里 import，但没有任何组件
+      # 测试加载它们；渲染依赖真实 WebRTC/采集能力）三个登记为白名单并写明理由；
+      # ErrorBoundary 与 PWAInstallPrompt 由 scripts/component-import-smoke.test.ts 拉进分母。
+      # 白名单还有机械预算：≤3 条、被排除行数 ≤ 本 scope 总行数的 80%。当前实测
+      # 7860/10374 行 = 75.77%，**刚好在预算内（余量约 440 行）**，所以这一步现在是绿的；
+      # 但白名单把两个最大的状态机（ScreenShare 2820 行、Sender 1670 行）整块挪出分母后，
+      # 「组件 60%」实际上只覆盖 1/4 的代码 —— 上限存在的意义是「再挪一个中等文件进来就
+      # 红」，而不是给现状背书。负对照：把 maxExcludedLineShare 临时改 0.7 → 这一步 exit 1；
+      # 往白名单里加第 4 条 → 条目上限先红。解除方式是（按代价从低到高）把可测的状态机逻辑
+      # 抽到 services/ 并写单测，或补真正的组件测试；提高上限解决不了这个问题。
+      - name: Component coverage gate
+        run: node ./scripts/check-coverage-scope.mjs --scope=components
+
   e2e:
     name: e2e (chromium)
+    # verify 绿了再花一个 runner 跑浏览器用例：单测/typecheck 挂的时候没必要再烧
+    # 20 分钟。注意这不构成部署闸门 —— 部署走 Cloudflare 的 Git 集成，不看 CI。
+    needs: verify
     # Playwright 1.59 只认到 ubuntu 24.04；`ubuntu-latest` 已漂到 26.04，
     # `playwright install --with-deps` 会直接拒绝安装（Cannot install dependencies for ubuntu26.04-x64）。
     runs-on: ubuntu-24.04
@@ -102,6 +134,8 @@ jobs:
 
   e2e-product:
     name: 'e2e (product: transfer + screenshare, real Worker)'
+    # 同上：product 套件本地就要 2-3 分钟，不该在 verify 已经红了之后继续跑。
+    needs: verify
     # 与上面的 e2e job 同样的 24.04 理由。
     runs-on: ubuntu-24.04
     timeout-minutes: 30
