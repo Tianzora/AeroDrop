@@ -73,6 +73,7 @@ import {
   type ScreenCaptureFailure,
 } from '../services/screenShare/screenCaptureGuidance';
 import { planViewerCallEndOutcome } from '../services/screenShare/viewerShareFullFallback';
+import { planViewerCallEndAction } from '../services/screenShare/viewerCallEndAction';
 import { planViewerPeerError } from '../services/screenShare/viewerPeerErrorPolicy';
 import { planViewerErrorSurface } from '../services/screenShare/viewerErrorSurface';
 import { releaseCapturedStream } from '../services/screenShare/shareStreamLifecycle';
@@ -245,6 +246,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   // 本次观众连接已经因为「分享者暂时查不到」重试过几次（分享端重建 Peer 期间会这样）。
   const shareUnavailableAttemptsRef = useRef(0);
   const remoteShareEndHandledRef = useRef(false);
+  // 分享链接是否真的发布过（信令 open、拿到 peerId、屏幕上有链接可复制）。
+  // 房号登记成功 ≠ 链接可见：登记完成后还要等 WS 握手，信令一直起不来时用户从没见过链接，
+  // 终态就不能说「此前分享的链接已失效」。
+  const linkPublishedRef = useRef(false);
   const sharerReconnectTimerRef = useRef<NodeJS.Timeout | null>(null);
   const sharerReconnectAttemptsRef = useRef(0);
   // 这次信令连接是什么时候打开的：只有稳定存活过才重置重试预算，否则「握手成功即被关」
@@ -975,6 +980,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       }
       sharerSignalingBrokenRef.current = false;
       sharerPeerOpenedAtRef.current = Date.now();
+      linkPublishedRef.current = true;
       setPeerId(openedId);
       setIsPeerReady(true);
       setHasBeenReady(true);
@@ -1401,7 +1407,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     setPeerId(null);
     setCopied(false);
     setError(null);
-    setSharerFailure({ reason: 'signaling_failed', message, hadShareLink: room !== null });
+    setSharerFailure({ reason: 'signaling_failed', message, hadShareLink: linkPublishedRef.current });
     onNotification(message, 'error');
   }, [broadcastShareEnded, onNotification, stopBandwidthMonitoring]);
 
@@ -2139,14 +2145,17 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         onNotification('已连接到屏幕共享', 'success');
       });
 
-      call.on('close', () => {
+      call.on('close', (cause) => {
         if (viewerConnectAttemptRef.current !== attemptId) return;
         logDebug('log', 'Call closed');
 
         // 同样是「call 结束」，含义可能完全不同：共享方结束、自己取消、满员被拒、
-        // 或者真的断链。判定收在纯函数里，测试能证明满员不会被误报成网络故障。
-        // 分享者不在线（peer-unavailable/invalid-id/unauthorized）由 peer 级错误分类，
-        // 这里不重复判断：那条路径会给出有限重试或「分享暂时不可用」终态。
+        // 媒体通道压根没建起来，或者真的断链。解释交给纯函数，动作再由另一张纯表决定：
+        // 以前这里不看结论、一律重连，'sharer-unavailable' 只有测试在消费。
+        //
+        // cause 来自 peerRuntime：'transport' 表示 ICE/DTLS 自己失败或宽限到期，
+        // 'peer' 表示远端/本端主动关闭。没有这个区分，首帧前的媒体建连失败会和
+        // 「第 7 个观众被名额拒绝」长得一模一样，于是都被写成「人数已满」。
         const outcome = planViewerCallEndOutcome({
           manualStop: isManualStopRef.current,
           shareEnded: remoteShareEndedRef.current,
@@ -2155,36 +2164,39 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           dataChannelOpened,
           rateLimited: viewerRateLimitedRef.current,
           sharerUnavailable: viewerSharerUnavailableRef.current,
+          transportFailed: cause === 'transport',
         });
 
-        if (outcome === 'share-ended') {
-          handleRemoteShareEnded('共享方已结束共享');
-          return;
+        switch (planViewerCallEndAction(outcome)) {
+          case 'end-share':
+            handleRemoteShareEnded('共享方已结束共享');
+            return;
+          case 'stop':
+            // share-full 已由数据通道处理过（remoteShareFullRef 已置位），这里只收尾。
+            stopViewing(false);
+            return;
+          case 'stop-manual':
+            stopViewing(true);
+            onNotification('屏幕共享已结束', 'info');
+            return;
+          case 'await-peer-error':
+            // 分享者不在线/限流：peer 层会给出有限重试或终态，这里不能重复判断，
+            // 更不能落满员文案。
+            return;
+          case 'media-error':
+            // 首帧前的媒体建连失败（公司网、对称 NAT、没有 TURN）不是满员：
+            // 报媒体失败，别让用户去等一个不存在的名额。
+            stopFreezeWatch();
+            stopViewing(false);
+            setError(getMediaConnectionErrorMessage({ type: 'webrtc-error' }));
+            return;
+          case 'suspected-full':
+            reportSuspectedShareFull();
+            return;
+          case 'reconnect':
+            reconnectViewerAfterLoss();
+            return;
         }
-
-        if (outcome === 'share-full') {
-          // share-full 已由数据通道处理过（remoteShareFullRef 已置位），这里只收尾。
-          stopViewing(false);
-          return;
-        }
-
-        if (outcome === 'manual-stop') {
-          stopViewing(true);
-          onNotification('屏幕共享已结束', 'info');
-          return;
-        }
-
-        if (outcome === 'rate-limited') {
-          // peer 层已经落过限流状态（倒计时+文案）；这里只保证不被满员文案覆盖。
-          return;
-        }
-
-        if (outcome === 'suspected-share-full') {
-          reportSuspectedShareFull();
-          return;
-        }
-
-        reconnectViewerAfterLoss();
       });
 
       call.on('error', (err) => {
@@ -2231,41 +2243,34 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           sharerUnavailable,
         });
 
-        if (outcome === 'sharer-unavailable') {
-          // peer.on('error') 已经在同一次信令错误上跑过分类：这里只保证不落满员文案。
-          return;
+        switch (planViewerCallEndAction(outcome)) {
+          case 'await-peer-error':
+            // peer.on('error') 已经在同一次信令错误上跑过分类：这里只保证不落满员文案。
+            return;
+          case 'end-share':
+            handleRemoteShareEnded('共享方已结束共享');
+            return;
+          case 'stop':
+            stopViewing(false);
+            return;
+          case 'stop-manual':
+            stopFreezeWatch();
+            setError(getMediaConnectionErrorMessage(err));
+            setIsConnecting(false);
+            return;
+          case 'media-error':
+            // 传输层失败不发 error 事件（peerRuntime 只在 close 上带 'transport' 原因），
+            // 能走到这里说明是同一次故障的余波，交给紧随其后的 close 分支统一收尾。
+            return;
+          case 'suspected-full':
+            reportSuspectedShareFull();
+            return;
+          case 'reconnect':
+            // 媒体通道报错同样消耗重连预算：预算内继续重试，用尽了才落终态。
+            // 以前这里只写一条通用媒体错误就收工，重试链断在半路，用户既没有终态也看不到原因。
+            reconnectViewerAfterLoss();
+            return;
         }
-
-        if (outcome === 'share-ended') {
-          handleRemoteShareEnded('共享方已结束共享');
-          return;
-        }
-
-        if (outcome === 'share-full') {
-          stopViewing(false);
-          return;
-        }
-
-        if (outcome === 'manual-stop') {
-          stopFreezeWatch();
-          setError(getMediaConnectionErrorMessage(err));
-          setIsConnecting(false);
-          return;
-        }
-
-        if (outcome === 'rate-limited') {
-          // peer 层已经落过限流状态（倒计时+文案）；这里只保证不被满员文案覆盖。
-          return;
-        }
-
-        if (outcome === 'suspected-share-full') {
-          reportSuspectedShareFull();
-          return;
-        }
-
-        // 媒体通道报错同样消耗重连预算：预算内继续重试，用尽了才落终态。
-        // 以前这里只写一条通用媒体错误就收工，重试链断在半路，用户既没有终态也看不到原因。
-        reconnectViewerAfterLoss();
       });
 
       mediaConnectionRef.current = call;
@@ -2657,6 +2662,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       sharerSignalingBrokenRef.current = false;
       sharerReconnectAttemptsRef.current = 0;
       sharerPeerRebuildsRef.current = 0;
+      linkPublishedRef.current = false;
       shareRoomFailureRef.current = null;
       shareRoomRenewalFailuresRef.current = 0;
       setShareRoomRenewalWarning(false);
@@ -2746,6 +2752,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     sharerPeerRebuildsRef.current = 0;
     sharerSignalingBrokenRef.current = false;
     sharerFailureHandledRef.current = false;
+    linkPublishedRef.current = false;
     shareRoomFailureRef.current = null;
     shareRoomRenewalFailuresRef.current = 0;
     shareRoomTimeoutsRef.current = 0;

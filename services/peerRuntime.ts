@@ -74,9 +74,19 @@ type DataConnectionEvents = {
   error: (error: PeerRuntimeError) => void;
 };
 
+/**
+ * call 关闭的原因。没有它，上层只能看到「没画面 + 通道没开」这一种输入，
+ * 于是「公司网/对称 NAT 导致 ICE 建不起来」和「第 7 个观众被名额拒绝」
+ * 会被解释成同一句话（疑似人数已满）。
+ *
+ * - 'peer'：远端/本端主动关闭（正常结束、名额拒绝、服务端拒绝）；
+ * - 'transport'：ICE/DTLS 这一层失败或宽限期耗尽，连接压根没建立起来。
+ */
+export type ConnectionCloseCause = 'peer' | 'transport';
+
 type MediaConnectionEvents = {
   stream: (stream: MediaStream) => void;
-  close: () => void;
+  close: (cause: ConnectionCloseCause) => void;
   error: (error: PeerRuntimeError) => void;
 };
 
@@ -472,8 +482,13 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
       this.iceRestartAttempted = false;
       return;
     }
-    if (state === 'failed' || state === 'closed') {
-      this.handleTransportClosed();
+    if (state === 'failed') {
+      // 'failed' 只可能来自 ICE/DTLS 建不起来，和远端主动 close 是两回事。
+      this.handleTransportClosed('transport');
+      return;
+    }
+    if (state === 'closed') {
+      this.handleTransportClosed('peer');
       return;
     }
     if (state !== 'disconnected' || this.closed) return;
@@ -485,7 +500,7 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
         this.provider.logConnectionEvent(this, 'pc_disconnected_grace_expired', {
           state: this.peerConnection.connectionState,
         });
-        this.handleTransportClosed();
+        this.handleTransportClosed('transport');
       }, CONNECTION_TIMINGS.TRANSPORT_DISCONNECTED_GRACE_MS);
     }
 
@@ -514,7 +529,7 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
       this.provider.logConnectionEvent(this, 'pc_ice_restart_failed', {
         message: error instanceof Error ? error.message : String(error),
       });
-      this.handleTransportClosed();
+      this.handleTransportClosed('transport');
       return;
     }
     if (this.closed || this.isTransportConnected()) return;
@@ -523,7 +538,7 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
     this.transportGraceTimer = window.setTimeout(() => {
       this.transportGraceTimer = null;
       if (this.closed) return;
-      this.handleTransportClosed();
+      this.handleTransportClosed('transport');
     }, CONNECTION_TIMINGS.TRANSPORT_ICE_RESTART_GRACE_MS);
   }
 
@@ -541,7 +556,7 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
     this.transportGraceTimer = window.setTimeout(() => {
       this.transportGraceTimer = null;
       if (this.closed) return;
-      this.handleTransportClosed();
+      this.handleTransportClosed('transport');
     }, CONNECTION_TIMINGS.TRANSPORT_ICE_RESTART_GRACE_MS);
   }
 
@@ -564,7 +579,7 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
     }
   }
 
-  protected handleTransportClosed(): void {
+  protected handleTransportClosed(cause: ConnectionCloseCause = 'peer'): void {
     if (this.closed) return;
     this.clearTransportTimers();
     this.closed = true;
@@ -576,19 +591,20 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
       // Ignore close errors.
     }
     // 关闭可能由 datachannel、peerConnection 状态或宽限计时器触发，而且这些触发会互相
-    // 嵌套（pc.close() 会让 datachannel 再关一次）。上层只应收到一次 close。
+    // 嵌套（pc.close() 会让 datachannel 再关一次）。上层只应收到一次 close；
+    // 原因取第一次触发的那次：后续嵌套关闭只是同一次故障的余波。
     if (!this.closeEmitted) {
       this.closeEmitted = true;
-      this.emitClose();
+      this.emitClose(cause);
     }
   }
 
   /** 子类在这里把 close 发给上层；由 BaseConnection 保证只发一次。 */
-  protected emitClose(): void {}
+  protected emitClose(_cause: ConnectionCloseCause): void {}
 
   close(): void {
     if (this.closed) return;
-    this.handleTransportClosed();
+    this.handleTransportClosed('peer');
   }
 }
 
@@ -683,7 +699,7 @@ export class DataConnection extends BaseConnection<DataConnectionEvents> {
     this.dataChannel.send(JSON.stringify({ __type: JSON_ENVELOPE, payload: data }));
   }
 
-  protected override emitClose(): void {
+  protected override emitClose(_cause: ConnectionCloseCause): void {
     this.emit('close');
   }
 
@@ -753,8 +769,8 @@ export class MediaConnection extends BaseConnection<MediaConnectionEvents> {
     this.provider.forwardAnswer(this, answer);
   }
 
-  protected override emitClose(): void {
-    this.emit('close');
+  protected override emitClose(cause: ConnectionCloseCause): void {
+    this.emit('close', cause);
   }
 }
 

@@ -113,7 +113,7 @@ const openViewer = async (browser: Browser, shareLink: string): Promise<Page> =>
  * 存在的函数，但「没有可采集的桌面」只会在调用时抛错。只有真抓到一帧才算支持。
  *
  * 本机开发者没有显示服务时允许 skip（否则本地/无头环境寸步难行）；但 CI 里
- * fake-capture flag（playwright.product.config.ts）一旦回归，9 条走 ensureDisplayCapture 的用例会整组 skip
+ * fake-capture flag（playwright.product.config.ts）一旦回归，11 条走 ensureDisplayCapture 的用例会整组 skip
  * 而 job 依旧全绿——所以 CI 下把探测结果当断言，必须为 true。
  */
 const ensureDisplayCapture = async (page: Page): Promise<void> => {
@@ -185,7 +185,11 @@ test.describe('screen share', () => {
   // 落到明确的错误终态，而不是留着绿色「正在共享」和一条打不开的链接。4010 在
   // services/peerRuntime.ts 的 TERMINAL_SIGNALING_CLOSE_CODES 里映射成 session-conflict 终端错误。
   // page.routeWebSocket 拦不住这条信令连接（实测无效），所以在页面脚本执行前替换 WebSocket。
-  test('sharer shows an error terminal state instead of a fake LIVE when signaling rejects the session', async ({
+  //
+  // 这条桩只「open」、从不发 registered：房号登记成功但 peerId 从未下发，链接也就从未
+  // 出现在屏幕上。终态必须以「未能开始共享」收尾；说「此前分享的链接已失效」是自相矛盾
+  // ——用户从没拿到过链接（这条用例就是该回归的守门人）。
+  test('sharer never claims a dead link when signaling rejects before the link was published', async ({
     page,
   }) => {
     // 必须早于 goto：init script 只在后续导航的文档创建时注入。
@@ -252,7 +256,7 @@ test.describe('screen share', () => {
 
     // 同一条提示既出现在 toast 里也出现在终态卡片里，所以断言要限定在主区域。
     const terminalCard = page.getByRole('main');
-    await expect(terminalCard.getByText('共享已中断')).toBeVisible({ timeout: 25_000 });
+    await expect(terminalCard.getByText('未能开始共享')).toBeVisible({ timeout: 25_000 });
     await expect(
       terminalCard.getByText('分享会话已被其他连接占用，请重新开始共享')
     ).toBeVisible();
@@ -260,7 +264,7 @@ test.describe('screen share', () => {
     await expect(page.getByText('正在共享')).toHaveCount(0);
     await expect(
       terminalCard.getByText('此前分享的链接已失效，观众无法再加入。')
-    ).toBeVisible();
+    ).toHaveCount(0);
     await expect(terminalCard.getByRole('button', { name: '重新开始共享' })).toBeVisible();
     await expect(page.locator('a[href*="view="]')).toHaveCount(0);
 
@@ -313,6 +317,73 @@ test.describe('screen share', () => {
 
     // 终态不能靠连打接口熬过去：命中限流后只登记过一次。
     expect(await page.evaluate(() => (window as typeof window & { __shareCodeAttempts?: number }).__shareCodeAttempts)).toBe(1);
+
+    // 冷却入口守卫：按钮禁用到倒计时结束，并且用 aria-describedby 指向可见的秒数。
+    const restart = terminalCard.getByRole('button', { name: '重新开始共享' });
+    await expect(restart).toBeDisabled();
+    await expect(restart).toHaveAttribute('aria-describedby', 'share-terminal-cooldown-hint');
+    await expect(terminalCard.locator('#share-terminal-cooldown-hint')).toHaveText(/\d+ 秒后可重试/);
+
+    // 冷却不能被绕过：摘掉 disabled 属性再点一次，组件里的冷却守卫必须让登记不发生。
+    // 注意 React 对 props.disabled 为真的控件会丢弃 click（属性摘掉也一样），所以这条断言
+    // 在只有 UI 层 disabled 的现状下并不单独构成红线；红线来自两条变异组合：UI 的 disabled
+    // 改成恒 false + 守卫改成恒 false 时 attempts 会变 2（见汇报）。
+    await restart.evaluate((el) => {
+      el.removeAttribute('disabled');
+      (el as HTMLButtonElement).click();
+    });
+    await page.waitForTimeout(3_000);
+    expect(
+      await page.evaluate(() => (window as typeof window & { __shareCodeAttempts?: number }).__shareCodeAttempts)
+    ).toBe(1);
+  });
+
+  // 冷却结束必须能自己恢复：Retry-After 只有 1s，倒计时走完后按钮重新可点，
+  // 点击后重新登记并回到绿色 LIVE——不需要刷新页面。
+  test('sharer can start again after a short 429 cooldown elapses', async ({ page }) => {
+    await page.addInitScript(() => {
+      const nativeFetch = window.fetch.bind(window);
+      const state = window as typeof window & { __shareCodeAttempts?: number };
+      state.__shareCodeAttempts = 0;
+
+      window.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+        const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+        if (method === 'POST' && new URL(rawUrl, location.href).pathname === '/api/share-code') {
+          state.__shareCodeAttempts = (state.__shareCodeAttempts ?? 0) + 1;
+          // 只拒第一次：第二次要真的走到 Worker，验证冷却结束后能正常登记。
+          if (state.__shareCodeAttempts === 1) {
+            return Promise.resolve(
+              new Response(JSON.stringify({ error: 'too many share code requests' }), {
+                status: 429,
+                headers: { 'Content-Type': 'application/json', 'Retry-After': '1' },
+              })
+            );
+          }
+        }
+        return nativeFetch(input as RequestInfo, init);
+      }) as typeof window.fetch;
+    });
+
+    await page.goto('/');
+    await ensureDisplayCapture(page);
+
+    await page.getByRole('button', { name: '共享' }).click();
+    await page.getByRole('button', { name: '开始共享屏幕' }).click();
+
+    const terminalCard = page.getByRole('main');
+    await expect(terminalCard.getByText('未能开始共享')).toBeVisible({ timeout: 25_000 });
+
+    // Retry-After 只有 1 秒：倒计时结束后按钮必须自己从禁用恢复，而不是一直灰着。
+    const restart = terminalCard.getByRole('button', { name: '重新开始共享' });
+    await expect(restart).toBeEnabled({ timeout: 15_000 });
+    await restart.click();
+
+    await expect(page.getByText('正在共享')).toBeVisible({ timeout: 30_000 });
+    await expect(page.locator('a[href*="view="]')).toHaveCount(1, { timeout: 30_000 });
+    expect(
+      await page.evaluate(() => (window as typeof window & { __shareCodeAttempts?: number }).__shareCodeAttempts)
+    ).toBe(2);
   });
 
   // 失败路径：登记接口偶发 5xx 属于可自愈失败——继续重试到成功，不能把分享杀掉。
@@ -589,6 +660,91 @@ test.describe('screen share', () => {
         timeout: 55_000,
       });
       await expect(viewer.getByRole('button', { name: '重试连接' })).toBeVisible();
+    } finally {
+      await viewer.context().close();
+    }
+  });
+  // 失败路径：观众在收到第一帧之前，媒体通道就被 ICE/DTLS 判死（公司网、对称 NAT、没配
+  // TURN）。旧实现里它与「第 7 个观众被名额拒绝」的输入完全相同（无流、数据通道没开、
+  // call 关了），于是被写成确定语气的「可能人数已满（最多 6 人），请稍后再试」——用户会
+  // 去等一个永远不存在的名额。这里把每条 pc 的 ontrack 吞掉（保证一帧都没收到），等
+  // media call 建立后再把 connectionState 推到 failed：peerRuntime 的 close 必须带
+  // 'transport'，观众侧只能落媒体失败文案。
+  test('a media connection that fails before the first frame is not reported as a full room', async ({
+    browser,
+    page,
+  }) => {
+    await page.goto('/');
+    await ensureDisplayCapture(page);
+
+    await startSharing(page);
+    const shareLink = await getShareLink(page);
+
+    const viewerContext = await browser.newContext();
+    const viewer = await viewerContext.newPage();
+    await viewer.addInitScript(() => {
+      const Native = window.RTCPeerConnection;
+      const state = window as typeof window & {
+        __pcs?: RTCPeerConnection[];
+        __failTransport?: () => void;
+      };
+      const list: RTCPeerConnection[] = [];
+      state.__pcs = list;
+
+      const Wrapped = function (this: unknown, ...args: unknown[]) {
+        const pc = new Native(...(args as ConstructorParameters<typeof RTCPeerConnection>));
+        list.push(pc);
+        // 吞掉 ontrack：即使 ICE 真连通，观众也永远收不到第一帧，保证走的是
+        // 「首帧前的建连失败」，而不是「播到一半断流」。
+        Object.defineProperty(pc, 'ontrack', {
+          configurable: true,
+          get: () => null,
+          set: () => {},
+        });
+        return pc;
+      } as unknown as typeof RTCPeerConnection;
+      Wrapped.prototype = Native.prototype;
+      window.RTCPeerConnection = Wrapped;
+
+      state.__failTransport = () => {
+        for (const pc of list) {
+          try {
+            Object.defineProperty(pc, 'connectionState', {
+              configurable: true,
+              get: () => 'failed',
+            });
+            pc.dispatchEvent(new Event('connectionstatechange'));
+          } catch {
+            /* 浏览器不允许重定义该属性时忽略：用例会因为等不到文案而失败，暴露注入无效 */
+          }
+        }
+      };
+    });
+
+    try {
+      await viewer.goto(shareLink);
+      // 媒体连接由 peer.call 创建：等它出现再判死，别在监听器挂上之前丢事件。
+      await expect
+        .poll(
+          () =>
+            viewer.evaluate(
+              () => (window as typeof window & { __pcs?: RTCPeerConnection[] }).__pcs?.length ?? 0
+            ),
+          { timeout: 20_000 }
+        )
+        .toBeGreaterThanOrEqual(1);
+      await viewer.evaluate(() => {
+        (window as typeof window & { __failTransport?: () => void }).__failTransport?.();
+      });
+
+      // 只能是媒体失败文案：既有常量，不新造文案。
+      await expect(
+        viewer.getByText('媒体通道建立失败（可能是网络或防火墙限制），请重试')
+      ).toBeVisible({ timeout: 20_000 });
+      // 不得落在满员文案上（这就是修复前用户看到的确定语气）。
+      await expect(viewer.getByText(/人数已满/)).toHaveCount(0);
+      // 传输层失败不是断链：不进入重连倒计时。
+      await expect(viewer.getByText(/秒后尝试重连/)).toHaveCount(0);
     } finally {
       await viewer.context().close();
     }

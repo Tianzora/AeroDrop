@@ -35,6 +35,16 @@ export interface ViewerCallEndInput {
    * 会让用户以为要等别人退出，而实际上等多久都进不去（或者马上就恢复）。
    */
   sharerUnavailable?: boolean;
+  /**
+   * 这次 call 是被传输层关掉的（ICE/DTLS 失败、或 disconnected 宽限期耗尽），
+   * 不是远端主动 close。
+   *
+   * 没有这个输入时，「公司网/对称 NAT/没 TURN 导致 pc 直接 failed」与「第 7 个观众
+   * 被名额拒绝」在观众侧长得一模一样：没画面、数据通道没开、call 关了。旧实现把两种
+   * 都归进「疑似人数已满」，用户被确定语气劝去「等别人退出」。传输层失败必须单独判，
+   * 走媒体失败文案。
+   */
+  transportFailed?: boolean;
 }
 
 export type ViewerCallEndOutcome =
@@ -43,6 +53,7 @@ export type ViewerCallEndOutcome =
   | 'manual-stop'
   | 'rate-limited'
   | 'sharer-unavailable'
+  | 'media-failed'
   | 'suspected-share-full'
   | 'reconnect';
 
@@ -54,6 +65,7 @@ export const planViewerCallEndOutcome = ({
   dataChannelOpened,
   rateLimited = false,
   sharerUnavailable = false,
+  transportFailed = false,
 }: ViewerCallEndInput): ViewerCallEndOutcome => {
   // 共享方主动结束优先：它同时会关 call，别把「结束」当成断链去重连。
   if (shareEnded) return 'share-ended';
@@ -64,10 +76,11 @@ export const planViewerCallEndOutcome = ({
   // 分享者不在线也优先于满员推断：死链/重建窗口/首帧前 ICE 失败时，名额满不满无从谈起，
   // 报「人数已满」会把用户引到「等别人退出」这个永远不成立的行动上。
   if (sharerUnavailable && !receivedStream) return 'sharer-unavailable';
+  // 传输层自己关了连接（ICE 失败、宽限到期）时名额是不是满的根本无从判断：
+  // 名额拒绝走的是远端主动 close（'peer'），不会落到这里。
+  if (!receivedStream && transportFailed) return 'media-failed';
+  // 只有「远端干净关闭且没有画面」才允许推断满员：那正是 share-full best-effort
+  // 没送到时的形状。
   if (!receivedStream && !dataChannelOpened) return 'suspected-share-full';
   return 'reconnect';
 };
-
-/** 疑似满员时不要自动重连：名额不会自己空出来，重连只会再撞一次。 */
-export const shouldReconnectAfterCallEnd = (outcome: ViewerCallEndOutcome): boolean =>
-  outcome === 'reconnect';

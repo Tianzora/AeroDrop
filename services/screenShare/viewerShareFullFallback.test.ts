@@ -3,7 +3,6 @@ import assert from 'node:assert/strict';
 
 import {
   planViewerCallEndOutcome,
-  shouldReconnectAfterCallEnd,
   type ViewerCallEndInput,
 } from './viewerShareFullFallback.ts';
 
@@ -50,8 +49,6 @@ test('分享者不在线（死链/重建窗口）不能报成「人数已满」'
     }),
     'sharer-unavailable',
   );
-  // 这个结论不能被当成「重连就行」：分享者不在线时重连只会再走一遍同样的失败。
-  assert.equal(shouldReconnectAfterCallEnd('sharer-unavailable'), false);
 });
 
 test('已经收到过画面时，分享者不在线仍按断链重连处理', () => {
@@ -91,9 +88,38 @@ test('已经收到过画面再被限流：仍按断链重连，限流只解释�
   assert.equal(planViewerCallEndOutcome({ ...base, rateLimited: true }), 'reconnect');
 });
 
-test('只有 reconnect 允许自动重连：满员不会自己空出名额', () => {
-  assert.equal(shouldReconnectAfterCallEnd('reconnect'), true);
-  for (const outcome of ['share-ended', 'share-full', 'manual-stop', 'rate-limited', 'suspected-share-full'] as const) {
-    assert.equal(shouldReconnectAfterCallEnd(outcome), false, outcome);
-  }
+test('传输层自己关了连接且一帧都没收到：判媒体失败，不能报「人数已满」', () => {
+  // 反证点：删掉 media-failed 分支，这条会掉到 'suspected-share-full'——公司网/对称 NAT
+  // 下 pc 直接 failed 的观众会被告知「可能人数已满（最多 6 人）」，然后去等一个不存在的
+  // 名额；实际上问题在本机网络/没有 TURN。
+  assert.equal(
+    planViewerCallEndOutcome({
+      ...base,
+      receivedStream: false,
+      dataChannelOpened: false,
+      transportFailed: true,
+    }),
+    'media-failed',
+  );
 });
+
+test('传输层失败但已经收到过画面：按断链重连，不当成建连失败', () => {
+  assert.equal(
+    planViewerCallEndOutcome({ ...base, transportFailed: true }),
+    'reconnect',
+  );
+});
+
+test('分享者不在线优先于传输层失败：那是有确定原因的一类失败', () => {
+  assert.equal(
+    planViewerCallEndOutcome({
+      ...base,
+      receivedStream: false,
+      dataChannelOpened: false,
+      transportFailed: true,
+      sharerUnavailable: true,
+    }),
+    'sharer-unavailable',
+  );
+});
+
