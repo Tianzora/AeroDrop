@@ -620,7 +620,9 @@ test.describe('screen share', () => {
           .getByText('分享暂时不可用（可能已结束，或分享者正在重连），请稍后重新打开此链接')
           .first()
       ).toBeVisible();
-      await expect(viewer.getByText('连接超时，请检查网络')).toHaveCount(0);
+      // 这些串都在 `services/connectionGuidance.ts` 里真实存在：用它们做「没有退化成通用
+      // 网络故障」的非空断言（此前写死的「连接超时，请检查网络」全仓不存在，永远为真）。
+      await expect(viewer.getByText(/连接超时|请检查网络|网络连接中断/)).toHaveCount(0);
     } finally {
       await viewerContext.close();
     }

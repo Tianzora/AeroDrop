@@ -423,3 +423,61 @@ test('分享终态卡是 assertive 的 live region：分享已经停了，必须
   assert.match(markup, /共享已中断/);
   assert.match(markup, /role="alert"[^>]*aria-live="assertive"/);
 });
+
+/** 从 `from` 位置开始量 `<div>` 的嵌套深度，用来判断某段文本是否落在某个元素内部。 */
+const divDepthAt = (markup: string, from: number, at: number): number => {
+  let depth = 0;
+  const tag = /<\/?(div)/g;
+  tag.lastIndex = from;
+  for (let match = tag.exec(markup); match && match.index < at; match = tag.exec(markup)) {
+    depth += match[0] === '</div' ? -1 : 1;
+  }
+  return depth;
+};
+
+test('没有冷却时不会渲染出 undefined 秒后可重试', () => {
+  const markup = render({
+    sharerFailure: { reason: 'signaling_failed', message: SIGNALING_UNREACHABLE_MESSAGE },
+  });
+
+  assert.doesNotMatch(markup, /undefined 秒后可重试/);
+  assert.doesNotMatch(markup, /秒后可重试/);
+});
+
+test('终态卡的冷却倒计时不在 live region 里：每秒变一次，进去会整卡重播', () => {
+  const markup = render({
+    sharerFailure: { reason: 'signaling_failed', message: SIGNALING_UNREACHABLE_MESSAGE },
+    shareRoomRetrySeconds: 60,
+  });
+
+  const alertAt = markup.indexOf('role="alert"');
+  const countdownAt = markup.indexOf('60 秒后可重试');
+  assert.ok(alertAt >= 0 && countdownAt > alertAt, '终态卡与倒计时应当同时出现');
+  assert.equal(
+    divDepthAt(markup, alertAt, countdownAt),
+    0,
+    '倒计时必须是终态卡的兄弟节点：放在 role=alert 子树里会让读屏每秒重播整段原因'
+  );
+  assert.match(markup, /重新开始共享/);
+  assert.match(markup, /disabled/);
+});
+
+test('观众倒计时有自己的 live region，且按 10 秒一档播报', () => {
+  const markup = render({ error: '连接请求过多，请稍后再试', targetSharerId: 'sharer-1', viewerRetrySeconds: 27 });
+
+  assert.match(markup, /27 秒后可重试/);
+  // 视觉上的秒数不进 live region（否则每秒一次播报），只留 sr-only 的粗粒度播报。
+  assert.match(markup, /aria-hidden="true"[^>]*>27 秒后可重试|aria-hidden="true">27 秒后可重试/);
+  assert.match(markup, /30 秒内可重试/);
+  assert.match(markup, /role="status"[^>]*aria-live="polite"[^>]*>30 秒内可重试/);
+});
+
+test('「取消连接」按钮不在 live region 子树里：按钮不该被当成状态更新播报', () => {
+  const markup = render({ isConnecting: true, targetSharerId: 'sharer-1' });
+
+  const statusAt = markup.indexOf('role="status"');
+  const cancelAt = markup.indexOf('取消连接');
+  assert.ok(statusAt >= 0 && cancelAt > statusAt, '连接阶段与取消按钮应当同时出现');
+  // 0 = status 容器已经闭合、按钮在自己的 wrapper 里；若塞进 status 子树这里会是 1。
+  assert.equal(divDepthAt(markup, statusAt, cancelAt), 0, '取消按钮必须在 role=status 容器外部');
+});

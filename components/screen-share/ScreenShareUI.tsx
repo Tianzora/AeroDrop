@@ -316,6 +316,12 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               {viewerConnectingStage === 'waiting_stream' && '正在等待屏幕画面...'}
               {!viewerConnectingStage && '正在连接到屏幕共享...'}
             </p>
+          </div>
+        )}
+
+        {/* 操作按钮放在 live region 外面：读屏只该听见「还在连」，不该把按钮念成状态更新。 */}
+        {isConnecting && (
+          <div className="mb-6 flex justify-center">
             <button
               onClick={cancelConnecting}
               className="flex items-center justify-center gap-2 px-5 py-2.5 text-sm font-medium text-slate-600 dark:text-night-400 hover:text-slate-800 dark:hover:text-night-200 border border-slate-300 dark:border-night-700 rounded-full hover:bg-slate-100 dark:hover:bg-night-800 transition-colors"
@@ -339,7 +345,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
             <div className="flex flex-wrap items-center justify-center gap-3">
               <button
                 onClick={retryConnection}
-                disabled={viewerRetrySeconds !== null}
+                disabled={typeof viewerRetrySeconds === 'number'}
                 className="flex items-center justify-center gap-2 px-5 py-2.5 bg-brand-600 hover:bg-brand-700 text-white font-medium rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-brand-600"
               >
                 <RefreshCw size={16} />
@@ -353,9 +359,19 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                 取消
               </button>
               {/* 被出口限流时立刻重试只会再吃一次 429：把还要等多久摆出来，按钮同时禁用。 */}
-              {viewerRetrySeconds !== null && (
-                <span className="text-xs text-red-600/80 dark:text-red-400/80 tabular-nums">
+              {typeof viewerRetrySeconds === 'number' && (
+                <span
+                  className="text-xs text-red-600/80 dark:text-red-400/80 tabular-nums"
+                  aria-hidden="true"
+                >
                   {viewerRetrySeconds} 秒后可重试
+                </span>
+              )}
+              {/* 倒计时本身每秒都在变，直接进 live region 会变成每秒一次播报；
+                  这里按 10 秒一档播一次，视觉上的秒数用 aria-hidden 挡住。 */}
+              {typeof viewerRetrySeconds === 'number' && (
+                <span className="sr-only" role="status" aria-live="polite">
+                  {`${Math.ceil(viewerRetrySeconds / 10) * 10} 秒内可重试`}
                 </span>
               )}
             </div>
@@ -496,7 +512,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                     <div className="mt-3 flex flex-wrap items-center gap-2">
                       <button
                         onClick={startScreenShare}
-                        disabled={shareRoomRetrySeconds !== null}
+                        disabled={typeof shareRoomRetrySeconds === 'number'}
                         className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-brand-600 px-4 text-sm font-medium text-white transition-colors hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-brand-600"
                       >
                         <Play size={16} fill="currentColor" />
@@ -509,15 +525,17 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                         <X size={16} />
                         关闭
                       </button>
-                      {/* 服务端已经告诉我们还要等多久：把秒数显示出来，比只留一个灰按钮有用。 */}
-                      {shareRoomRetrySeconds !== null && (
-                        <span className="text-xs text-red-600/80 dark:text-red-400/80 tabular-nums">
-                          {shareRoomRetrySeconds} 秒后可重试
-                        </span>
-                      )}
                     </div>
                   </div>
                 </div>
+                {/* 服务端已经告诉我们还要等多久：把秒数显示出来，比只留一个灰按钮有用。
+                    这行必须留在 role=alert 之外：倒计时每秒变一次，放进 live region 会让
+                    读屏用户每秒听一遍整张终态卡（共 ~10 次），把真正的原因盖掉。 */}
+                {typeof shareRoomRetrySeconds === 'number' && (
+                  <p className="mt-2 text-xs text-red-600/80 dark:text-red-400/80 tabular-nums">
+                    {shareRoomRetrySeconds} 秒后可重试
+                  </p>
+                )}
               </div>
             )}
 
@@ -583,13 +601,13 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                         不能只剩一行「需要重新开始共享」让用户自己去找。 */}
                     <button
                       onClick={startScreenShare}
-                      disabled={shareRoomRetrySeconds !== null}
+                      disabled={typeof shareRoomRetrySeconds === 'number'}
                       className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-brand-600 px-4 text-sm font-medium text-white transition-colors hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-brand-600"
                     >
                       <RefreshCw size={16} />
                       重新开始共享
                     </button>
-                    {shareRoomRetrySeconds !== null && (
+                    {typeof shareRoomRetrySeconds === 'number' && (
                       <span className="text-xs text-amber-600 dark:text-amber-400 tabular-nums">
                         {shareRoomRetrySeconds} 秒后可重试
                       </span>
@@ -675,15 +693,15 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               <div className="mt-2 flex flex-col items-center gap-2">
                 <button
                   onClick={startScreenShare}
-                  disabled={shareRoomRetrySeconds !== null}
-                  aria-describedby={shareRoomRetrySeconds !== null ? 'share-room-cooldown-hint' : undefined}
+                  disabled={typeof shareRoomRetrySeconds === 'number'}
+                  aria-describedby={typeof shareRoomRetrySeconds === 'number' ? 'share-room-cooldown-hint' : undefined}
                   className="flex items-center justify-center gap-3 w-full max-w-xs bg-brand-600 hover:bg-brand-700 text-white font-bold py-3.5 px-6 rounded-full shadow-card transition-ui motion-fast active:scale-[0.99] disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-brand-600"
                 >
                   <Play size={20} fill="currentColor" />
                   开始共享屏幕
                 </button>
                 {/* 冷却必须活过「关闭」终态卡：否则关掉卡片再点主按钮就绕过了倒计时。 */}
-                {shareRoomRetrySeconds !== null && (
+                {typeof shareRoomRetrySeconds === 'number' && (
                   <span
                     id="share-room-cooldown-hint"
                     className="text-xs text-slate-500 dark:text-night-400 tabular-nums"
