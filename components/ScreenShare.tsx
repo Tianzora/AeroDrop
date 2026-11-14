@@ -239,6 +239,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const remoteShareFullRef = useRef(false);
   // 本次建连是否被信令层限流拒绝过：决定「call 被关」是按限流解释还是推测满员。
   const viewerRateLimitedRef = useRef(false);
+  // 「分享者不在线」是同一次信令错误上的结论：call 的 error 先到、close 紧随其后。
+  // 不记住它，close 分支就只看到「没画面」而误判成满员。
+  const viewerSharerUnavailableRef = useRef(false);
   // 本次观众连接已经因为「分享者暂时查不到」重试过几次（分享端重建 Peer 期间会这样）。
   const shareUnavailableAttemptsRef = useRef(0);
   const remoteShareEndHandledRef = useRef(false);
@@ -1764,8 +1767,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       // 自动重试每次清零计数，peer-unavailable 永远停在重试态，永不进终态。
       shareUnavailableAttemptsRef.current = 0;
     }
-    // 新的一次建连：上一次的限流结论不再适用（冷却结束后才允许点重试）。
+    // 新的一次建连：上一次的限流/不在线结论不再适用（冷却结束后才允许点重试）。
     viewerRateLimitedRef.current = false;
+    viewerSharerUnavailableRef.current = false;
     setViewerRetryAt(null);
 
     if (peerRef.current) {
@@ -2150,6 +2154,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           receivedStream: hasReceivedStream,
           dataChannelOpened,
           rateLimited: viewerRateLimitedRef.current,
+          sharerUnavailable: viewerSharerUnavailableRef.current,
         });
 
         if (outcome === 'share-ended') {
@@ -2210,6 +2215,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           errorType === 'peer-unavailable' ||
           errorType === 'invalid-id' ||
           errorType === 'unauthorized';
+        // call 的 close 紧随 error 而来（peerRuntime 同步 emitClose），把结论记下来，
+        // 否则 close 分支只看到「没画面、没数据通道」就落进「疑似满员」。
+        if (sharerUnavailable) {
+          viewerSharerUnavailableRef.current = true;
+        }
 
         const outcome = planViewerCallEndOutcome({
           manualStop: isManualStopRef.current,

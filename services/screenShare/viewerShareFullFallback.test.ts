@@ -50,6 +50,8 @@ test('分享者不在线（死链/重建窗口）不能报成「人数已满」'
     }),
     'sharer-unavailable',
   );
+  // 这个结论不能被当成「重连就行」：分享者不在线时重连只会再走一遍同样的失败。
+  assert.equal(shouldReconnectAfterCallEnd('sharer-unavailable'), false);
 });
 
 test('已经收到过画面时，分享者不在线仍按断链重连处理', () => {

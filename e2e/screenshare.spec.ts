@@ -113,7 +113,7 @@ const openViewer = async (browser: Browser, shareLink: string): Promise<Page> =>
  * 存在的函数，但「没有可采集的桌面」只会在调用时抛错。只有真抓到一帧才算支持。
  *
  * 本机开发者没有显示服务时允许 skip（否则本地/无头环境寸步难行）；但 CI 里
- * fake-capture flag（playwright.product.config.ts）一旦回归，10 条用例会整组 skip
+ * fake-capture flag（playwright.product.config.ts）一旦回归，9 条走 ensureDisplayCapture 的用例会整组 skip
  * 而 job 依旧全绿——所以 CI 下把探测结果当断言，必须为 true。
  */
 const ensureDisplayCapture = async (page: Page): Promise<void> => {
@@ -605,6 +605,23 @@ test.describe('screen share', () => {
     // 从没注册过信令的 peerId：房号接口不做校验，信令层投递时才会回 peer-unavailable。
     const peerId = await page.evaluate(() => crypto.randomUUID());
     const viewerContext = await browser.newContext();
+    // 误报「人数已满」只存在于错误到终态之间的几百毫秒里（toast 4 秒后消失，错误条随后被
+    // 覆盖），事后 `toHaveCount(0)` 抓不到。用 MutationObserver 把「曾经出现过」记下来。
+    await viewerContext.addInitScript(() => {
+      const record = () => {
+        if (document.body?.innerText.includes('人数已满')) {
+          (window as typeof window & { __fullRoomSeen?: boolean }).__fullRoomSeen = true;
+        }
+      };
+      document.addEventListener('DOMContentLoaded', () => {
+        record();
+        new MutationObserver(record).observe(document.body, {
+          childList: true,
+          subtree: true,
+          characterData: true,
+        });
+      });
+    });
     const viewer = await viewerContext.newPage();
     try {
       await viewer.goto(`/?view=${peerId}`);
@@ -627,6 +644,16 @@ test.describe('screen share', () => {
       // 这些串都在 `services/connectionGuidance.ts` 里真实存在：用它们做「没有退化成通用
       // 网络故障」的非空断言（此前写死的「连接超时，请检查网络」全仓不存在，永远为真）。
       await expect(viewer.getByText(/连接超时|请检查网络|网络连接中断/)).toHaveCount(0);
+      // 死链最容易被误报成「房间满了」：信令错误先到、call close 紧随其后，close 分支如果
+      // 不继承「分享者不在线」的结论就会落进疑似满员。toast 4 秒就消失，所以必须在这里
+      // 明确断言「一次都没出现过」，否则这条最有价值的回归断言会漏网。
+      await expect(viewer.getByText(/人数已满/)).toHaveCount(0);
+      expect(
+        await viewer.evaluate(
+          () => (window as typeof window & { __fullRoomSeen?: boolean }).__fullRoomSeen === true
+        ),
+        '这条链接没有活跃分享者，任何时刻都不该出现「人数已满」'
+      ).toBe(false);
     } finally {
       await viewerContext.close();
     }
