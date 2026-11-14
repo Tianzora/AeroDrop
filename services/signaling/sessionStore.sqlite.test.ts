@@ -286,6 +286,65 @@ test('接管换名额：旧行靠 token 条件让出，并发接管事后只剩�
   db.close();
 });
 
+test('跨出口接管：别人的名额不能拿来抵自己的上限', () => {
+  const db = new DatabaseSync(':memory:');
+  const sql = createSqlite(db);
+  initializeSessionSlotSchema(sql);
+  const ttlMs = 6 * HOUR;
+  const now = 1_000;
+
+  // ip:1 占满 1/1，ip:2 也是满的（它自己那一格）。ip:2 接管 ip:1 的会话时必须自己撞上限：
+  // 账本按出口 IP 记账，拿别的 IP 的行去扣自己的数会让 12 会话上限变成 13。
+  assert.equal(
+    applySessionSlotReserve(sql, { slotId: 'slot-a', clientKey: 'ip:1', releaseToken: 'tok-a', now, maxSessions: 1, ttlMs }),
+    true
+  );
+  assert.equal(
+    applySessionSlotReserve(sql, { slotId: 'slot-b', clientKey: 'ip:2', releaseToken: 'tok-b', now, maxSessions: 1, ttlMs }),
+    true
+  );
+  assert.equal(
+    applySessionSlotReserve(sql, {
+      slotId: 'slot-b2',
+      clientKey: 'ip:2',
+      releaseToken: 'tok-b2',
+      now,
+      maxSessions: 1,
+      ttlMs,
+      replaces: { slotId: 'slot-a', releaseToken: 'tok-a' },
+    }),
+    false,
+    'ip:2 已经满额，接管 ip:1 的会话不能靠扣别人的名额把自己放进来'
+  );
+  assert.equal(countRows(db, 'signaling_session_slots'), 2, '被拒的接管不许动 ip:1 的那一行');
+  const owners = db
+    .prepare('SELECT slot_id, client_key, release_token FROM signaling_session_slots ORDER BY slot_id')
+    .all() as unknown as { slot_id: string; client_key: string; release_token: string }[];
+  assert.deepEqual(
+    owners.map((row) => [row.slot_id, row.client_key, row.release_token]),
+    [
+      ['slot-a', 'ip:1', 'tok-a'],
+      ['slot-b', 'ip:2', 'tok-b'],
+    ]
+  );
+
+  // 同一个 IP 内的接管仍然要能进来（这才是「一个换一个」的语义）。
+  assert.equal(
+    applySessionSlotReserve(sql, {
+      slotId: 'slot-b3',
+      clientKey: 'ip:2',
+      releaseToken: 'tok-b3',
+      now,
+      maxSessions: 1,
+      ttlMs,
+      replaces: { slotId: 'slot-b', releaseToken: 'tok-b' },
+    }),
+    true
+  );
+  assert.equal(countRows(db, 'signaling_session_slots'), 2);
+  db.close();
+});
+
 test('口令表：RETURNING 语义、延迟注销与墓碑在真实库上成立', () => {
   const db = new DatabaseSync(':memory:');
   const sql = createSqlite(db);

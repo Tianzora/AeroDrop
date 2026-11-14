@@ -458,18 +458,24 @@ export const applySessionSlotReserve = (
       input.clientKey
     )
     .toArray();
-  // 接管是「一个换一个」：旧行还在表里时先把它从计数里扣掉，否则 IP 正好满额时
-  // 连重连都会被拒。真正删旧行放在判定之后，失败时旧会话的名额不会被白白吃掉。
+  // 接管是「一个换一个」：被顶替的旧行还在表里时先把它从计数里扣掉，否则 IP 正好
+  // 满额时连重连都会被拒。真正删旧行放在判定之后，失败时旧会话的名额不会被白白吃掉。
+  //
+  // 扣减必须确认旧行也算在本次 clientKey 的计数里：账本按出口 IP 记账，而接管可以
+  // 发生在两个不同 IP 之间（A 的会话被 B 接管）。如果拿别人的行去扣自己 IP 的数，
+  // B 在满额时会被多放进来一行，12 会话的硬上限就变成 13。所以这里连 client_key
+  // 一起取回来，只有同 IP 才抵扣。
   const replaced = input.replaces
     ? sql
-        .exec<{ slot_id: string }>(
-          'SELECT slot_id FROM signaling_session_slots WHERE slot_id = ? AND release_token = ?',
+        .exec<{ slot_id: string; client_key: string }>(
+          'SELECT slot_id, client_key FROM signaling_session_slots WHERE slot_id = ? AND release_token = ?',
           input.replaces.slotId,
           input.replaces.releaseToken
         )
         .toArray()
     : [];
-  const occupied = Number(rows[0]?.count ?? 0) - (replaced.length > 0 ? 1 : 0);
+  const replacedSameClient = replaced.length > 0 && replaced[0]?.client_key === input.clientKey;
+  const occupied = Number(rows[0]?.count ?? 0) - (replacedSameClient ? 1 : 0);
   if (occupied >= input.maxSessions) {
     return false;
   }

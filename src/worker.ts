@@ -883,7 +883,7 @@ export class SignalingHub extends DurableObject<Env> {
   private iceConfigGlobalLimiter = createIceConfigGlobalLimiter();
   // 分片模式下的全局会话名额：socket -> slotId，关闭时按 id 释放。
   private slotBySocket = new Map<WebSocket, string>();
-  /** 同一个槽位在接管时会转给新 socket；旧 socket 退出时不能把新会话的名额释放掉。 */
+  /** 槽位每次注册都新铸（接管也不例外），这里只是防重复关闭时重复释放；真正的归属凭证是 releaseToken。 */
   private slotOwnerSocket = new Map<string, WebSocket>();
   /** 槽位续期的节流时间：ping 很密，没必要每 5s 写一次 SQL。 */
   private slotRefreshedAt = new Map<WebSocket, number>();
@@ -2058,9 +2058,9 @@ export class SignalingHub extends DurableObject<Env> {
       return json({ granted: false, released: false }, { status: 400 });
     }
     if (body?.action === 'release') {
-      // 带上 releaseToken 时按归属删除：并发接管里落败的一方会复用同一个 slotId，
-      // 裸删会把胜出方刚投递完 registered 的名额一起删掉。不能用 clientKey：
-      // 它是出口 IP，同一张 NAT 后面的所有连接都相同。
+      // 带上 releaseToken 时按归属删除：落败方回滚会按自己的 token 删，裸删会把胜出方
+      // 刚投递完 registered 的名额一起删掉。不能用 clientKey：它是出口 IP，同一张 NAT
+      // 后面的所有连接都相同。
       const releaseToken =
         typeof body?.releaseToken === 'string' && body.releaseToken ? body.releaseToken : undefined;
       applySessionSlotRelease(this.getSql(), slotId, releaseToken);
@@ -2188,8 +2188,9 @@ export class SignalingHub extends DurableObject<Env> {
   }
 
   /**
-   * 释放名额。带上 clientKey 时按归属条件删除：并发接管里落败的一方复用同一个 slotId，
+   * 释放名额。带上 releaseToken 时按归属条件删除：落败方回滚会按自己的 token 删，
    * 裸删会把胜出方刚投递完 registered 的名额一起删掉（全局 12 会话上限被悄悄放宽）。
+   * token 由每条连接自己铸，所以落败方永远删不掉胜出方的行。
    */
   private async releaseSignalingSessionSlot(slotId: string, releaseToken?: string): Promise<void> {
     if (this.getSignalingShardCount() <= 1) return;
