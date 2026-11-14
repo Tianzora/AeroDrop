@@ -160,3 +160,14 @@ WS 凭证移出 URL query（`Sec-WebSocket-Protocol`）、读路径不再写库�
 - 工程：白名单机械上限（条目数 + 被排除行数占比）、两条空的自测 fixture 改成真断言、白名单理由改真话、`e2e`/`e2e-product` 依赖 `verify` 且组件门禁独立成 job。
 
 状态: 完成 (第十轮复评 must-fix 全部收口；门禁全绿，待推送与复评, 2026-11-14)
+
+## 阶段 10：第十一轮复评后的收口（2026-11-14）
+
+对应 `docs/design-scale-out.md` §8.13。三项复评（安全 91 / 产品 91 / 工程 91）的 must-fix 逐条收口：
+
+- 安全：`replaces` 抵扣必须校验被顶替行属于同一出口（否则 12 会话上限变 13）；三处仍在描述「接管复用旧 slotId」的注释与 §8.11 过渡段落显式作废。
+- 产品：分享终态卡的倒计时移出 `role="alert"` 子树（此前 1Hz 让读屏每秒重播整卡）；`xxxRetrySeconds` 用 `typeof === 'number'`；「取消连接」移出 live region、观众倒计时按 10 秒一档进 polite live region；E2E 里恒真的「连接超时」断言改成真实文案族。
+- 工程：白名单纯的 `totalLines === 0` 静默失效修掉、范围外白名单条目变成失败项、`knownPaths` 存在性检查用真实路径铆钉、文档与 CI 注释的实测数字全部重写。
+- 门禁实测：typecheck 0；services 711 / components 46 / scripts 14；两个 scope 覆盖率守卫 OK（services 118 文件 91.27/83.83/84.69，components 13 文件 65.24/69.95/42.86，预算 75.49% ≤ 80%）；e2e 9 passed；product-transfer 13 passed；build 715.80 kB。
+
+状态: 完成 (第十一轮复评 must-fix 全部收口；门禁全绿，待推送与复评, 2026-11-14)
