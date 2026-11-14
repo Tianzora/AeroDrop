@@ -150,3 +150,13 @@ WS 凭证移出 URL query（`Sec-WebSocket-Protocol`）、读路径不再写库�
 - 工程：组件覆盖率门槛改为只按 scope 内行判定、`sessionCoordinator` 移出白名单并补 18 条单测、信令基址惰性化让组件可在 Node import、E2E 失败留 trace/screenshot 并在 CI 上传、CI 下采集探测失败必须红、删掉 product-transfer 里 inert 的 TURN 注入。
 
 状态: 完成 (第九轮复评 must-fix 全部收口；门禁全绿，待推送与复评, 2026-11-14)
+
+## 阶段 9：第十轮复评后的收口（2026-11-14）
+
+对应 `docs/design-scale-out.md` §8.12。三项复评（安全 90 / 产品 82 / 工程 90）的 must-fix 逐条收口：
+
+- 安全：接管路径的孤儿名额回收无条件化（旧 `if (!isTakeover)` 是照抄「接管复用旧 slotId」的旧假设），并把两条空断言改成真的（`replaces` 指向真实存在但 token 不符的行；release 去掉 token 条件必须红）。
+- 产品：观众侧「有限重试」预算不再被自动重试清零（此前永远停在「正在连接」，每 3s 一轮注册+offer），冷却到期归零、live region、三处裸 `track.stop()` 统一走 `releaseCapturedStream`。
+- 工程：白名单机械上限（条目数 + 被排除行数占比）、两条空的自测 fixture 改成真断言、白名单理由改真话、`e2e`/`e2e-product` 依赖 `verify` 且组件门禁独立成 job。
+
+状态: 完成 (第十轮复评 must-fix 全部收口；门禁全绿，待推送与复评, 2026-11-14)

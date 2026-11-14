@@ -264,7 +264,7 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 | 分片键与片名（§2.2） | `services/signaling/shardRouting.ts` | `rendezvousShardIndex(peerId, shardCount)`；shard 0 沿用 `global-signaling-hub`，新片 `signaling-shard-<i>`；`SIGNALING_SHARD_COUNT` 未设置时恒为 1，行为与单例一致。 |
 | WS 路由与跨片投递（§2.2/§2.5 的过渡形态） | `src/worker.ts` | `/ws-signaling` 按 rendezvous 选片；DO 内 `deliverSignaling` 发现目标不在本片时 POST `/internal/deliver-signaling`，查不到回 `peer-unavailable`；同一 socket 的投递按 Promise 链串行，避免 await RPC 时后续帧插队（ICE 先于 offer 到达）。 |
 | 口令仍只在 shard 0（§2.3） | `src/worker.ts` | 非 0 片注册先经 `/internal/lookup-share-codes` 回源取记录，再交给同步的 `resolveShareCodeRegistration`；回源失败按查不到处理（fail closed）。 |
-| 限流不随分片翻倍（§2.4 / P1） | `src/worker.ts` | 分片 >1 时改用 shard 0 的 `signaling_session_slots` 全局名额表（原子 reserve/release、6h TTL、槽位 id 存 attachment；接管复用同一槽位而不是先释放再领取，常驻连接每 30 分钟随 ping 续期），不再让每片各算 12 会话。 |
+| 限流不随分片翻倍（§2.4 / P1） | `src/worker.ts` | 分片 >1 时改用 shard 0 的 `signaling_session_slots` 全局名额表（原子 reserve/release、6h TTL、槽位 id 存 attachment；接管用 `replaces`（条件删除）让出旧行，而不是「先释放再领取」（后者一旦领取失败就把旧名额白丢了），常驻连接每 30 分钟随 ping 续期），不再让每片各算 12 会话。 |
 | 握手放大面 | `services/signaling/handshakeBudget.ts` | 跨片回源前的 per-isolate 预算（20 次/10s/IP），挡住「未认证握手 → DO 调用风暴」；仅在分片模式消耗。 |
 | 口令回源的批量合并（P2 第一步） | `services/signaling/shareCodeLookupBatch.ts`、`src/worker.ts` | 同一窗口（2ms）内的并发注册共用一次批量 RPC：观众同时打开链接时，shard 0 从「每注册一次读」降到「每批一次读」。批量请求失败或返回条数不符时每个等待者都 reject，调用方仍按「查不到」fail closed；握手预算仍按每次查询消耗。`signal_share_code_lookup_batched` 记录实际合并的批大小（>1 才记）。 |
 | P0 观测（第一层） | `services/signaling/signalingTelemetry.ts`、`src/worker.ts` | 结构化日志即指标（无第三方、无付费）：`signal_shard_selected`（仅分片模式）、`signal_cross_shard_delivered/failed`（带 targetShard 与失败原因）、`signal_session_slot_rejected`、`signal_session_conflict`、`signal_handshake_budget_exhausted`、`signal_share_code_lookup_failed`、`signal_share_code_lookup_batched`。一行一个 JSON，按 `event` 计数即可。 |
@@ -495,7 +495,7 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 | --- | --- | --- |
 | 名额按 `slot_id` 盲删：并发接管时落败方复用同一个 slotId 回滚，`DELETE ... WHERE slot_id = ?` 会把胜出方刚拿到、并且已经投递完 `registered` 的名额删掉（全局 12 会话上限被悄悄放宽） | `services/signaling/sessionStore.ts` 的 `applySessionSlotRelease(sql, slotId, clientKey?)` 带归属条件删除；`src/worker.ts` 的 `releaseSignalingSessionSlot`、`rollbackQuota`、`unregisterSocket`（把 `clientKey` 读取提到 slot 块之前）与 `/internal/session-slot` 的 `release` 分支全部透传 clientKey | `sessionStore.test.ts`「带 clientKey 时 SQL 必须含 `AND client_key = ?` 且参数顺序正确，不传时保持旧语义」；`sessionStore.sqlite.test.ts`「别的 client 释放同一个 slotId 是空操作」（负对照：去掉条件 ⇒ 该断言红） |
 | 名额 RPC 的 2xx 坏 body 被当成 granted：`{}`、字段改名或被截断的 JSON 都能让任何连接绕过全局名额 | `reserveSignalingSessionSlot` 只认 `body.granted === true` 为 granted、`=== false` 为 exhausted，其余一律 `unavailable` + warn（调用方回 503 + Retry-After） | `signalingHub.test.ts`「shard 0 名额表不可达 ⇒ 503 + Retry-After + 1013」（负对照：把 unavailable 当 granted ⇒ 503 变 101，红） |
-| reserve 响应丢失时不回收已落库的新 slotId：每次重试留一行孤儿，12 行就能把整片名额占到 6h TTL 之后 | `reserveGlobalSlot` 的 `unavailable` 分支对**非接管**（新铸 UUID）`waitUntil(releaseSignalingSessionSlot(slotId, clientKey))`；接管复用旧会话的 slotId 不删，避免误删别人的名额 | 同上的 503 用例断言本地槽位行为 0 |
+| reserve 响应丢失时不回收已落库的新 slotId：每次重试留一行孤儿，12 行就能把整片名额占到 6h TTL 之后 | `reserveGlobalSlot` 的 `unavailable` 分支**无条件**`ctx.waitUntil(releaseSignalingSessionSlot(slotId, slotReleaseToken))`。每条连接（含接管）都用自己新铸的 slotId + token，所以回收只可能删到自己那张；条件删除的 token 不匹配时是 no-op，不会误删别人的行 | `signalingHub.test.ts`「接管时名额 RPC 丢响应：本次新铸的 slotId 必须按自己的 token 回收，不留孤儿行」（接管 503、只发一次 release、slotId 与 token 都对得上本次连接、旧会话仍在册）；负对照：把回收改回 `if (!isTakeover)` ⇒ 该用例红 |
 
 ### 产品（拒绝文案归因 + 限流优先级）
 
@@ -561,3 +561,39 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 - 服务覆盖率门禁现在跑两遍（带 exclude 的判定 + 不带 exclude 的参考数字），本地约 34s、CI 相应变长：换来「判定口径」和「全仓数字」两件事互不污染。
 - 组件渲染层仍无测试（仓库没有 jsdom/Testing Library，且不新增依赖），组件行为靠 Playwright 覆盖。
 - CI 三个 job 是信号不是闸门：Cloudflare Git 集成的部署不读 GitHub 检查，除非在分支保护里把 `verify` / `e2e-product` 设为必需检查。
+
+## 8.12 第十轮复评后的补齐（2026-11-14，复评基线 90 / 82 / 90）
+
+### 安全（名额回收的旧假设、两条空断言）
+
+| 缺口 | 修法 | 回归测试 |
+| --- | --- | --- |
+| 接管现在也新铸 `slotId`，但 `reserveGlobalSlot` 的孤儿回收仍写着 `if (!isTakeover)`（照抄「接管复用旧会话 slotId」的旧假设）——分片模式下「接管 + shard 0 的 `/internal/session-slot` 丢响应」每次泄漏一行到 6h TTL，12 次后同出口全部 4029，而那行没人持有 token（生产未开分片，暴露面 0） | `unavailable` 分支改为**无条件** `ctx.waitUntil(releaseSignalingSessionSlot(slotId, slotReleaseToken))`：每条连接（含接管）都用自己新铸的 slotId + token，条件删除的 token 不匹配时是 no-op，所以只会删到自己那张 | `signalingHub.test.ts`「接管时名额 RPC 丢响应：本次新铸的 slotId 必须按自己的 token 回收，不留孤儿行」（接管 503、只发一次 release、slotId/token 与本次连接一致、旧会话仍 registered 且未被关）；负对照：改回 `if (!isTakeover)` ⇒ 红 |
+| 「接管换名额」用例里 token 对不上的分支把 `replaces.slotId` 指向已经消失的 `slot-old`，等于只测了「陈旧 replaces」；把 `applySessionSlotRelease` 与 `replaces` 的 token 条件整个删掉，172 条测试仍全绿 | 改成让 `replaces` 指向**真实存在**、归属 `tok-new` 的那行但带旧 token：断言 reserve 返回 false（撞上限）、行数与归属都没变 | `sessionStore.sqlite.test.ts` 同一用例；负对照：去掉两处 `AND release_token = ?` ⇒ 3 条红（含 `slot release 带 releaseToken` 与并发接管用例） |
+| 文档与注释按旧假设描述「接管复用旧会话的 slotId，不删避免误删」 | 改 `docs/design-scale-out.md` 该行与 §8.11 的措辞；`src/worker.ts`（`reserveGlobalSlot`、`unregisterSocket`）与 `services/signaling/sessionStore.ts`（`applySessionSlotRelease` 的 docblock）同步 | — |
+
+### 产品（重试预算被清零、冷却 ticker、读屏、裸 stop）
+
+| 缺口 | 修法 | 回归测试 |
+| --- | --- | --- |
+| `shareUnavailableAttemptsRef.current = 0` 与 `setViewerRetryAt(null)` 落在 `if (!isRetry)` **之外**：3s 重试分支把计数 +1，`connectToSharer(sharerId, true)` 又被清零 ⇒ attempts 永远 0 < 1，观众永远停在「正在连接」，每 3s 一轮注册+offer（≈20 次/分钟，刚好低于 24/60s 的限流），20s 全局超时也被清掉——「看起来正常实际坏了」。纯函数测试只测入参，SSR 组件测试看不到这条链 | 把这两行移进 `if (!isRetry)`，并在注释里写明「放在外面会让 3 秒自动重试每次清零计数，永远停在重试态」 | 新增 E2E「a link whose sharer has no live session ends in a terminal state instead of retrying forever」：用 `crypto.randomUUID()` 造一个从未注册的 peerId 打开 `/?view=<uuid>`，45s 内必须出现终态文案，随后 8s 内不许出现「正在重试」、也不许退化成「连接超时」（实测 3–4s 进终态并稳定）；负对照：把清零放回 `isRetry` 之外 ⇒ 该用例红（永不出现终态） |
+| 冷却 ticker 不归零：`shareRoomRetryAt` / `viewerRetryAt` 到期后没有代码置 null，一次 429 之后 2800 行的 `ScreenShare.tsx` 永久 1Hz 重渲染 | 新增 effect：`describeRetryCooldown(...).canRetry` 为真时 `setXxxRetryAt(null)`（依赖里带 `retryCooldownTick`） | 冷却期禁用与倒计时的既有组件测试仍覆盖「有冷却」；归零由 effect + typecheck 兜底（无 SSR 级断言，记录为已知取舍） |
+| 观众侧「正在连接」「错误+重试」「终态卡」都不是 live region；toast 全仓没有 `aria-live` | 四处按语义加 `role`/`aria-live`（连接中 `status`+`polite`，阻断错误与终态 `alert`+`assertive`，各带注释说明理由）；toast 用 sonner，其容器自带 `aria-live="polite"`，把配置抽成无 JSX 的 `components/toasterProps.ts`（`containerAriaLabel: '通知'`）让 `App.tsx` 可测 | `ScreenShareUI.test.ts` 4 条（同一标签内 `role=...[^>]*aria-live=...`）、`components/toasterProps.test.ts` 渲 `<Toaster {...TOASTER_PROPS} />` 断言 `aria-live="polite"` 与中文标签；负对照：逐个删 `role/aria-live` 或 `containerAriaLabel` ⇒ 对应断言红 |
+| `stopScreenShare`、`failSharerSession`、卸载清理仍用裸 `getTracks().stop()`，没摘 `onended`（`track.stop()` 不触发 `ended`，暂无可见后果，但以后改成「stop + ended」就会误触发停止流程） | 三处统一走 `releaseCapturedStream`（先摘 `videoTrack.onended` 再停轨），组件内已无裸 `stop()` | `shareStreamLifecycle.test.ts`「释放之后旧轨迟到的 ended 不会再跑原回调」；负对照：去掉 `onended = null` ⇒ 红 |
+
+### 工程（白名单机械上限、两条空保障、理由与事实、job 依赖）
+
+| 缺口 | 修法 | 验证 |
+| --- | --- | --- |
+| 组件白名单没有机械上限：`Receiver.tsx` / `ScreenShare.tsx` / `Sender.tsx` 整块登记出分母后，组件门禁只在约 1/4 的组件代码上算 60%，而 `minimumReported` 会跟着条目数自动下降——再给一条白名单也照样过 | 新增 `allowlistBudget`：services `{maxEntries: 2, maxExcludedLineShare: 0.05}`、components `{maxEntries: 3, maxExcludedLineShare: 0.8}`，条目数与行数占比都判；`--self-test` 对条目数也判，行数占比只在运行时判（自检只 warn，否则真实树会让 `--self-test` 永久红、标志物失效） | `--scope=components` 打印「白名单预算 7860/10374 行（75.77%，上限 80%），条目上限 3 条」；负对照：上限改 0.7 ⇒ exit 1 且只余预算失败；给 components 加第 4 条 ⇒ 先撞条目上限 exit 1 |
+| 自测里「分组缩进的裸文件名按目录栈还原」这条 fixture 是空的：把 `prefix` 置空它仍然通过（后缀兜底把裸名认成了 `services/send/sendFileSequence.ts`） | fixture 改成「两个目录各有 `sendChunkSize.ts`」，让后缀兜底产生遮蔽；`prefix` 置空后 3 条 fixture 立即红 | `--self-test` 18 条报告 fixture + 4 条预算 fixture + 3 条理由 fixture |
+| 白名单理由的存在性检查被自身的 `.filter((file) => !/\.test\.(ts|tsx)$/)` 击穿：理由引用**真实存在**的测试文件反而报「不存在」，所以这段检查从未生效 | 改用 `git ls-files -co --exclude-standard`（含未跟踪、含测试文件）判断存在性 | 负对照：理由引用真实存在的 `services/connectionPolicy.test.ts` ⇒ 通过；引用不存在的 `services/hashUtils.test.ts` ⇒ exit 1 |
+| 白名单理由与代码相反：`ScreenShare.tsx` / `Sender.tsx` 说「顶层访问 window」，但 M4 惰性化之后它们在 Node 里 import 得进来 | 理由改成真实情况：不是加载不了，是**没有测试 import 它**，渲染依赖真实 `getDisplayMedia`/`RTCPeerConnection`/`DataChannel`，由 `test:e2e` 与 `test:e2e:product-transfer` 覆盖；`Receiver.tsx` 保留 streamsaver 顶层读 `document` 的真实原因 | 理由文案在 `--scope` 成功输出里逐条打印，供复核 |
+| CI 三个 job 互相没有 `needs`，任一红不影响其余；组件门禁又是一盏会随预算变色的灯 | `e2e` / `e2e-product` 都 `needs: verify`；组件门禁拆成独立 job `coverage-components`（不能塞进 verify，否则它一红浏览器用例就被整批 skip，等于抹掉刚接进 CI 的 screenshare E2E） | `.github/workflows/ci.yml`（PyYAML 解析 4 job，`needs` 如述） |
+
+### 仍然存在的已知取舍
+
+- 组件白名单占了约 75.77% 的组件行数，门禁实际只在四分之一的代码上算覆盖率；要真正降下来只能把 `ScreenShare`/`Receiver` 里可测的状态机继续抽到 `services/`（不新增测试依赖的前提下）。
+- 冷却归零、三处采集释放只有 helper 契约测试 + typecheck，没有组件渲染级断言（仓库无 jsdom，且不加依赖）。
+- CI 仍是信号不是闸门：Cloudflare Git 集成的部署不读 GitHub 检查，除非在分支保护里把 `verify` / `coverage-components` / `e2e-product` 设为必需。
+- `components/Receiver.tsx`（3367 行）、`components/ScreenShare.tsx`（约 2800 行）的体量与 AGENTS「不在 components 里堆传输逻辑」仍有张力，拆分属结构性工作，未在本轮做。
