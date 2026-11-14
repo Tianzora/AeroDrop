@@ -451,7 +451,26 @@ export const applySessionSlotReserve = (
   return true;
 };
 
-export const applySessionSlotRelease = (sql: SqlLike, slotId: string): void => {
+/**
+ * 释放名额。
+ *
+ * 必须能只删「自己那张」：并发接管时落败的一方也会走回滚，而它复用同一个 slotId，
+ * 裸删会把胜出方刚拿到（并已投递 registered）的名额一起删掉——全局上限被悄悄放宽。
+ * 传 clientKey 时按归属条件删除。
+ */
+export const applySessionSlotRelease = (
+  sql: SqlLike,
+  slotId: string,
+  clientKey?: string
+): void => {
+  if (clientKey) {
+    sql.exec(
+      'DELETE FROM signaling_session_slots WHERE slot_id = ? AND client_key = ?',
+      slotId,
+      clientKey
+    );
+    return;
+  }
   sql.exec('DELETE FROM signaling_session_slots WHERE slot_id = ?', slotId);
 };
 
@@ -552,8 +571,9 @@ const toShareCodeRecord = (row: ShareCodeRow): ShareCodeRecord => ({
  * 按码读活跃记录。**读路径不再写库**：以前这里每次查询都顺手跑一遍过期清理，
  * 而未认证的 `GET /api/share-code/:code` 会直接落到这里，等于让公网匿名请求在
  * shard 0 上开写事务（既放大写量，也和读的语义不符）。过期行改由写路径清理：
- * 登记/撤销/恢复都会先 `purgeExpiredShareCodes`，而分配的冲突判定也在那次清理之后，
- * 所以「过期行挡住复用」的问题不会出现。这里只按 `expires_at`/`revoke_after` 过滤。
+ * 只有登记路径（`registerShareCode`）会先 `purgeExpiredShareCodes`，而码冲突判定
+ * 就在那次清理之后，所以「过期行挡住复用」的问题不会出现；撤销/恢复按 code 精确定位，
+ * 过期行本来也不会命中。这里只按 `expires_at`/`revoke_after` 过滤。
  */
 export const findActiveShareCode = (
   sql: SqlLike,

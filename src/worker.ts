@@ -184,6 +184,11 @@ type SignalingEnvelope =
       kind?: 'data' | 'media';
       /** 可重试的拒绝（如 offer 限流）带上建议等待时长，客户端据此显示倒计时。 */
       retryAfterMs?: number;
+      /**
+       * 拒绝来自哪一层额度。观众侧文案完全不同：`offer` 是「请求太频繁，等 N 秒」，
+       * `session` 是「同网络其它设备占着名额」，倒计时对后者毫无意义。
+       */
+      limit?: 'session' | 'offer';
     }
   | {
       type: 'offer' | 'answer';
@@ -1141,6 +1146,7 @@ export class SignalingHub extends DurableObject<Env> {
           type: 'error',
           code: 'rate-limited',
           message: 'Too many signaling sessions',
+          limit: 'session',
         } satisfies SignalingEnvelope)
       );
       server.close(4029, 'Too many sessions');
@@ -1168,7 +1174,7 @@ export class SignalingHub extends DurableObject<Env> {
     const rollbackQuota = async (): Promise<void> => {
       if (sessionSlotId) {
         this.slotBySocket.delete(server);
-        await this.releaseSignalingSessionSlot(sessionSlotId);
+        await this.releaseSignalingSessionSlot(sessionSlotId, clientKey);
       }
       if (seatAcquired) this.sessionLimiter.release(clientKey);
     };
@@ -1211,6 +1217,12 @@ export class SignalingHub extends DurableObject<Env> {
             signalingTelemetry.record('signal_session_slot_unavailable', {
               shardCount: this.getSignalingShardCount(),
             });
+            // 响应丢了，但 shard 0 可能已经写进这张新 slotId。不回收的话，每次重试都留
+            // 一行孤儿名额，12 次就能把整片名额占满到 TTL（6h）——下次成功的重试反而被拒。
+            // 只有本次新铸的 id 才回收；接管复用旧会话的 slotId，删它等于删别人的名额。
+            if (!isTakeover) {
+              this.ctx.waitUntil(this.releaseSignalingSessionSlot(slotId, clientKey));
+            }
             slotUnavailable = true;
             return null;
           }
@@ -1452,7 +1464,8 @@ export class SignalingHub extends DurableObject<Env> {
           payload.connectionId,
           payload.targetPeerId,
           payload.kind,
-          rateLimitDecision.retryAfterMs
+          rateLimitDecision.retryAfterMs,
+          'offer'
         );
         return;
       }
@@ -1482,6 +1495,7 @@ export class SignalingHub extends DurableObject<Env> {
 
     this.deliveryChains.delete(ws);
     this.slotRefreshedAt.delete(ws);
+    const clientKey = this.clientBySocket.get(ws);
     const slotId = this.slotBySocket.get(ws);
     if (slotId) {
       this.slotBySocket.delete(ws);
@@ -1489,11 +1503,11 @@ export class SignalingHub extends DurableObject<Env> {
       if (this.slotOwnerSocket.get(slotId) === ws) {
         this.slotOwnerSocket.delete(slotId);
         // 释放是尽力而为：计数失败最多让名额晚一点回收（有 TTL 兜底），不能影响关闭流程。
-        this.ctx.waitUntil(this.releaseSignalingSessionSlot(slotId));
+        // 带上 clientKey 只删自己那张：并发接管时旧 socket 与胜出方共用同一个 slotId。
+        this.ctx.waitUntil(this.releaseSignalingSessionSlot(slotId, clientKey));
       }
     }
 
-    const clientKey = this.clientBySocket.get(ws);
     if (clientKey) {
       this.clientBySocket.delete(ws);
       this.sessionLimiter.release(clientKey);
@@ -2010,7 +2024,11 @@ export class SignalingHub extends DurableObject<Env> {
       return json({ granted: false, released: false }, { status: 400 });
     }
     if (body?.action === 'release') {
-      applySessionSlotRelease(this.getSql(), slotId);
+      // 带上 clientKey 时按归属删除：并发接管里落败的一方会复用同一个 slotId，
+      // 裸删会把胜出方刚投递完 registered 的名额一起删掉。
+      const releaseClientKey =
+        typeof body?.clientKey === 'string' && body.clientKey ? body.clientKey : undefined;
+      applySessionSlotRelease(this.getSql(), slotId, releaseClientKey);
       return json({ released: true });
     }
     const now = typeof body?.now === 'number' && Number.isFinite(body.now) ? body.now : Date.now();
@@ -2072,7 +2090,15 @@ export class SignalingHub extends DurableObject<Env> {
       );
       if (!response.ok) return 'unavailable';
       const body = (await response.json()) as { granted?: unknown } | null;
-      return body?.granted === false ? 'exhausted' : 'granted';
+      // 只有明确 granted:true 才算领到。2xx 但 body 形状不对（字段改名、代理插入的
+      // 空对象、被截断又恰好能解析的 JSON）必须按「不可达」处理：按 granted 放行的
+      // 话，任何 schema 演化都会静默变成绕过全局名额。
+      if (body !== null && typeof body === 'object') {
+        if (body.granted === true) return 'granted';
+        if (body.granted === false) return 'exhausted';
+      }
+      console.warn('signaling session slot reserve returned an unexpected body');
+      return 'unavailable';
     } catch (error) {
       console.warn('signaling session slot reserve failed', error);
       return 'unavailable';
@@ -2103,10 +2129,14 @@ export class SignalingHub extends DurableObject<Env> {
     }
   }
 
-  private async releaseSignalingSessionSlot(slotId: string): Promise<void> {
+  /**
+   * 释放名额。带上 clientKey 时按归属条件删除：并发接管里落败的一方复用同一个 slotId，
+   * 裸删会把胜出方刚投递完 registered 的名额一起删掉（全局 12 会话上限被悄悄放宽）。
+   */
+  private async releaseSignalingSessionSlot(slotId: string, clientKey?: string): Promise<void> {
     if (this.getSignalingShardCount() <= 1) return;
     if (this.isShardZero()) {
-      applySessionSlotRelease(this.getSql(), slotId);
+      applySessionSlotRelease(this.getSql(), slotId, clientKey);
       return;
     }
     try {
@@ -2114,7 +2144,7 @@ export class SignalingHub extends DurableObject<Env> {
         new Request(`https://signaling.internal${SIGNALING_SESSION_SLOT_PATH}`, {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ action: 'release', slotId }),
+          body: JSON.stringify({ action: 'release', slotId, clientKey }),
         })
       );
     } catch (error) {
@@ -2338,7 +2368,8 @@ export class SignalingHub extends DurableObject<Env> {
     connectionId?: string,
     targetPeerId?: string,
     kind?: 'data' | 'media',
-    retryAfterMs?: number
+    retryAfterMs?: number,
+    limit?: 'session' | 'offer'
   ): void {
     ws.send(
       JSON.stringify({
@@ -2349,6 +2380,7 @@ export class SignalingHub extends DurableObject<Env> {
         targetPeerId,
         kind,
         retryAfterMs,
+        limit,
       } satisfies SignalingEnvelope)
     );
   }

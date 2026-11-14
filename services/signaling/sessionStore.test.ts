@@ -407,6 +407,24 @@ test('slot reserve grants one seat per client, transfers an existing slot, and e
   assert.ok(!fullCalls.some((text) => text.startsWith('INSERT OR REPLACE')));
 });
 
+test('slot release 带 clientKey 时只删自己那张：并发接管落败方不能删掉胜出方的名额', () => {
+  const conditional = createFakeSql();
+  applySessionSlotRelease(conditional.sql, 'slot-x', 'ip:1');
+  const [call] = conditional.calls.filter((entry) =>
+    entry.sql.startsWith('DELETE FROM signaling_session_slots')
+  );
+  assert.match(call.sql, /WHERE slot_id = \? AND client_key = \?/);
+  assert.deepEqual(call.params, ['slot-x', 'ip:1']);
+
+  // 不传 clientKey 时保持旧语义（服务端内部兜底释放），否则 TTL 清理之外的回收路径会漏。
+  const unconditional = createFakeSql();
+  applySessionSlotRelease(unconditional.sql, 'slot-x');
+  const [plain] = unconditional.calls.filter((entry) =>
+    entry.sql.startsWith('DELETE FROM signaling_session_slots')
+  );
+  assert.doesNotMatch(plain.sql, /client_key/);
+});
+
 test('slot release is idempotent and renew reports a missing slot', () => {
   const fake = createFakeSql();
   assert.doesNotThrow(() => applySessionSlotRelease(fake.sql, 'missing-slot'));

@@ -199,7 +199,12 @@ test('槽位在真实库上按 client 计数、同 slot 转移、可续期与释
     .get() as { expires_at: number };
   assert.equal(renewed.expires_at, now + 2 + ttlMs);
 
-  applySessionSlotRelease(sql, 'slot-a');
+  // 归属不符的释放必须是空操作：并发接管里落败的一方复用同一个 slotId 回滚，
+  // 裸删会把胜出方刚投递完 registered 的名额一起删掉（全局上限被悄悄放宽）。
+  applySessionSlotRelease(sql, 'slot-a', 'ip:1');
+  assert.equal(countRows(db, 'signaling_session_slots'), 2, '别的 client 不能删掉 ip:2 的名额');
+
+  applySessionSlotRelease(sql, 'slot-a', 'ip:2');
   assert.equal(countRows(db, 'signaling_session_slots'), 1);
   assert.equal(applySessionSlotRenew(sql, { slotId: 'slot-a', now: now + 3, ttlMs }), false);
   db.close();

@@ -361,7 +361,11 @@ test('超过每 IP 会话上限时回 4029，且失败不会吃掉名额', async
 
   const second = await upgrade(hub, 'peerId=AERO-HUB20002', '203.0.113.20');
   const secondServer = serverOf(second.webSocket);
-  assert.equal(secondServer.lastMessage()?.code, 'rate-limited');
+  const rejection = secondServer.lastMessage() as { code?: string; limit?: string } | null;
+  assert.equal(rejection?.code, 'rate-limited');
+  // 会话名额拒绝必须标 limit=session：观众侧不能把它显示成「60 秒后可重试」——
+  // 名额被同出口别的标签页占着，等多久都不会好。
+  assert.equal(rejection?.limit, 'session');
   assert.equal(closedCode(secondServer), 4029);
 
   // 不同出口 IP 不受影响。
@@ -1380,9 +1384,13 @@ test('offer 限流的 error 必须带上 retryAfterMs：客户端据此显示倒
   });
   await settle();
 
-  const limited = sender.lastMessage() as { type?: string; code?: string; retryAfterMs?: number } | null;
+  const limited = sender.lastMessage() as
+    | { type?: string; code?: string; retryAfterMs?: number; limit?: string }
+    | null;
   assert.equal(limited?.type, 'error');
   assert.equal(limited?.code, 'rate-limited');
+  // 层级必须写明：观众侧要据此区分「等一会儿」与「同网络别的设备占着名额」。
+  assert.equal(limited?.limit, 'offer', 'offer 限流必须标 limit=offer');
   assert.equal(typeof limited?.retryAfterMs, 'number', '限流拒绝必须给出建议等待时长');
   assert.ok((limited?.retryAfterMs ?? 0) > 0, 'retryAfterMs 必须为正数');
   assert.ok(
