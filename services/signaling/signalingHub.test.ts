@@ -27,7 +27,11 @@ import {
 } from '../../constants/signaling.ts';
 import { MAX_SIGNALING_MESSAGES_PER_WINDOW } from '../signalingRateLimitPolicy.ts';
 import { rendezvousShardIndex } from './shardRouting.ts';
-import { applySessionSlotRelease, applySessionSlotReserve } from './sessionStore.ts';
+import {
+  applySessionSlotRelease,
+  applySessionSlotReserve,
+  applySessionSlotRenew,
+} from './sessionStore.ts';
 import {
   WS_BASE_PROTOCOL,
   WS_CREDENTIAL_PROTOCOL_PREFIX,
@@ -292,10 +296,15 @@ const hash = (char: string): string => char.repeat(64);
 
 const readSlotRows = (
   db: DatabaseSync
-): { slot_id: string; client_key: string; expires_at: number }[] =>
+): { slot_id: string; client_key: string; release_token: string; expires_at: number }[] =>
   db
-    .prepare('SELECT slot_id, client_key, expires_at FROM signaling_session_slots')
-    .all() as unknown as { slot_id: string; client_key: string; expires_at: number }[];
+    .prepare('SELECT slot_id, client_key, release_token, expires_at FROM signaling_session_slots')
+    .all() as unknown as {
+    slot_id: string;
+    client_key: string;
+    release_token: string;
+    expires_at: number;
+  }[];
 
 /** 找一个 rendezvous 到指定分片的 peerId：分片路由是确定性的，不能靠猜。 */
 const peerIdOnShard = (shard: number, prefix: string): string => {
@@ -830,7 +839,7 @@ test('跨 IP 接管时旧 socket 先断开：配额只释放一次，同 IP 的�
     shardName: 'signaling-shard-1',
     signalingHub: {
       respond: async (call) => {
-        const body = call.body as { action?: string; slotId?: string; clientKey?: string; lookups?: unknown[] } | null;
+        const body = call.body as { action?: string; slotId?: string; clientKey?: string; releaseToken?: string; lookups?: unknown[] } | null;
         const sql = () => createSqlite(holder.current!.db);
         if (call.url.endsWith('/internal/lookup-share-codes')) {
           const count = Array.isArray(body?.lookups) ? body.lookups.length : 0;
@@ -851,7 +860,11 @@ test('跨 IP 接管时旧 socket 先断开：配额只释放一次，同 IP 的�
           return { status: 200, body: { granted: true } };
         }
         if (body?.action === 'release') {
-          applySessionSlotRelease(sql(), body.slotId ?? '');
+          applySessionSlotRelease(
+            sql(),
+            body.slotId ?? '',
+            typeof body.releaseToken === 'string' ? body.releaseToken : undefined
+          );
           return { status: 200, body: { released: true } };
         }
         return { status: 200, body: {} };
@@ -956,7 +969,7 @@ test('交错注册竞态：A 的名额 RPC 在途时 B 落定，A 回 session-co
     signalingHub: {
       respond: async (call) => {
         const body = call.body as
-          | { action?: string; slotId?: string; clientKey?: string; lookups?: unknown[] }
+          | { action?: string; slotId?: string; clientKey?: string; releaseToken?: string; lookups?: unknown[] }
           | null;
         const sql = () => createSqlite(handle.current!.db);
         // 本片是 shard 1：名额 reserve 是跨 DO RPC，A 正好在这里让出事件循环。
@@ -969,6 +982,7 @@ test('交错注册竞态：A 的名额 RPC 在途时 B 落定，A 回 session-co
           const granted = applySessionSlotReserve(sql(), {
             slotId: body.slotId ?? '',
             clientKey: body.clientKey ?? '',
+            releaseToken: typeof body.releaseToken === 'string' ? body.releaseToken : '',
             now: Date.now(),
             maxSessions: 12,
             ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
@@ -976,7 +990,11 @@ test('交错注册竞态：A 的名额 RPC 在途时 B 落定，A 回 session-co
           return { status: 200, body: { granted } };
         }
         if (body?.action === 'release') {
-          applySessionSlotRelease(sql(), body.slotId ?? '');
+          applySessionSlotRelease(
+            sql(),
+            body.slotId ?? '',
+            typeof body.releaseToken === 'string' ? body.releaseToken : undefined
+          );
           return { status: 200, body: { released: true } };
         }
         if (call.url.endsWith('/internal/lookup-share-codes')) {
@@ -1027,6 +1045,117 @@ test('交错注册竞态：A 的名额 RPC 在途时 B 落定，A 回 session-co
   await created.settle();
   assert.equal(socketB.lastMessage()?.type, 'offer', 'B 必须仍是该 peerId 的在位会话');
   assert.equal(socketB.closed, null);
+});
+
+test('并发接管同一会话：事后只剩一条名额，且它归属已注册的那条连接', async () => {
+  // 复现安全评审 M1：两条连接同时接管同一个 peerId 时会复用同一个 slotId，后 reserve 的
+  // 一方把 release_token 改写成自己，落败方回滚就按 token 删掉了胜出方（已收到
+  // registered）的名额——该会话之后 renew 永远失败，全局 12 会话上限退化成「每片各 12 条」。
+  const peerId = 'AERO-TAKEOVERDUP';
+  const ipOwner = '203.0.113.70';
+  const ipA = '203.0.113.71';
+  const ipB = '203.0.113.72';
+  const handle: { current: Awaited<ReturnType<typeof createHub>> | null } = { current: null };
+  let upgradeB: Promise<FakeResponse> | null = null;
+  // 第 1 次是旧会话自己注册，第 2 次才是第一个接管方：此刻让第二个接管方完整落定。
+  let reserveCalls = 0;
+
+  const created = await createHub({
+    shardCount: '2',
+    shardName: 'signaling-shard-1',
+    signalingHub: {
+      respond: async (call) => {
+        const body = call.body as
+          | {
+              action?: string;
+              slotId?: string;
+              clientKey?: string;
+              releaseToken?: string;
+              replaces?: { slotId?: string; releaseToken?: string };
+              lookups?: unknown[];
+            }
+          | null;
+        const sql = () => createSqlite(handle.current!.db);
+        if (body?.action === 'reserve') {
+          // 第一个接管方让出事件循环：等第二个接管方完整落定之后再返回自己的 reserve 结果。
+          reserveCalls += 1;
+          if (reserveCalls === 2) {
+            upgradeB = upgrade(handle.current!.hub, `peerId=${peerId}`, ipB);
+            await upgradeB;
+          }
+          const granted = applySessionSlotReserve(sql(), {
+            slotId: body.slotId ?? '',
+            clientKey: body.clientKey ?? '',
+            releaseToken: typeof body.releaseToken === 'string' ? body.releaseToken : '',
+            ...(body.replaces?.slotId && body.replaces?.releaseToken
+              ? {
+                  replaces: {
+                    slotId: body.replaces.slotId,
+                    releaseToken: body.replaces.releaseToken,
+                  },
+                }
+              : {}),
+            now: Date.now(),
+            maxSessions: 12,
+            ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
+          });
+          return { status: 200, body: { granted } };
+        }
+        if (body?.action === 'release') {
+          applySessionSlotRelease(
+            sql(),
+            body.slotId ?? '',
+            typeof body.releaseToken === 'string' ? body.releaseToken : undefined
+          );
+          return { status: 200, body: { released: true } };
+        }
+        if (call.url.endsWith('/internal/lookup-share-codes')) {
+          const count = Array.isArray(body?.lookups) ? body.lookups.length : 0;
+          return { status: 200, body: { records: Array.from({ length: count }, () => null) } };
+        }
+        return { status: 200, body: { allowed: true } };
+      },
+    },
+  });
+  handle.current = created;
+
+  const owner = serverOf((await upgrade(created.hub, `peerId=${peerId}`, ipOwner)).webSocket);
+  await created.settle();
+  assert.equal(owner.lastMessage()?.type, 'registered');
+  assert.equal(readSlotRows(created.db).length, 1, '第一条会话必须占一个名额');
+
+  const socketA = serverOf((await upgrade(created.hub, `peerId=${peerId}`, ipA)).webSocket);
+  const responseB = await upgradeB!;
+  assert.equal(responseB.status, 101, `B 的升级必须成功，实际 ${responseB.status}`);
+  const socketB = serverOf(responseB.webSocket);
+  await created.settle();
+
+  // 谁赢由时序决定：只要求「恰好一条注册成功」。
+  const registered = [socketA, socketB].filter(
+    (socket) => socket.lastMessage()?.type === 'registered'
+  );
+  assert.equal(registered.length, 1, '同一 peerId 只能有一个注册成功的会话');
+  const survivor = registered[0]!;
+  const loser = survivor === socketA ? socketB : socketA;
+  assert.equal(loser.closed?.code, 4010);
+
+  const slots = readSlotRows(created.db);
+  assert.equal(slots.length, 1, '并发接管后只能剩一条活名额（落败方回滚不能删掉胜出方的）');
+  const survivorAttachment = survivor.deserializeAttachment() as { slotReleaseToken?: string };
+  assert.equal(
+    slots[0]!.release_token,
+    survivorAttachment.slotReleaseToken,
+    '留下的名额必须归属已注册的那条连接'
+  );
+  assert.equal(
+    applySessionSlotRenew(createSqlite(created.db), {
+      slotId: slots[0]!.slot_id,
+      now: Date.now(),
+      ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
+    }),
+    true,
+    '胜出方的名额必须还能续期，否则全局计数会退化成每片各算一次'
+  );
 });
 
 test('跨片投递 RPC 抛错：调用方收到 peer-unavailable，只记一条 rpc_error 失败指标', async () => {

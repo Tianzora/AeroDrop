@@ -403,8 +403,14 @@ export const initializeSessionSlotSchema = (sql: SqlLike): void => {
     'CREATE TABLE IF NOT EXISTS signaling_session_slots (' +
       'slot_id TEXT PRIMARY KEY, ' +
       'client_key TEXT NOT NULL, ' +
+      "release_token TEXT NOT NULL DEFAULT '', " +
       'expires_at INTEGER NOT NULL)'
   );
+  // 老部署的表里没有 release_token：ALTER 没有 IF NOT EXISTS，先查 PRAGMA 再补。
+  const columns = sql.exec<{ name: string }>('PRAGMA table_info(signaling_session_slots)').toArray();
+  if (!columns.some((column) => column.name === 'release_token')) {
+    sql.exec("ALTER TABLE signaling_session_slots ADD COLUMN release_token TEXT NOT NULL DEFAULT ''");
+  }
   sql.exec(
     'CREATE INDEX IF NOT EXISTS idx_signaling_session_slots_client ' +
       'ON signaling_session_slots(client_key)'
@@ -415,10 +421,22 @@ export const initializeSessionSlotSchema = (sql: SqlLike): void => {
  * 原子语义的近似：先清过期槽位，再数一次、插一条。DO 内单线程执行，无并发窗口。
  * 同一个 slotId 已存在时是「接管续期」而不是新占名额：直接改归属与过期时间，
  * 否则接管方要先释放再领取，领取失败就把旧会话的名额白白吃掉。
+ *
+ * releaseToken 是每条连接自己铸的随机串，用来回答「这行名额是谁的」。不能拿
+ * clientKey 代替：它是出口 IP，同一 CGNAT 下多条连接完全相同。
  */
 export const applySessionSlotReserve = (
   sql: SqlLike,
-  input: { slotId: string; clientKey: string; now: number; maxSessions: number; ttlMs: number }
+  input: {
+    slotId: string;
+    clientKey: string;
+    releaseToken: string;
+    now: number;
+    maxSessions: number;
+    ttlMs: number;
+    /** 接管时被顶替的旧会话名额：同一次决策里先让出一个计数，再接新的。 */
+    replaces?: { slotId: string; releaseToken: string };
+  }
 ): boolean => {
   sql.exec('DELETE FROM signaling_session_slots WHERE expires_at <= ?', input.now);
   const existing = sql
@@ -426,8 +444,9 @@ export const applySessionSlotReserve = (
     .toArray();
   if (existing.length > 0) {
     sql.exec(
-      'UPDATE signaling_session_slots SET client_key = ?, expires_at = ? WHERE slot_id = ?',
+      'UPDATE signaling_session_slots SET client_key = ?, release_token = ?, expires_at = ? WHERE slot_id = ?',
       input.clientKey,
+      input.releaseToken,
       input.now + input.ttlMs,
       input.slotId
     );
@@ -439,13 +458,33 @@ export const applySessionSlotReserve = (
       input.clientKey
     )
     .toArray();
-  if (Number(rows[0]?.count ?? 0) >= input.maxSessions) {
+  // 接管是「一个换一个」：旧行还在表里时先把它从计数里扣掉，否则 IP 正好满额时
+  // 连重连都会被拒。真正删旧行放在判定之后，失败时旧会话的名额不会被白白吃掉。
+  const replaced = input.replaces
+    ? sql
+        .exec<{ slot_id: string }>(
+          'SELECT slot_id FROM signaling_session_slots WHERE slot_id = ? AND release_token = ?',
+          input.replaces.slotId,
+          input.replaces.releaseToken
+        )
+        .toArray()
+    : [];
+  const occupied = Number(rows[0]?.count ?? 0) - (replaced.length > 0 ? 1 : 0);
+  if (occupied >= input.maxSessions) {
     return false;
   }
+  if (input.replaces && replaced.length > 0) {
+    sql.exec(
+      'DELETE FROM signaling_session_slots WHERE slot_id = ? AND release_token = ?',
+      input.replaces.slotId,
+      input.replaces.releaseToken
+    );
+  }
   sql.exec(
-    'INSERT OR REPLACE INTO signaling_session_slots (slot_id, client_key, expires_at) VALUES (?, ?, ?)',
+    'INSERT OR REPLACE INTO signaling_session_slots (slot_id, client_key, release_token, expires_at) VALUES (?, ?, ?, ?)',
     input.slotId,
     input.clientKey,
+    input.releaseToken,
     input.now + input.ttlMs
   );
   return true;
@@ -456,18 +495,19 @@ export const applySessionSlotReserve = (
  *
  * 必须能只删「自己那张」：并发接管时落败的一方也会走回滚，而它复用同一个 slotId，
  * 裸删会把胜出方刚拿到（并已投递 registered）的名额一起删掉——全局上限被悄悄放宽。
- * 传 clientKey 时按归属条件删除。
+ * 传 releaseToken 时按归属条件删除；token 由每条连接自己铸，接管方会用自己的 token
+ * 重新领取同一行，所以落败方的回滚永远删不掉胜出方的名额。
  */
 export const applySessionSlotRelease = (
   sql: SqlLike,
   slotId: string,
-  clientKey?: string
+  releaseToken?: string
 ): void => {
-  if (clientKey) {
+  if (releaseToken) {
     sql.exec(
-      'DELETE FROM signaling_session_slots WHERE slot_id = ? AND client_key = ?',
+      'DELETE FROM signaling_session_slots WHERE slot_id = ? AND release_token = ?',
       slotId,
-      clientKey
+      releaseToken
     );
     return;
   }

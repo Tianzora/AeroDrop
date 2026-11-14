@@ -169,22 +169,22 @@ test('槽位在真实库上按 client 计数、同 slot 转移、可续期与释
   const now = 1_000;
 
   assert.equal(
-    applySessionSlotReserve(sql, { slotId: 'slot-a', clientKey: 'ip:1', now, maxSessions: 2, ttlMs }),
+    applySessionSlotReserve(sql, { slotId: 'slot-a', clientKey: 'ip:1', releaseToken: 'tok-a', now, maxSessions: 2, ttlMs }),
     true
   );
   assert.equal(
-    applySessionSlotReserve(sql, { slotId: 'slot-b', clientKey: 'ip:1', now, maxSessions: 2, ttlMs }),
+    applySessionSlotReserve(sql, { slotId: 'slot-b', clientKey: 'ip:1', releaseToken: 'tok-b', now, maxSessions: 2, ttlMs }),
     true
   );
   assert.equal(
-    applySessionSlotReserve(sql, { slotId: 'slot-c', clientKey: 'ip:1', now, maxSessions: 2, ttlMs }),
+    applySessionSlotReserve(sql, { slotId: 'slot-c', clientKey: 'ip:1', releaseToken: 'tok-c', now, maxSessions: 2, ttlMs }),
     false,
     '同一个 client 超过上限必须被拒'
   );
 
   // 同一个 slotId 再领取是「转移/续期」，不是再占一个名额，也不应被上限挡住。
   assert.equal(
-    applySessionSlotReserve(sql, { slotId: 'slot-a', clientKey: 'ip:2', now: now + 1, maxSessions: 2, ttlMs }),
+    applySessionSlotReserve(sql, { slotId: 'slot-a', clientKey: 'ip:2', releaseToken: 'tok-a2', now: now + 1, maxSessions: 2, ttlMs }),
     true
   );
   const transferred = db
@@ -201,12 +201,80 @@ test('槽位在真实库上按 client 计数、同 slot 转移、可续期与释
 
   // 归属不符的释放必须是空操作：并发接管里落败的一方复用同一个 slotId 回滚，
   // 裸删会把胜出方刚投递完 registered 的名额一起删掉（全局上限被悄悄放宽）。
-  applySessionSlotRelease(sql, 'slot-a', 'ip:1');
-  assert.equal(countRows(db, 'signaling_session_slots'), 2, '别的 client 不能删掉 ip:2 的名额');
+  // 归属凭证是每连接自铸的 releaseToken，不是 clientKey（同一 NAT 出口全相同）。
+  const transferredToken = db
+    .prepare("SELECT release_token FROM signaling_session_slots WHERE slot_id = 'slot-a'")
+    .get() as { release_token: string };
+  assert.equal(transferredToken.release_token, 'tok-a2');
+  applySessionSlotRelease(sql, 'slot-a', 'tok-a');
+  assert.equal(countRows(db, 'signaling_session_slots'), 2, '别的连接不能删掉 tok-a2 的名额');
 
-  applySessionSlotRelease(sql, 'slot-a', 'ip:2');
+  applySessionSlotRelease(sql, 'slot-a', 'tok-a2');
   assert.equal(countRows(db, 'signaling_session_slots'), 1);
   assert.equal(applySessionSlotRenew(sql, { slotId: 'slot-a', now: now + 3, ttlMs }), false);
+  db.close();
+});
+
+test('接管换名额：旧行靠 token 条件让出，并发接管事后只剩一条活名额', () => {
+  const db = new DatabaseSync(':memory:');
+  const sql = createSqlite(db);
+  initializeSessionSlotSchema(sql);
+  const ttlMs = 6 * HOUR;
+  const now = 1_000;
+
+  assert.equal(
+    applySessionSlotReserve(sql, {
+      slotId: 'slot-old',
+      clientKey: 'ip:1',
+      releaseToken: 'tok-old',
+      now,
+      maxSessions: 1,
+      ttlMs,
+    }),
+    true
+  );
+  // 满额（1/1）时接管仍然要能进来：replaces 先把旧会话占的那一格让出来。
+  assert.equal(
+    applySessionSlotReserve(sql, {
+      slotId: 'slot-new',
+      clientKey: 'ip:1',
+      releaseToken: 'tok-new',
+      now,
+      maxSessions: 1,
+      ttlMs,
+      replaces: { slotId: 'slot-old', releaseToken: 'tok-old' },
+    }),
+    true,
+    '接管是「一个换一个」，不能因为旧会话还占着名额就把重连拒掉'
+  );
+  const remaining = db
+    .prepare('SELECT slot_id, client_key, release_token FROM signaling_session_slots')
+    .all() as unknown as { slot_id: string; client_key: string; release_token: string }[];
+  assert.equal(remaining.length, 1);
+  assert.equal(remaining[0].slot_id, 'slot-new');
+  assert.equal(remaining[0].release_token, 'tok-new');
+
+  // token 对不上的 replaces 不能删别人的名额，也不能绕过上限。
+  assert.equal(
+    applySessionSlotReserve(sql, {
+      slotId: 'slot-intruder',
+      clientKey: 'ip:1',
+      releaseToken: 'tok-intruder',
+      now,
+      maxSessions: 1,
+      ttlMs,
+      replaces: { slotId: 'slot-old', releaseToken: 'tok-old' },
+    }),
+    false,
+    '旧行已经消失，第二个接管方必须自己撞上限'
+  );
+  assert.equal(countRows(db, 'signaling_session_slots'), 1);
+
+  // 并发接管的落败方回滚：只按自己的 token 删，删不到胜出方那一行。
+  applySessionSlotRelease(sql, 'slot-new', 'tok-intruder');
+  assert.equal(countRows(db, 'signaling_session_slots'), 1, '落败方不能删掉胜出方的名额');
+  applySessionSlotRelease(sql, 'slot-new', 'tok-new');
+  assert.equal(countRows(db, 'signaling_session_slots'), 0);
   db.close();
 });
 
@@ -292,10 +360,11 @@ test('RETURNING 写入的 rowsWritten 取 changes，而不是返回的行数', (
   const db = new DatabaseSync(':memory:');
   const sql = createSqlite(db);
   initializeSessionSlotSchema(sql);
-  const reserve = (clientKey: string, now: number) =>
+  const reserve = (clientKey: string, now: number, releaseToken = `tok-${clientKey}`) =>
     applySessionSlotReserve(sql, {
       slotId: 'slot-a',
       clientKey,
+      releaseToken,
       now,
       maxSessions: 12,
       ttlMs: 60_000,

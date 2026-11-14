@@ -354,6 +354,7 @@ test('slot reserve grants one seat per client, transfers an existing slot, and e
     applySessionSlotReserve(scripted, {
       slotId: 'slot-a',
       clientKey: 'ip:1',
+      releaseToken: 'tok-1',
       now: 0,
       maxSessions: 2,
       ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
@@ -375,6 +376,7 @@ test('slot reserve grants one seat per client, transfers an existing slot, and e
     applySessionSlotReserve(transferSql, {
       slotId: 'slot-a',
       clientKey: 'ip:2',
+      releaseToken: 'tok-2',
       now: 100,
       maxSessions: 2,
       ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
@@ -398,6 +400,7 @@ test('slot reserve grants one seat per client, transfers an existing slot, and e
     applySessionSlotReserve(fullSql, {
       slotId: 'slot-c',
       clientKey: 'ip:3',
+      releaseToken: 'tok-3',
       now: 0,
       maxSessions: 2,
       ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
@@ -407,16 +410,18 @@ test('slot reserve grants one seat per client, transfers an existing slot, and e
   assert.ok(!fullCalls.some((text) => text.startsWith('INSERT OR REPLACE')));
 });
 
-test('slot release 带 clientKey 时只删自己那张：并发接管落败方不能删掉胜出方的名额', () => {
+test('slot release 带 releaseToken 时只删自己那张：并发接管落败方不能删掉胜出方的名额', () => {
   const conditional = createFakeSql();
-  applySessionSlotRelease(conditional.sql, 'slot-x', 'ip:1');
+  applySessionSlotRelease(conditional.sql, 'slot-x', 'tok-1');
   const [call] = conditional.calls.filter((entry) =>
     entry.sql.startsWith('DELETE FROM signaling_session_slots')
   );
-  assert.match(call.sql, /WHERE slot_id = \? AND client_key = \?/);
-  assert.deepEqual(call.params, ['slot-x', 'ip:1']);
+  assert.match(call.sql, /WHERE slot_id = \? AND release_token = \?/);
+  assert.deepEqual(call.params, ['slot-x', 'tok-1']);
+  // clientKey 是出口 IP：同一张 NAT 后面的所有连接都一样，拿它做归属判定等于没有判定。
+  assert.doesNotMatch(call.sql, /client_key/);
 
-  // 不传 clientKey 时保持旧语义（服务端内部兜底释放），否则 TTL 清理之外的回收路径会漏。
+  // 不传 token 时保持旧语义（服务端内部兜底释放），否则 TTL 清理之外的回收路径会漏。
   const unconditional = createFakeSql();
   applySessionSlotRelease(unconditional.sql, 'slot-x');
   const [plain] = unconditional.calls.filter((entry) =>
