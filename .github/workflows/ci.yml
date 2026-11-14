@@ -43,7 +43,7 @@ jobs:
       - name: Unit test coverage gate (services + src)
         run: node ./scripts/check-coverage-scope.mjs --scope=services
 
-      # 组件覆盖率单独一套更低的阈值（实测 all files 66.67 行 / 65.38 分支 / 42.86 函数，
+      # 组件覆盖率单独一套更低的阈值（实测 all files 70.68 行 / 65.19 分支 / 42.35 函数，
       # 其中包含组件测试顺带加载的 constants/services/types 文件）：组件测试大量走 DOM 桩，
       # 函数覆盖率天然偏低，用 services 的阈值会逼出无意义断言。
       # 分母同样由 git 清单对比保证：components/ 下 12 个生产文件里 Receiver / ScreenShare /

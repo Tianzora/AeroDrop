@@ -129,4 +129,14 @@
 对应 `docs/design-scale-out.md` §8.4：commit 自愈、分片回源 fail-closed、并发双开守卫、注册编排 plan、屏幕共享失败路径与 E2E、真实 SQLite 契约测试、CI 覆盖率守卫与浏览器侧 E2E。
 
 CI 覆盖范围（准确说法）：`verify`（typecheck + 单测 + services/src 与 components 两个 scope 的覆盖率分母守卫 + build）、`e2e`（chromium，只跑 sender-sharing / receiver-recovery）、`e2e-product`（真实 `wrangler dev` + workerd，跑 product-transfer 3 条与 screenshare 9 条）。局限：CI 只在 push/PR 上跑，**不拦 Cloudflare Git 集成的部署**——推 main 仍会直接构建发布，CI 红不阻止上线，除非在 GitHub 分支保护里把这几个 job 设为必需检查。
-状态: 完成 (第二轮复评补齐：安全 3 条 / 产品 6 条 / 工程 SQLite 契约 + 覆盖率门槛 + CI E2E，工作区未提交, 2026-11-13)
+状态: 完成 (第二轮复评补齐：安全 3 条 / 产品 6 条 / 工程 SQLite 契约 + 覆盖率门槛 + CI E2E, 2026-11-13)
+
+## 阶段 7：第三轮复评（95 分循环）后的收口（2026-11-14）
+
+对应 `docs/design-scale-out.md` §8.5–§8.9。多轮只读复评（安全/产品/工程各三轮）发现的缺口逐轮收口：
+名额账本的归属与 fail-closed（三态 reserve、条件释放、孤儿回收）、口令重登记的原子性（先插后删）、
+WS 凭证移出 URL query（`Sec-WebSocket-Protocol`）、读路径不再写库、offer 限流配额与
+`retryAfterMs`/`limit` 端到端、观众侧限流/满员/死链三种终态的归因、
+组件覆盖率分母守卫（路径匹配 + 同名遮蔽 + self-test）、真实 `wrangler dev` 的 `e2e-product` job。
+
+状态: 完成 (第三轮复评 must-fix 全部收口；复评待跑, 2026-11-14)
