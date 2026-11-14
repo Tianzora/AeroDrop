@@ -192,3 +192,14 @@ WS 凭证移出 URL query（`Sec-WebSocket-Protocol`）、读路径不再写库�
 - 门禁实测：typecheck 0；services 714 / components 47 / scripts 16；`services/signaling` 175/175；两个 scope 守卫 OK（services 118 文件 91.33/83.76/84.72，components 13 文件 65.43/71.43/42.86，预算 75.44% ≤ 80%）；self-test 19+5+3；e2e 9 passed；product-transfer 13 passed。
 
 状态: 完成 (第十三轮复评 must-fix 全部收口；门禁全绿，待推送与复评, 2026-11-14)
+
+## 阶段 13：第十四轮复评后的收口（2026-11-14）
+
+对应 `docs/design-scale-out.md` §8.16。三项复评（安全 90 / 产品 82 / 工程 90）的 must-fix 逐条收口：
+
+- 安全：`seatTransferLost` 的接管不再写 `clientBySocket`（否则 4029 关闭会扣掉同 IP 另一条活会话的信用）；补两条能变红的契约测试——「registered 投递失败不得提交 replace」「commit replace RPC 失败必须记指标」。
+- 产品：观众 `call.on('close')` 吃上 `sharerUnavailable`（死链不再先报「人数已满」）；死链 E2E 改用 MutationObserver 累积断言，抓 4 秒即消失的误报。
+- 工程：CI/文档数字按最终工作树重测（75.47% / 10459 / 余 474；ScreenShare 2856 行；worker 89.22/75.37/79.61）；新增 `scripts/ci-wiring.test.ts` 钉住「门禁本身不能被一次编辑关掉」；用例清单正则支持 describe 内缩进。
+- 门禁实测：typecheck 0；services 717 / components 47 / scripts 21；`services/signaling` 178/178；两个 scope 守卫 OK；self-test 19+5+3；e2e 9 passed；product-transfer 13 passed。
+
+状态: 完成 (第十四轮复评 must-fix 全部收口；门禁全绿，待推送与复评, 2026-11-14)
