@@ -95,6 +95,8 @@ type ErrorEnvelope = {
   kind?: ChannelKind;
   /** 可重试拒绝的建议等待时长（毫秒），透传到 `PeerRuntimeError.retryAfterMs`。 */
   retryAfterMs?: number;
+  /** 触发的额度层级（`session` 是每出口会话数，`offer` 是每秒连接请求）。 */
+  limit?: 'session' | 'offer';
 };
 type OfferEnvelope = {
   type: 'offer';
@@ -754,6 +756,8 @@ export type PeerRuntimeError = Error & {
   type: PeerRuntimeErrorType;
   /** 服务端在 `rate-limited` 等可重试拒绝上给出的建议等待时长（毫秒）。 */
   retryAfterMs?: number;
+  /** 拒绝涉及的额度层级：`session` 等多久都没用，`offer` 等一会儿会好。 */
+  limit?: 'session' | 'offer';
 };
 
 export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
@@ -1143,6 +1147,9 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       );
       if (typeof message.retryAfterMs === 'number' && Number.isFinite(message.retryAfterMs)) {
         error.retryAfterMs = message.retryAfterMs;
+      }
+      if (message.limit === 'session' || message.limit === 'offer') {
+        error.limit = message.limit;
       }
       if (TERMINAL_SIGNALING_ERROR_CODES.has(message.code)) {
         this.registrationRejected = true;

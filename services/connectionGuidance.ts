@@ -2,6 +2,14 @@ export const NO_TURN_WARNING_MESSAGE =
   '当前服务未启用 TURN 中继，跨网络或手机流量下可能无法连接';
 export const RATE_LIMITED_CONNECTION_MESSAGE =
   '连接请求过多，请稍后再试';
+/**
+ * 每出口会话数（12 个/IP）被占满时的文案。
+ *
+ * 这跟 offer 限流不是一回事：等 60 秒不会好，是同一出口的其它标签页/设备还占着名额。
+ * 给它倒计时等于骗用户干等，所以这里明确让人去关掉占用的那个设备。
+ */
+export const VIEWER_SESSION_LIMIT_MESSAGE =
+  '同一网络下的其他设备占用了连接名额，请关闭其他标签页或设备后再试';
 export const SIGNALING_UNREACHABLE_MESSAGE =
   '无法连接信令服务器，请检查网络后重试';
 export const SIGNALING_SESSION_REJECTED_MESSAGE =

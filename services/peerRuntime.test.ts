@@ -840,9 +840,9 @@ test('rate-limited 的 error 信封把 retryAfterMs 透给上层，供倒计时�
   try {
     const { default: WorkerSignaledPeer } = await import('./peerRuntime.ts');
     const peer = new WorkerSignaledPeer({ debug: 0 });
-    const caught: { type: string; retryAfterMs?: number }[] = [];
+    const caught: { type: string; retryAfterMs?: number; limit?: string }[] = [];
     peer.on('error', (error) => {
-      caught.push({ type: error.type, retryAfterMs: error.retryAfterMs });
+      caught.push({ type: error.type, retryAfterMs: error.retryAfterMs, limit: error.limit });
     });
 
     const socket = FakeWebSocket.instances[0];
@@ -854,16 +854,18 @@ test('rate-limited 的 error 信封把 retryAfterMs 透给上层，供倒计时�
         message: 'Too many connection requests',
         connectionId: 'conn-1',
         retryAfterMs: 42_000,
+        limit: 'offer',
       }),
     });
 
-    assert.deepEqual(caught, [{ type: 'rate-limited', retryAfterMs: 42_000 }]);
+    assert.deepEqual(caught, [{ type: 'rate-limited', retryAfterMs: 42_000, limit: 'offer' }]);
 
     // 没有该字段时不能凭空造一个（客户端据此回退到静默期兜底）。
     const other = new WorkerSignaledPeer({ debug: 0 });
     const plain: (number | undefined)[] = [];
     other.on('error', (error) => {
       plain.push(error.retryAfterMs);
+      assert.equal(error.limit, undefined, '没标层级时不能凭空造一个');
     });
     const otherSocket = FakeWebSocket.instances[1];
     otherSocket.readyState = FakeWebSocket.OPEN;

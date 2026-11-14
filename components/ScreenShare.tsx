@@ -17,6 +17,7 @@ import {
   SIGNALING_SESSION_REJECTED_MESSAGE,
   SIGNALING_UNREACHABLE_MESSAGE,
   VIEWER_RECONNECT_EXHAUSTED_MESSAGE,
+  VIEWER_SESSION_LIMIT_MESSAGE,
   VIEWER_SHARE_GONE_MESSAGE,
   describeViewerReconnectWait,
   getMediaConnectionErrorMessage,
@@ -103,12 +104,25 @@ const hasUserActivation = (): boolean => {
 
 /**
  * 信令层把 Retry-After 挂在 error 上（`retryAfterMs`）。
- * 目前 worker 还没在 rate-limited 响应里下发这个字段，拿不到就返回 null，
- * 由调用方退回出口配额的静默期兜底——倒计时宁可偏长，也不能显示「立刻可重试」。
+ * 拿不到就返回 null，由调用方退回出口配额的静默期兜底——倒计时宁可偏长，
+ * 也不能显示「立刻可重试」。
  */
 const readRetryAfterMs = (error: unknown): number | null => {
   const value = (error as { retryAfterMs?: unknown } | null)?.retryAfterMs;
   return typeof value === 'number' && Number.isFinite(value) && value > 0 ? value : null;
+};
+
+/**
+ * 拒绝来自哪一层额度。
+ *
+ * 旧实现把所有 `rate-limited` 当成「请求太频繁」，于是每出口会话数被占满（12 个/IP，
+ * 由别的标签页拿着）也会显示「60 秒后可重试」——而 60 秒后名额仍被占着，用户只会在
+ * 同一个错误上反复点。服务端已经标了 `limit`，这里只做读取与兜底。
+ */
+const readRateLimitLayer = (error: unknown): 'session' | 'offer' | null => {
+  const limit = (error as { limit?: unknown } | null)?.limit;
+  if (limit === 'session' || limit === 'offer') return limit;
+  return null;
 };
 
 const describeCaptureError = (error: unknown): ScreenCaptureFailure =>
@@ -2129,6 +2143,22 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         if (viewerConnectAttemptRef.current !== attemptId) return;
         console.error('Call error:', err);
 
+        // 限流必须先判：信令层的拒绝会同时触发 call 关闭，而 call 关闭的默认推断是
+        // 「没画面 → 可能人数已满」。先走满员推断的话，用户会先看到「分享人数已满」，
+        // 再被限流文案覆盖（媒体 offer 被拒时约一半概率命中），或者干脆停在满员终态。
+        if ((err as { type?: string } | null)?.type === 'rate-limited') {
+          if (readRateLimitLayer(err) === 'session') {
+            stopViewing(false);
+            setIsConnecting(false);
+            setError(VIEWER_SESSION_LIMIT_MESSAGE);
+            return;
+          }
+          if (!viewerRateLimitedRef.current) {
+            reportViewerRateLimited(readRetryAfterMs(err) ?? SIGNALING_OFFER_RATE_LIMIT.blockMs);
+          }
+          return;
+        }
+
         const outcome = planViewerCallEndOutcome({
           manualStop: isManualStopRef.current,
           shareEnded: remoteShareEndedRef.current,
@@ -2191,6 +2221,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         shareEnded: remoteShareEndedRef.current,
         retryAfterMs: readRetryAfterMs(err),
         fallbackRetryAfterMs: SIGNALING_OFFER_RATE_LIMIT.blockMs,
+        limit: readRateLimitLayer(err),
       });
 
       if (peerErrorPlan.kind === 'ignore') return;
@@ -2202,6 +2233,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         stopViewing(true);
         setError(VIEWER_SHARE_GONE_MESSAGE);
         onNotification(VIEWER_SHARE_GONE_MESSAGE, 'info');
+        return;
+      }
+
+      if (peerErrorPlan.kind === 'session-limit') {
+        // 会话名额（12 个/IP）被同出口的其它设备占着：给倒计时等于骗用户干等。
+        stopViewing(false);
+        setIsConnecting(false);
+        setError(VIEWER_SESSION_LIMIT_MESSAGE);
         return;
       }
 

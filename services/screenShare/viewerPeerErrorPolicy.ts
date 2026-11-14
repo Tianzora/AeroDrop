@@ -27,12 +27,15 @@ export type ViewerPeerErrorInput = {
   retryAfterMs?: number | null;
   /** 没有 Retry-After 时按出口配额的静默期兜底（constants/signaling.ts）。 */
   fallbackRetryAfterMs: number;
+  /** 服务端标明的额度层级；`session` 是每出口会话数，等再久也没用。 */
+  limit?: 'session' | 'offer' | null;
 };
 
 export type ViewerPeerErrorPlan =
   | { kind: 'ignore' }
   | { kind: 'share-gone' }
   | { kind: 'rate-limited'; retryAfterMs: number }
+  | { kind: 'session-limit' }
   | { kind: 'report' };
 
 const normalizeRetryAfter = (value: number | null | undefined, fallback: number): number => {
@@ -46,12 +49,15 @@ export const planViewerPeerError = ({
   shareEnded,
   retryAfterMs,
   fallbackRetryAfterMs,
+  limit,
 }: ViewerPeerErrorInput): ViewerPeerErrorPlan => {
   // 分享方主动结束 / 用户自己取消：都不是错误，交给调用方走各自的收尾。
   if (shareEnded || manualStop) return { kind: 'ignore' };
   // 链接指向一个不存在的分享者：重试没有意义，直接终态并清掉持久化会话。
   if (type === 'peer-unavailable') return { kind: 'share-gone' };
   if (type === 'rate-limited') {
+    // 每出口会话数被占满：倒计时和「稍后再试」都是错的，用户要关掉占名额的设备。
+    if (limit === 'session') return { kind: 'session-limit' };
     return { kind: 'rate-limited', retryAfterMs: normalizeRetryAfter(retryAfterMs, fallbackRetryAfterMs) };
   }
   return { kind: 'report' };

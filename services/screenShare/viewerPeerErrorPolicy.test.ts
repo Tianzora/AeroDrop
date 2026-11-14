@@ -36,6 +36,22 @@ test('信令层给了 Retry-After 就用它，没有才退回静默期兜底', (
   }
 });
 
+test('每出口会话数被占满时不给倒计时：等多久都不会好', () => {
+  assert.deepEqual(
+    planViewerPeerError({ ...base, type: 'rate-limited', limit: 'session', retryAfterMs: 60_000 }),
+    { kind: 'session-limit' },
+  );
+  // 显式标 offer 与完全没标都必须继续走倒计时那条路（旧行为不能回归）。
+  assert.deepEqual(planViewerPeerError({ ...base, type: 'rate-limited', limit: 'offer' }), {
+    kind: 'rate-limited',
+    retryAfterMs: 60_000,
+  });
+  assert.deepEqual(planViewerPeerError({ ...base, type: 'rate-limited', limit: null }), {
+    kind: 'rate-limited',
+    retryAfterMs: 60_000,
+  });
+});
+
 test('用户手动取消或分享方已结束时不产生错误状态', () => {
   assert.deepEqual(planViewerPeerError({ ...base, manualStop: true }), { kind: 'ignore' });
   assert.deepEqual(planViewerPeerError({ ...base, shareEnded: true }), { kind: 'ignore' });
