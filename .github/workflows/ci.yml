@@ -36,13 +36,12 @@ jobs:
         run: npm run test:all
 
       # 覆盖率门槛用 node:test 内置能力，不引入依赖；阈值在 scripts/node-test-args.mjs。
-      # NODE_TEST_COVERAGE_INCLUDE 让「没被任何测试 import 的文件」也进分母
-      # （默认只统计已加载文件，新模块会静默拉低不了覆盖率）。
+      # 这一步跑 scripts/check-coverage-scope.mjs：它先跑带 include 的覆盖率报告，再要求
+      # services/ 与 src/ 下每个生产源文件都出现在报告里（可以 0%，但不能消失）。Node 的
+      # include 只是「报告过滤器」，不会把没被 import 的文件补进分母，所以必须有这层守卫。
+      # 无法在 Node 宿主里加载的少数文件登记在脚本的 ALLOWED_UNCOVERED 里，并写明理由。
       - name: Unit test coverage gate
-        env:
-          NODE_TEST_COVERAGE: '1'
-          NODE_TEST_COVERAGE_INCLUDE: 'services/**/*.ts'
-        run: node ./scripts/run-node-tests.mjs services
+        run: node ./scripts/check-coverage-scope.mjs
 
       # 组件覆盖率单独卡一套更低的阈值（计入未被测试加载的组件后：61.7 行 / 64.6 分支 / 43.6 函数）：
       # 组件测试大量走 DOM 桩，函数覆盖率天然偏低，用 services 的阈值会逼出无意义断言。

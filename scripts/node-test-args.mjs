@@ -18,23 +18,30 @@ const readList = (name) => (process.env[name] ?? '')
   .map((entry) => entry.trim())
   .filter(Boolean);
 
-// 老版本 Node（22.12 是否支持未验证）没有这两个旗标，探测不到就不传，
-// 覆盖率会退化成「只统计已加载文件」，但至少不会因为未知旗标直接崩掉。
-const supportsCoverageFilters = () => process.allowedNodeEnvironmentFlags.has('--test-coverage-include');
+// 覆盖率过滤器必须可用：没有它，覆盖率只统计「被加载过」的文件，新增一个没人
+// import 的模块就不会进分母，门槛会永久绿灯。所以这里是 fail-closed：探测不到就
+// 直接拒绝跑门禁，而不是静默退化成更弱的检查。
+export const coverageFilterSupport = (flags = process.allowedNodeEnvironmentFlags) =>
+  flags.has('--test-coverage-include') && flags.has('--test-coverage-exclude');
 
-const coverageIncludeArgs = () => {
-  if (!supportsCoverageFilters()) return [];
-  return readList('NODE_TEST_COVERAGE_INCLUDE').map((pattern) => `--test-coverage-include=${pattern}`);
-};
+const coverageIncludeArgs = () =>
+  readList('NODE_TEST_COVERAGE_INCLUDE').map((pattern) => `--test-coverage-include=${pattern}`);
 
 const coverageExcludeArgs = () => {
-  if (!supportsCoverageFilters()) return [];
   const defaults = ['**/*.test.ts', '**/*.test.tsx', 'scripts/test-stubs/**'];
   return [...defaults, ...readList('NODE_TEST_COVERAGE_EXCLUDE')]
     .map((pattern) => `--test-coverage-exclude=${pattern}`);
 };
 
-export const buildNodeTestArgs = (files) => [
+export const buildNodeTestArgs = (files, { coverageFiltersAvailable = coverageFilterSupport() } = {}) => {
+  const coverageEnabled = process.env.NODE_TEST_COVERAGE === '1';
+  if (coverageEnabled && !coverageFiltersAvailable) {
+    throw new Error(
+      'Coverage filters (--test-coverage-include/exclude) are unavailable in this Node build; ' +
+        'refusing to run NODE_TEST_COVERAGE=1, because the gate would silently only measure loaded files.',
+    );
+  }
+  return [
   // tsx 负责 TS/JSX 转译；test-stubs 把只在浏览器里做视觉效果的大 barrel 依赖
   // （motion/react、@hugeicons/*）换成本地极简实现，避免每个测试子进程重复转译。
   '--import',
@@ -58,9 +65,10 @@ export const buildNodeTestArgs = (files) => [
         `--test-coverage-functions=${readCoverageThreshold('NODE_TEST_COVERAGE_MIN_FUNCTIONS', 75)}`,
       ]
     : []),
-  '--test',
-  ...files,
-];
+    '--test',
+    ...files,
+  ];
+};
 
 export const collectTestFiles = (targets) => {
   const discovered = new Set();

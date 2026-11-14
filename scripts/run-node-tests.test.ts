@@ -5,7 +5,7 @@ import { tmpdir } from 'node:os';
 import { join, relative, sep } from 'node:path';
 import test from 'node:test';
 
-import { buildNodeTestArgs, collectTestFiles } from './node-test-args.mjs';
+import { buildNodeTestArgs, collectTestFiles, coverageFilterSupport } from './node-test-args.mjs';
 
 test('buildNodeTestArgs uses an explicit tsx loader path instead of the bare package specifier', () => {
   const args = buildNodeTestArgs(['services/connectionPolicy.test.ts']);
@@ -53,6 +53,47 @@ test('coverage 只有显式打开时才加参数，CI 用它卡阈值而不拖�
     delete process.env.NODE_TEST_COVERAGE_MIN_LINES;
     if (previous === undefined) delete process.env.NODE_TEST_COVERAGE;
     else process.env.NODE_TEST_COVERAGE = previous;
+  }
+});
+
+test('覆盖率打开但当前 Node 不支持过滤器时直接报错，不静默退化成只统计已加载文件', () => {
+  const previous = process.env.NODE_TEST_COVERAGE;
+  try {
+    process.env.NODE_TEST_COVERAGE = '1';
+    assert.throws(
+      () => buildNodeTestArgs([], { coverageFiltersAvailable: false }),
+      /refusing to run NODE_TEST_COVERAGE=1/,
+    );
+    // 本地不跑覆盖率时不该被这个探测拖累
+    delete process.env.NODE_TEST_COVERAGE;
+    assert.ok(!buildNodeTestArgs([], { coverageFiltersAvailable: false }).includes('--experimental-test-coverage'));
+  } finally {
+    if (previous === undefined) delete process.env.NODE_TEST_COVERAGE;
+    else process.env.NODE_TEST_COVERAGE = previous;
+  }
+});
+
+test('coverageFilterSupport 要求 include 与 exclude 两个旗标同时存在', () => {
+  assert.equal(coverageFilterSupport(new Set(['--test-coverage-include', '--test-coverage-exclude'])), true);
+  assert.equal(coverageFilterSupport(new Set(['--test-coverage-include'])), false);
+  assert.equal(coverageFilterSupport(new Set(['--test-coverage-exclude'])), false);
+});
+
+test('覆盖率参数带上 include/exclude，把没被加载的模块也纳进分母', () => {
+  const previous = process.env.NODE_TEST_COVERAGE;
+  const previousInclude = process.env.NODE_TEST_COVERAGE_INCLUDE;
+  try {
+    process.env.NODE_TEST_COVERAGE = '1';
+    process.env.NODE_TEST_COVERAGE_INCLUDE = 'services/**/*.ts,src/**/*.ts';
+    const args = buildNodeTestArgs([], { coverageFiltersAvailable: true });
+    assert.ok(args.includes('--test-coverage-include=services/**/*.ts'));
+    assert.ok(args.includes('--test-coverage-include=src/**/*.ts'));
+    assert.ok(args.includes('--test-coverage-exclude=**/*.test.ts'));
+  } finally {
+    if (previous === undefined) delete process.env.NODE_TEST_COVERAGE;
+    else process.env.NODE_TEST_COVERAGE = previous;
+    if (previousInclude === undefined) delete process.env.NODE_TEST_COVERAGE_INCLUDE;
+    else process.env.NODE_TEST_COVERAGE_INCLUDE = previousInclude;
   }
 });
 
