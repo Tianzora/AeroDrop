@@ -1651,6 +1651,301 @@ test('接管方在名额 RPC 期间断开：旧会话的名额不能被这次放
   );
 });
 
+test('席位补领失败的接管不得写 map：被 4029 拒绝后不能扣掉别人的会话名额', async () => {
+  // 安全评审 A：同 IP 满额 + 一次注定失败的接管。接管先 plan 成 transfer（席位记在旧
+  // socket 上），但在名额 RPC 的 await 里旧 socket 自己 unregister 了（它释放过一次），
+  // 补领又被同 IP 的另一条新连接抢走 ⇒ seatTransferLost。旧实现仍然走 sendRegistered，
+  // 把 clientBySocket 写进去；等它 4029 关闭时 unregisterSocket 无条件 release，
+  // 于是扣掉的是另一条活会话的信用——每出口 12 会话上限可以被逐个放大。
+  let reachedReserve = () => {};
+  const reserveReached = new Promise<void>((resolve) => {
+    reachedReserve = resolve;
+  });
+  let releaseReserve = () => {};
+  const resumeReserve = new Promise<void>((resolve) => {
+    releaseReserve = resolve;
+  });
+  let paused = false;
+
+  const handle: { current: Awaited<ReturnType<typeof createHub>> | null } = { current: null };
+  const created = await createHub({
+    shardCount: '2',
+    shardName: 'signaling-shard-1',
+    // 进程内 limiter 只有 1 个席位；全局表放到 12，这样「第三方被拒」只可能来自 limiter，
+    // 断言才能指向「被拒的接管有没有污染 clientBySocket」，而不是全局计数满。
+    maxSessions: '1',
+    signalingHub: {
+      respond: async (call) => {
+        const body = call.body as
+          | {
+              action?: string;
+              slotId?: string;
+              clientKey?: string;
+              releaseToken?: string;
+              replaces?: { slotId?: string; releaseToken?: string };
+            }
+          | null;
+        const current = handle.current!;
+        const sql = () => createSqlite(current.db);
+        if (body?.action === 'reserve') {
+          const replaces =
+            body.replaces?.slotId && body.replaces?.releaseToken
+              ? { slotId: body.replaces.slotId, releaseToken: body.replaces.releaseToken }
+              : undefined;
+          if (replaces && !paused) {
+            paused = true;
+            reachedReserve();
+            await resumeReserve;
+          }
+          const granted = applySessionSlotReserve(sql(), {
+            slotId: body.slotId ?? '',
+            clientKey: body.clientKey ?? '',
+            releaseToken: typeof body.releaseToken === 'string' ? body.releaseToken : '',
+            ...(replaces ? { replaces } : {}),
+            now: Date.now(),
+            maxSessions: 12,
+            ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
+          });
+          return { status: 200, body: { granted } };
+        }
+        if (body?.action === 'replace') {
+          applySessionSlotReplaceCommit(sql(), {
+            slotId: body.slotId ?? '',
+            releaseToken: typeof body.releaseToken === 'string' ? body.releaseToken : '',
+          });
+          return { status: 200, body: { replaced: true } };
+        }
+        if (body?.action === 'release') {
+          applySessionSlotRelease(
+            sql(),
+            body.slotId ?? '',
+            typeof body.releaseToken === 'string' ? body.releaseToken : undefined
+          );
+          return { status: 200, body: { released: true } };
+        }
+        return { status: 200, body: { allowed: true } };
+      },
+    },
+  });
+  handle.current = created;
+
+  // A：占住唯一的席位。
+  const owner = serverOf(
+    (await upgrade(created.hub, 'peerId=AERO-SEATLOST1', '203.0.113.95')).webSocket
+  );
+  await created.settle();
+  assert.equal(owner.lastMessage()?.type, 'registered');
+
+  // 接管方进来，在名额 RPC 里被暂停。
+  const takeoverUpgrade = upgrade(created.hub, 'peerId=AERO-SEATLOST1', '203.0.113.95');
+  await reserveReached;
+
+  // RPC 在途时旧 socket 自己断开（刷新/切网）：它释放了席位，也删了自己的 map 条目。
+  owner.close(1001, 'client aborted');
+  created.hub.webSocketClose(owner as never);
+  await created.settle();
+
+  // 同 IP 的另一条新连接抢先补位：现在席位归它。
+  const rival = serverOf(
+    (await upgrade(created.hub, 'peerId=AERO-SEATLOST2', '203.0.113.95')).webSocket
+  );
+  await created.settle();
+  assert.equal(rival.lastMessage()?.type, 'registered', '补位连接应该拿到席位');
+
+  releaseReserve();
+  await takeoverUpgrade;
+  await created.settle();
+
+  const takeoverSocket = serverOf((await takeoverUpgrade).webSocket);
+  assert.equal(takeoverSocket.lastMessage()?.type, 'error');
+  assert.equal(closedCode(takeoverSocket), 4029, '补领失败的接管必须收到 session 限流终态');
+
+  // 运行时的回收点：socket 关闭回调。若上面写了 clientBySocket，这里就会扣掉 rival 的信用。
+  created.hub.webSocketClose(takeoverSocket as never);
+  await created.settle();
+
+  const third = await upgrade(created.hub, 'peerId=AERO-SEATLOST3', '203.0.113.95');
+  const thirdServer = serverOf(third.webSocket);
+  assert.equal(
+    closedCode(thirdServer) ?? thirdServer.lastMessage()?.code,
+    4029,
+    '席位仍归 rival：被拒的接管关闭后不得把它的名额还回去'
+  );
+});
+
+test('registered 投递失败时不得提交 replace：旧会话的名额必须留着', async () => {
+  // 安全评审 B：commit 必须排在 registered 真正投递成功之后。否则一次「接管方在同一刻断开」
+  // 就会让 shard 0 先删掉旧行：旧会话仍在线，但它的全局名额没了，续期从此永远是 false。
+  const peerId = 'AERO-REPLACEFAIL1';
+  const ipOwner = '203.0.113.81';
+  const ipTakeover = '203.0.113.82';
+  const handle: { current: Awaited<ReturnType<typeof createHub>> | null } = { current: null };
+
+  const created = await createHub({
+    shardCount: '2',
+    shardName: 'signaling-shard-1',
+    signalingHub: {
+      respond: async (call) => {
+        const body = call.body as
+          | {
+              action?: string;
+              slotId?: string;
+              clientKey?: string;
+              releaseToken?: string;
+              replaces?: { slotId?: string; releaseToken?: string };
+              lookups?: unknown[];
+            }
+          | null;
+        const sql = () => createSqlite(handle.current!.db);
+        if (body?.action === 'reserve') {
+          const granted = applySessionSlotReserve(sql(), {
+            slotId: body.slotId ?? '',
+            clientKey: body.clientKey ?? '',
+            releaseToken: typeof body.releaseToken === 'string' ? body.releaseToken : '',
+            ...(body.replaces?.slotId && body.replaces?.releaseToken
+              ? {
+                  replaces: {
+                    slotId: body.replaces.slotId,
+                    releaseToken: body.replaces.releaseToken,
+                  },
+                }
+              : {}),
+            now: Date.now(),
+            maxSessions: 12,
+            ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
+          });
+          return { status: 200, body: { granted } };
+        }
+        if (body?.action === 'replace') {
+          applySessionSlotReplaceCommit(sql(), {
+            slotId: body.slotId ?? '',
+            releaseToken: typeof body.releaseToken === 'string' ? body.releaseToken : '',
+          });
+          return { status: 200, body: { replaced: true } };
+        }
+        if (body?.action === 'release') {
+          applySessionSlotRelease(
+            sql(),
+            body.slotId ?? '',
+            typeof body.releaseToken === 'string' ? body.releaseToken : undefined
+          );
+          return { status: 200, body: { released: true } };
+        }
+        return { status: 200, body: { allowed: true } };
+      },
+    },
+  });
+  handle.current = created;
+
+  const owner = serverOf((await upgrade(created.hub, `peerId=${peerId}`, ipOwner)).webSocket);
+  await created.settle();
+  assert.equal(owner.lastMessage()?.type, 'registered');
+  const ownerSlot = readSlotRows(created.db);
+  assert.equal(ownerSlot.length, 1, '旧会话必须占一个名额');
+  const ownerToken = ownerSlot[0]!.release_token;
+
+  // 让接管方的 registered 帧投递失败（客户端在 accept 后立刻断开）。
+  FakeSocket.failSend = (data) => data.includes('"registered"');
+  try {
+    const takeover = await upgrade(created.hub, `peerId=${peerId}`, ipTakeover);
+    assert.equal(takeover.status, 101);
+    await created.settle();
+    const takeoverSocket = serverOf(takeover.webSocket);
+    assert.equal(takeoverSocket.lastMessage(), null, '投递失败时客户端不该收到任何帧');
+  } finally {
+    FakeSocket.failSend = null;
+  }
+
+  const slots = readSlotRows(created.db);
+  assert.equal(slots.length, 1, '投递失败的那次接管不能把旧会话的名额删掉');
+  assert.equal(slots[0]!.release_token, ownerToken, '留下的必须是旧会话自己那一行');
+  assert.equal(
+    applySessionSlotRenew(createSqlite(created.db), {
+      slotId: slots[0]!.slot_id,
+      now: Date.now(),
+      ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
+    }),
+    true,
+    '旧会话的续期必须还能成功'
+  );
+});
+
+test('commit replace 的 shard 0 RPC 失败要记指标：静默失败会让名额账目永远漂移', async () => {
+  // 安全评审 C：commit 只在 registered 投递成功后发生，它的失败没有客户端可见后果，
+  // 所以必须留下结构化痕迹，否则「名额行没删掉」这类漂移在线上完全不可观测。
+  const peerId = 'AERO-REPLACEFAIL2';
+  const ipOwner = '203.0.113.91';
+  const ipTakeover = '203.0.113.92';
+  const handle: { current: Awaited<ReturnType<typeof createHub>> | null } = { current: null };
+
+  const created = await createHub({
+    shardCount: '2',
+    shardName: 'signaling-shard-1',
+    signalingHub: {
+      respond: async (call) => {
+        const body = call.body as
+          | {
+              action?: string;
+              slotId?: string;
+              clientKey?: string;
+              releaseToken?: string;
+              replaces?: { slotId?: string; releaseToken?: string };
+            }
+          | null;
+        const sql = () => createSqlite(handle.current!.db);
+        if (body?.action === 'reserve') {
+          const granted = applySessionSlotReserve(sql(), {
+            slotId: body.slotId ?? '',
+            clientKey: body.clientKey ?? '',
+            releaseToken: typeof body.releaseToken === 'string' ? body.releaseToken : '',
+            ...(body.replaces?.slotId && body.replaces?.releaseToken
+              ? {
+                  replaces: {
+                    slotId: body.replaces.slotId,
+                    releaseToken: body.replaces.releaseToken,
+                  },
+                }
+              : {}),
+            now: Date.now(),
+            maxSessions: 12,
+            ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
+          });
+          return { status: 200, body: { granted } };
+        }
+        if (body?.action === 'replace') {
+          // shard 0 抖动：commit 拿不到确认。
+          return { status: 500, body: { error: 'storage unavailable' } };
+        }
+        if (body?.action === 'release') {
+          applySessionSlotRelease(
+            sql(),
+            body.slotId ?? '',
+            typeof body.releaseToken === 'string' ? body.releaseToken : undefined
+          );
+          return { status: 200, body: { released: true } };
+        }
+        return { status: 200, body: { allowed: true } };
+      },
+    },
+  });
+  handle.current = created;
+
+  const owner = serverOf((await upgrade(created.hub, `peerId=${peerId}`, ipOwner)).webSocket);
+  await created.settle();
+  assert.equal(owner.lastMessage()?.type, 'registered');
+
+  const takeover = await upgrade(created.hub, `peerId=${peerId}`, ipTakeover);
+  assert.equal(takeover.status, 101);
+  const takeoverSocket = serverOf(takeover.webSocket);
+  await created.settle();
+
+  assert.equal(takeoverSocket.lastMessage()?.type, 'registered', 'commit 失败不影响客户端拿到 registered');
+  assert.equal(
+    created.metrics().filter((metric) => metric.event === 'signal_session_slot_replace_failed').length,
+    1,
+    'commit replace 的失败必须记一条指标'
+  );
+});
 test('口令重登记撞车：旧活跃码必须原样保留，只有分配成功后才清理自己的旧码', async () => {
   const created = await createHub({ shardCount: '1' });
   const call = (body: Record<string, unknown>): Promise<Response> =>

@@ -1313,6 +1313,11 @@ export class SignalingHub extends DurableObject<Env> {
         }
       },
       sendRegistered: async () => {
+        if (seatTransferLost) return;
+        // 席位补领失败（同 IP 接管的旧 socket 恰好在这一轮 await 里先释放了席位，补领又被
+        // 别人抢走）：这条连接从未被准入，绝不能写 map 或投递 registered——否则它关闭时
+        // unregisterSocket 会按 clientBySocket 无条件 release 一次，扣掉同 IP 另一条活会话
+        // 的信用，每出口 12 会话上限会被「满额 + 一次注定失败的接管」逐步放大。
         this.sessionsByPeer.set(peerId, server);
         this.peerBySocket.set(server, peerId);
         this.clientBySocket.set(server, clientKey);
