@@ -359,7 +359,7 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 | 生产单例无握手预算：未认证 `/ws` 垃圾握手可直打全局唯一 DO | 预算从「仅分片回源时」改为**所有握手**在 accept 之前消耗；429 带 `Retry-After` 与 `shardCount` 指标 | `signalingHub.test.ts`（第 21 次同 IP 握手 429、其它 IP 不受影响） |
 | 覆盖率门槛只统计被加载文件，`worker.ts` 从未被 import | 新增 `services/signaling/signalingHub.test.ts`：用 `scripts/test-stubs/cloudflare-workers.mjs` 替身 + 注入 `WebSocketPair`/101 `Response` + 真实 `node:sqlite` 作 `ctx.storage.sql`，直接构造 `SignalingHub` 并走真实 `fetch` 分支 | 5 条：101/registered（无摘要不签发 proof）、非法摘要/非法 proof 握手 400、无 proof 抢注被 4010 拒绝且旧 socket 存活、带当前 proof 接管后轮换并给旧 socket 4011、每 IP 上限 4029、预算 429、旧 4 位 peerId 4009 且不占名额 |
 | `sessionStore.sqlite.test.ts` 适配器用 `rows.length` 当 `rowsWritten`、不模拟单语句 | 改为 `SELECT changes()`；多语句直接抛错；补旧表 `ALTER TABLE ... ADD COLUMN revoke_after` 迁移用例与槽位 `rowsWritten` 用例 | 同名测试文件 +4 例 |
-| collector（`collectTestFiles`）无测试、`tsconfig` 不含 `scripts/` | 补递归收 `.test.tsx` / 不存在目标 / 空目录三例；`tsconfig.json` 加 `scripts/**/*.ts` 与 `noFallthroughCasesInSwitch`；CI 增加组件覆盖率门槛（65 / 60 / 45，低于 services 的原因写在 workflow 注释里） | `scripts/run-node-tests.test.ts`（现 5 例） |
+| collector（`collectTestFiles`）无测试、`tsconfig` 不含 `scripts/` | 补递归收 `.test.tsx` / 不存在目标 / 空目录三例；`tsconfig.json` 加 `scripts/**/*.ts` 与 `noFallthroughCasesInSwitch`；CI 增加组件覆盖率门槛（60 / 58 / 40，低于 services 的原因写在 workflow 注释里） | `scripts/run-node-tests.test.ts`（现 10 例） |
 | 恢复 hibernated socket 时 `tryAcquire` 返回值被忽略 → 上限被悄悄放宽 | 新增 `SignalingSessionLimiter.restore()`：恢复的 socket 只计数不判上限（它们本来就活着），构造期用它替换 `tryAcquire` | `signalingRateLimitPolicy.test.ts`（restore 超上限仍计数、之后新 socket 被拒、release 后恢复准入） |
 | 驱逐时无条件 `map.delete` 可能删掉 await 期间接管的赢家 | 三张 map 的删除都按值校验（`get(...) === existing`） | 由 `signalingHub.test.ts` 的接管用例覆盖（赢家仍持有注册） |
 | 发送端状态行被 800ms 轮询覆盖（P2-1） | `services/send/connectionStatusNotice.ts`：会话层 `announce` 带 30s 窗口，连接数轮询走 `routine` 在窗口内不生效；`Sender.tsx` 全文件不再有裸 `setConnectionStatus` 写入 | `connectionStatusNotice.test.ts`（含负对照：短路窗口后用例失败） |
@@ -402,3 +402,27 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 - `signalingHub.test.ts` 是进程内替身，不覆盖真实 hibernation 与多 isolate 调度；跨片/休眠相关探针仍只在 `%TEMP%` 手工跑。
 - 长时共享（>10 分钟）后「重连耗尽 → 重建带 proof」只有单测与结构保证，没有真实时间推进的 E2E（CI 不适合等 10 分钟）。
 - `Receiver.tsx` / `ScreenShare.tsx` 仍是千行组件；屏幕共享仍是 mesh（`MAX_VIEWERS=6`、16 Mbps 聚合预算）。
+
+### 8.7 第五轮复评后的补齐（2026-11-14，复评基线 93 / 88 / 89）
+
+第五轮的三份复评（安全 93、产品 88、工程 89）都只差「最后一公里」的证明，因此这一轮几乎没有新抽象，主要是把已有模块接进测试与 CI：
+
+| 缺口（复评） | 修法 | 回归测试 |
+| --- | --- | --- |
+| 发送端把可自愈的瞬态（自动重连成功）当永久失效：`PeerRuntime` 重连成功只发 `signaling:restored`，`SenderSession` 只监听 `open`/`error` → 口令卡永远「已失效」 | `services/send/senderSession.ts` 监听 `signaling:restored`：清除降级位与状态行、恢复 `waiting`、提示「信令已恢复」 | `senderSession.test.ts` 改用它（原来是重发 `open` 的假路径，掩盖了缺口） |
+| 跨 IP 接管时配额多减：接管 RPC 在途时旧 socket 已 `unregisterSocket` 并 release，`ejectExisting` 又无条件 release → 该 IP 上限被放宽且不自愈 | 归属判断与释放绑定：只有 `clientBySocket.get(existing) === existingClientKey` 时才 delete + release | `signalingHub.test.ts`「跨 IP 接管时旧 socket 先断开：配额只释放一次」（负对照：改回无条件 release ⇒ 红） |
+| 屏幕共享重建时的 proof 组装/落盘/清理散在组件里，调用点无测试 | 抽 `services/screenShare/screenShareSessionProof.ts`（room + storage 注入）：`resolveScreenSharePeerCredentials` / `rememberScreenShareSessionProof` / `forgetScreenShareSessionProof` | `screenShareSessionProof.test.ts`（有 proof 时凭证不带 `sessionSecretHash`、storage 损坏不抛、终态清理后为空） |
+| 第 7 个观众被拒时发 `{type:'share-full'}` 的分支无测试；data conn 未登记时观众只看到「连接超时…检查网络」而不是「人数已满」 | 抽 `planViewerAdmission`（`admit` / `reject-share-full` + `reserveSeat` + `delivery`）与 `deliverShareFull`（已登记连接直发，未登记反向连一条） | `viewerAdmission.test.ts` +151 行（pending 占位、已满、dc 未登记仍能投放）；E2E 见下行 |
+| 三条失败路径只有单测、没有真实浏览器证据 | `e2e/screenshare.spec.ts` 新增：房号过期（琥珀「链接已失效」+ 复制禁用）、停止→立刻重开（30s 内重新出现链接）、观众媒体失败（重试提示 → 「重试连接」终态） | 新增 3 条 + 2 条既有终态用例，product 套件 **11 passed (1.2m)** |
+| `src/worker.ts` 默认导出 `fetch` 从未执行：同源门/鉴权/分派被改坏仍全绿 | 把 `isAllowedSameOriginRequest` 逐字抽到 `services/signaling/httpOriginPolicy.ts`；`services/signaling/workerEntry.test.ts` 直接驱动入口 fetch | `httpOriginPolicy.test.ts`（10 例）+ `workerEntry.test.ts`（9 例：ASSETS/426/403/400/101 + share-code HMAC/429）；worker.ts 行覆盖 71.53% → **81.75%**、函数 53.33% → **68.13%**；负对照 16/19、3、1 条变红 |
+| `--test-coverage-include` 只是报告过滤器，未 import 的文件不进分母；`src/worker.ts` 不在 include 名单，CI 数字与文档不符 | 新增 `scripts/check-coverage-scope.mjs`：`git ls-files services src` 与覆盖率报告取差集，缺文件即非 0 退出，无法加载的 3 个文件登记在 `ALLOWED_UNCOVERED` 并写明理由；CI 改调该脚本，include 扩到 `src/**/*.ts` | 负对照：去掉 allowlist 过滤 ⇒ exit 1 并列出 3 个文件；全仓行覆盖 89.71% |
+| 覆盖率过滤器探测失败会静默退化（Node 22.12 没有 `--test-coverage-include`） | `buildNodeTestArgs` 在 `NODE_TEST_COVERAGE=1` 但过滤器不可用时直接 throw，不再只统计已加载文件 | `run-node-tests.test.ts` +3 例（throw、两旗标判定、include/exclude 参数） |
+| 补测 6 个从未被 import 的模块（`fileUtils`、`routeProbeLog`、`logicalReceiverSessions`、`committedReconnectResume`、`receiverRouteSessionId`、`sessionTransferState`） | 逐模块补真值表/边界用例，而不是只「import 一次」凑覆盖率 | `services` 552 → **606 tests**；`services/signaling` 137 pass |
+
+仍然存在的已知取舍（本轮之后）：
+
+- proof 仍走 WS URL query；改首帧要同时改两端注册协议，属破坏性升级。
+- `services/receiving/persistedDirectoryHandle.ts`（File System Access）、`services/receive/sessionCoordinator.ts`（需真实 IndexedDB/OPFS）、`services/crc32.worker.ts`（Web Worker 入口）三个文件无法在 Node 宿主加载，是 `ALLOWED_UNCOVERED` 里仅有的例外。
+- 入口层测试仍未覆盖 `/api/ice-config`、`/api/network-check`、share-code resume、413/非法 JSON 与 DO 内部端点直调。
+- E2E 里「长时共享后重建带 proof」仍靠单测与结构保证：CI 不适合等 10 分钟。
+- 屏幕共享仍是 mesh（`MAX_VIEWERS=6`、16 Mbps 聚合预算）；`Receiver.tsx` / `ScreenShare.tsx` 仍是千行组件。
