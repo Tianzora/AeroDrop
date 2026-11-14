@@ -415,14 +415,38 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 | 第 7 个观众被拒时发 `{type:'share-full'}` 的分支无测试；data conn 未登记时观众只看到「连接超时…检查网络」而不是「人数已满」 | 抽 `planViewerAdmission`（`admit` / `reject-share-full` + `reserveSeat` + `delivery`）与 `deliverShareFull`（已登记连接直发，未登记反向连一条） | `viewerAdmission.test.ts` +151 行（pending 占位、已满、dc 未登记仍能投放）；E2E 见下行 |
 | 三条失败路径只有单测、没有真实浏览器证据 | `e2e/screenshare.spec.ts` 新增：房号过期（琥珀「链接已失效」+ 复制禁用）、停止→立刻重开（30s 内重新出现链接）、观众媒体失败（重试提示 → 「重试连接」终态） | 新增 3 条 + 2 条既有终态用例，product 套件 **11 passed (1.2m)** |
 | `src/worker.ts` 默认导出 `fetch` 从未执行：同源门/鉴权/分派被改坏仍全绿 | 把 `isAllowedSameOriginRequest` 逐字抽到 `services/signaling/httpOriginPolicy.ts`；`services/signaling/workerEntry.test.ts` 直接驱动入口 fetch | `httpOriginPolicy.test.ts`（10 例）+ `workerEntry.test.ts`（9 例：ASSETS/426/403/400/101 + share-code HMAC/429）；worker.ts 行覆盖 71.53% → **81.75%**、函数 53.33% → **68.13%**；负对照 16/19、3、1 条变红 |
-| `--test-coverage-include` 只是报告过滤器，未 import 的文件不进分母；且该旗标在 Node 22.12 的 CI 上会让测试进程一行报告都不产出（本地 Node 24 才复现） | 新增 `scripts/check-coverage-scope.mjs`：`git ls-files services src` 与覆盖率报告取差集，缺文件即非 0 退出，无法加载的 3 个文件登记在 `ALLOWED_UNCOVERED` 并写明理由；**刻意不传 include**，分母完整性由 git 对比保证；报告为空时先打印子进程输出再失败 | 负对照：去掉 allowlist 过滤 ⇒ exit 1 并列出 3 个文件；守卫输出 `108 个生产源文件，报告里出现 108 行`；全仓行覆盖 89.71% |
+| `--test-coverage-include` 只是报告过滤器：未被测试加载的文件按 0 计入分母的说法不成立（实测组件套件只报出 4 个文件），任何新模块只要没人 import 就完全逃过门槛 | `scripts/check-coverage-scope.mjs` 按 scope 运行（`--scope=services|components`）：期望清单来自 `git ls-files`，报告行数 < 期望 − 白名单即失败；报告里 line 覆盖率为 `0%` 且不在白名单的文件同样失败（「进了分母但一行没跑」不算回归证据）；解析先剥 ANSI、行首标记可选（本地 `ℹ`、CI runner 上观察到 `#`），避免把「格式变了」误报成「所有文件都没加载」；`--self-test` 用 9 条内联 fixture 固定解析与判定规则；**不传 include**，分母完整性由 git 对比保证 | 负对照：去掉白名单过滤 ⇒ exit 1 并点名；`--scope=services` ⇒ `108 个生产源文件 / 报告 108 行 / 例外 3`；`--scope=components` ⇒ `12 个生产文件 / 报告 16 行 / 例外 3`；CI run `43557683645` 复现「报告完整但解析 0 行」，`43558142248` 转绿；全仓行覆盖 89.78% |
+| 组件覆盖率门禁是假的：`components/Receiver.tsx`（3367 行）、`components/ScreenShare.tsx`（2507 行）、`components/Sender.tsx`（1670 行）在组件套件里一行都没进报告，而 CI 注释宣称「未加载组件按 0 计入」 | 把同一个守卫扩到 components scope：期望清单 = `git ls-files components` 的 `.ts/.tsx` 去掉测试文件；白名单只收「Node 宿主里确实无法 import」的三个组件（`Receiver.tsx` 顶层访问 document，`ScreenShare.tsx` / `Sender.tsx` 顶层访问 window，交互分别由 Playwright e2e 与 `test:e2e:product-transfer` 覆盖）；能加载却没人测的组件（`ErrorBoundary.tsx`、`PWAInstallPrompt.tsx`）用 `scripts/component-import-smoke.test.ts` 拉进分母，不允许进白名单；因此 components scope 的测试目标是 `['components', 'scripts/component-import-smoke.test.ts']` | 真实分母 12 个生产文件、9 个必须出现且全部在册；套件 `all files` 66.67 行 / 65.38 分支 / 42.86 函数（25 条测试）；负对照：把白名单扩到可加载组件 ⇒ 该文件立刻被判缺测试 |
 | 覆盖率过滤器探测失败会静默退化（Node 22.12 没有 `--test-coverage-include`） | `buildNodeTestArgs` 在 `NODE_TEST_COVERAGE=1` 但过滤器不可用时直接 throw，不再只统计已加载文件 | `run-node-tests.test.ts` +3 例（throw、两旗标判定、include/exclude 参数） |
 | 补测 6 个从未被 import 的模块（`fileUtils`、`routeProbeLog`、`logicalReceiverSessions`、`committedReconnectResume`、`receiverRouteSessionId`、`sessionTransferState`） | 逐模块补真值表/边界用例，而不是只「import 一次」凑覆盖率 | `services` 552 → **606 tests**；`services/signaling` 137 pass |
 
 仍然存在的已知取舍（本轮之后）：
 
 - proof 仍走 WS URL query；改首帧要同时改两端注册协议，属破坏性升级。
-- `services/receiving/persistedDirectoryHandle.ts`（File System Access）、`services/receive/sessionCoordinator.ts`（需真实 IndexedDB/OPFS）、`services/crc32.worker.ts`（Web Worker 入口）三个文件无法在 Node 宿主加载，是 `ALLOWED_UNCOVERED` 里仅有的例外。
-- 入口层测试仍未覆盖 `/api/ice-config`、`/api/network-check`、share-code resume、413/非法 JSON 与 DO 内部端点直调。
+- `services/receive/persistedDirectoryHandle.ts`（File System Access）、`services/receive/sessionCoordinator.ts`（需真实 IndexedDB/OPFS）、`services/crc32.worker.ts`（Web Worker 入口）三个文件无法在 Node 宿主加载，是 `ALLOWED_UNCOVERED` 里仅有的例外。
+- DO 内部端点（`/internal/*`）仍是逐行读码 + 入口层不可达证明，没有直调用例：它们只由另一个 DO 调用，测试替身无法验证真实 RPC 语义。
 - E2E 里「长时共享后重建带 proof」仍靠单测与结构保证：CI 不适合等 10 分钟。
 - 屏幕共享仍是 mesh（`MAX_VIEWERS=6`、16 Mbps 聚合预算）；`Receiver.tsx` / `ScreenShare.tsx` 仍是千行组件。
+
+## 8.8 第六轮复评后的补齐（2026-11-14）
+
+三项复评：安全 **95**（`reachable_95: yes`）、产品 **91**、工程 **92**。安全不再有必改项；产品与工程的缺口按下表补齐。
+
+| 缺口（复评） | 修法 | 回归测试 |
+| --- | --- | --- |
+| 同 IP 接管的席位「转移」用 `reserve-global-slot` 之前读到的 `existingClientKey`：旧 socket 若在该 RPC 期间关闭，transfer 既不 acquire 也不 release，新连接不计数，每出口 IP 上限被悄悄放宽（仅分片模式） | `src/worker.ts` 在 `ejectExisting` 里按实际归属补判：`ownsExistingClient` 为真则把席位记在新连接账上（`seatAcquired = true`，失败回滚才释放得回去），否则补一次 `tryAcquire`；补领失败置 `seatTransferLost`，动作跑完后回滚名额并按 `rate-limited`/4029 拒绝 | `signalingHub.test.ts` 两例：①「同 IP 接管时旧 socket 在名额 RPC 期间断开：席位要补领」（负对照：去掉补领 ⇒ 该 IP 的第 2 条被错误放行，红）；②「同 IP 接管投递 registered 失败：席位随回滚释放」（负对照：不记 transfers 席位 ⇒ 该 IP 名额被永久吃掉，红） |
+| 握手预算模块注释写着「单例模式不会消耗预算」，与 `src/worker.ts:949` 的无条件消费相反 | 注释改为「单例模式没有这次 RPC，但预算仍对所有握手生效：计费点在 accept 之前、不区分模式」 | 注释与代码对齐，行为不变（无需测试） |
+| 第 7 个观众：share-full 是 best-effort，送达失败时静默返回，观众侧又把 `call.close` 当断链重连 → 20s 后报「连接超时，请检查网络」 | 抽 `services/screenShare/viewerShareFullFallback.ts`：`planViewerCallEndOutcome` 只在「没收到画面且数据通道从未 open」时判 `suspected-share-full`（保守，避免把真网络故障误诊为人数问题），且不自动重连；`shareFullTelemetry` 记录送达失败 | `viewerShareFullFallback.test.ts` + `shareFullTelemetry.test.ts`；`e2e/screenshare.spec.ts` 新增 7 观众满员用例（断言「人数已满」而不是超时文案） |
+| 分享端两条终态（重建耗尽、首连看门狗）只有代码没有测试 | 抽 `services/screenShare/sharerRecoveryPolicy.ts`：`planSharerRecovery` 枚举 `terminal`/`initialize-peer`/`retry-signaling`/`rebuild-peer`/`wait`，`planSharerFirstConnectWatchdog` 判超时；`retry-signaling` 之后用重读的状态再判一次，保持旧实现「retry 后可能当场重建」的语义 | `sharerRecoveryPolicy.test.ts`（预算耗尽必进终态、retry 后重读、watchdog 不误判已就绪）；负对照：去掉 peerMissing 的终态分支 ⇒ 红 |
+| 分享端复用观众视角文案（「请让发送端重新分享」「换一个口令」），而用户自己就是发送端 | `services/connectionGuidance.ts` 新增 `getSharerPeerRuntimeErrorMessage`（unauthorized / unavailable-id → 「分享凭证已过期，请重新开始共享（旧链接会失效）」）与 `getSuspectedShareFullMessage` | `connectionGuidance.test.ts` 分享端分支 + 回退（负对照：把分享端分支改 false ⇒ 红） |
+| 登记结果还没回来就发「屏幕共享已开始」 | `services/screenShare/shareStartNotice.ts`：`queue` 只排队，`takeOnReady` 在信令 ready 后才取走并提示一次 | `shareStartNotice.test.ts`（未 ready 不取、只取一次） |
+| 429 给了 `Retry-After` 却不展示，终态唯一次 CTA 正是会再次 429 的动作 | `services/screenShare/shareRoomRetryCooldown.ts`：`describeShareRoomRetryCooldown(retryAt, now)` → `{secondsLeft, canRetry}`；`ScreenShareUI` 冷却期禁用「重新开始共享」并显示「N 秒后可重试」 | `shareRoomRetryCooldown.test.ts` + `ScreenShareUI.test.ts`（删秒数插值 / `disabled` 改 false ⇒ 红） |
+| 房号过期检测 60s 轮询，最长 1 分钟内链接仍可复制、徽章仍「正在共享」 | `services/screenShare/shareRoomExpiry.ts`：按 `expiresAt` 挂一次性 `setTimeout`，续期成功自动重排 | `shareRoomExpiry.test.ts` + `ScreenShareUI.test.ts`（过期卡主按钮） |
+| `SHARE_SIGNALING_LOST_MESSAGE` 一屏出现三次（状态行 + 琥珀提示 + toast） | 状态行只留短状态「链接已失效」，长句只在琥珀提示出现；`senderSession` 删掉重复 toast | `senderSession.test.ts:647`（恢复 notify 的负对照 ⇒ 红） |
+
+仍然存在的已知取舍（本节之后）：
+
+- **offer 限流是每出口 IP 每分钟 10 条，每个观众需 2 条**（`services/signalingRateLimitPolicy.ts`）：同一 CGNAT/校园网出口下 6 个观众要跨分钟才能集齐。这是有意的滥用防护，不是缺陷；E2E 因此分两个限流窗口占座（用例约 1.5 分钟），重跑前必须重启 preview，否则 workerd 内存里的计数与封锁期不会自清。
+- 满员提示分「确定的 share-full」与「疑似推断」两条分支；E2E 只断言 `/人数已满/` 任一命中，推断分支由单测钉住。
+- `components/ScreenShare.tsx`（约 2500 行）与 `components/Receiver.tsx`（约 3400 行）仍在 Node 宿主里无法 import，只能靠 Playwright 覆盖；`noUncheckedIndexedAccess` 实测 176 个错误，本轮未启用。
+- 活跃分享口令行没有全局上限（安全评审判为低危可用性项）：每个 IP 10 次/10s、24h TTL，多 IP 可持续占码。
