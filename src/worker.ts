@@ -6,6 +6,7 @@ import {
   MAX_CF_TURN_TTL_SECONDS,
   MIN_CF_TURN_TTL_SECONDS,
   SHARE_CODE_REVOKE_MAX_GRACE_MS,
+  SIGNALING_QUOTA_UNAVAILABLE_RETRY_AFTER_SECONDS,
   SIGNALING_SESSION_SLOT_REFRESH_MS,
 } from '../constants/signaling';
 
@@ -103,6 +104,12 @@ import {
 } from '../services/signaling/sessionAdmissionDelivery';
 import { planSignalingSessionSeat } from '../services/signaling/sessionSeat';
 import {
+  decodeWsCredentials,
+  parseWsProtocols,
+  pickAcceptedProtocol,
+  type WsCredentials,
+} from '../services/signaling/wsCredentialTransport';
+import {
   SIGNALING_BINDING_UNAVAILABLE_RETRY_AFTER_SECONDS,
   classifySignalingSessionRace,
   planSignalingRegistration,
@@ -168,7 +175,16 @@ type CloudflareTurnApiResponse = {
 type SignalingEnvelope =
   | { type: 'registered'; peerId: string; sessionProof?: string }
   | { type: 'ping' | 'pong'; ts: number; sourcePeerId?: string }
-  | { type: 'error'; code: string; message?: string; connectionId?: string; targetPeerId?: string; kind?: 'data' | 'media' }
+  | {
+      type: 'error';
+      code: string;
+      message?: string;
+      connectionId?: string;
+      targetPeerId?: string;
+      kind?: 'data' | 'media';
+      /** 可重试的拒绝（如 offer 限流）带上建议等待时长，客户端据此显示倒计时。 */
+      retryAfterMs?: number;
+    }
   | {
       type: 'offer' | 'answer';
       connectionId: string;
@@ -814,6 +830,12 @@ type SessionAttachment = {
  * 会话绑定的持久化记录。proof 轮换后 attachment 里不再有分享密钥摘要（重连只带 proof），
  * 所以「socket 断开后仍要求凭证」只能靠这张表；只存摘要，明文 proof 只下发一次。
  */
+/**
+ * 全局名额领取的结果。三态而不是布尔：「满了」是终态，「服务不可达」是可重试的瞬时故障，
+ * 两者在 WS 升级路径上分别对应 4029 与 503。
+ */
+type SignalingSlotReservation = 'granted' | 'exhausted' | 'unavailable';
+
 type SessionBindingAdmissionInput = {
   peerId: string;
   existingSecretHash?: string;
@@ -926,17 +948,37 @@ export class SignalingHub extends DurableObject<Env> {
       return new Response('Expected websocket', { status: 426 });
     }
 
+    // 凭证优先从 Sec-WebSocket-Protocol 读：放进 query 会随请求行进接入日志、边缘日志和
+    // 浏览器历史，而 proof 在绑定期内被抢用会把原持有者锁成 4010。query 回落只为兼容
+    // 旧客户端与既有测试，两条路径的校验完全相同（格式校验见下）。
+    const requestedProtocols = parseWsProtocols(request.headers.get('sec-websocket-protocol'));
+    const protocolCredentials = decodeWsCredentials(requestedProtocols);
+    const readCredential = (name: keyof WsCredentials): string | undefined => {
+      const fromProtocol = protocolCredentials?.[name];
+      if (fromProtocol) return fromProtocol;
+      const fromQuery = url.searchParams.get(name)?.trim();
+      return fromQuery ? fromQuery : undefined;
+    };
+    // 101 必须回显客户端提供的某个协议名，否则浏览器判定握手失败；只回显非秘密的
+    // `aerodrop.v1`，绝不回显凭证协议本身。
+    const acceptedProtocol = pickAcceptedProtocol(requestedProtocols);
+    const acceptClient = (socket: WebSocket): Response => {
+      const headers = new Headers();
+      if (acceptedProtocol) headers.set('Sec-WebSocket-Protocol', acceptedProtocol);
+      return new Response(null, { status: 101, webSocket: socket, headers });
+    };
+
     const peerId = url.searchParams.get('peerId')?.trim() || '';
     if (!peerId) {
       return new Response('Missing peerId', { status: 400 });
     }
     // 摘要格式非法说明客户端实现有问题（也可能是伪造）：在握手阶段就拒绝，不给会话名额。
-    const sessionSecretHash = url.searchParams.get('sessionSecretHash')?.trim() || undefined;
+    const sessionSecretHash = readCredential('sessionSecretHash');
     if (sessionSecretHash !== undefined && !isValidSessionSecretHash(sessionSecretHash)) {
       return new Response('Invalid sessionSecretHash', { status: 400 });
     }
     // 轮换凭证：同一格式、不同语义。格式错说明客户端实现有问题，握手阶段就拒绝。
-    const sessionProof = url.searchParams.get('sessionProof')?.trim() || undefined;
+    const sessionProof = readCredential('sessionProof');
     if (sessionProof !== undefined && !isValidSessionProof(sessionProof)) {
       return new Response('Invalid sessionProof', { status: 400 });
     }
@@ -958,8 +1000,8 @@ export class SignalingHub extends DurableObject<Env> {
       });
     }
 
-    const codeParam = url.searchParams.get('code');
-    const tokenParam = url.searchParams.get('token');
+    const codeParam = readCredential('code');
+    const tokenParam = readCredential('token');
     // share_codes 仍只住在 shard 0：本片不是 shard 0 时先回源取一次记录，再交给同步的
     // resolveShareCodeRegistration 判定。失败按「查不到」处理（fail closed），不放宽校验。
     // 本地判定会 normalize 口令，远端预取也必须用同一个值，否则分片模式下
@@ -1010,7 +1052,7 @@ export class SignalingHub extends DurableObject<Env> {
         } satisfies SignalingEnvelope)
       );
       rejectedServer.close(4009, 'Signaling registration rejected');
-      return new Response(null, { status: 101, webSocket: rejectedClient });
+      return acceptClient(rejectedClient);
     }
 
     // peerId 冲突：同一个 peerId 只应有一条活着的信令连接。旧实现直接拒绝新连接，但旧
@@ -1089,6 +1131,10 @@ export class SignalingHub extends DurableObject<Env> {
     // 或补领席位失败。前者要补领，后者必须在注册落定前拒绝——否则这条连接不计数，
     // 每出口 IP 的上限被悄悄放宽。
     let seatTransferLost = false;
+    // 全局名额服务（shard 0）不可达。名额是防滥用而非身份校验，长期做法曾是 fail-open，
+    // 但那会让整个出口 IP 在 shard 0 抖动期间绕过全局上限；这里改成在 accept 之前
+    // 回 503 + Retry-After，让客户端按已有退避逻辑重试，代价是一次可重试的失败。
+    let slotUnavailable = false;
     const respondRateLimited = (): Response => {
       server.send(
         JSON.stringify({
@@ -1098,7 +1144,24 @@ export class SignalingHub extends DurableObject<Env> {
         } satisfies SignalingEnvelope)
       );
       server.close(4029, 'Too many sessions');
-      return new Response(null, { status: 101, webSocket: client });
+      return acceptClient(client);
+    };
+    // 名额服务不可达：HTTP 层直接 503（客户端按退避重连），同时把已经 accept 的服务端
+    // socket 用 1013 关掉——否则它会成为一条「升级成功但永远注册不了」的僵尸连接。
+    // accept 发生在名额判定之前是既有结构（名额判定跑在动作序列里，需要 socket 投递
+    // registered），这里只保证客户端拿到的一定是 503，而不是一条看似正常的连接。
+    const respondSlotUnavailable = (): Response => {
+      try {
+        server.close(1013, 'Signaling temporarily unavailable');
+      } catch {
+        // 已经断开就没什么可关的。
+      }
+      return new Response('Signaling temporarily unavailable', {
+        status: 503,
+        headers: {
+          'Retry-After': String(SIGNALING_QUOTA_UNAVAILABLE_RETRY_AFTER_SECONDS),
+        },
+      });
     };
     // 被拒的连接没有归属的 socket 状态可回收：名额必须在这里还回去，否则一次失败的重连
     // 会永久吃掉一个全局名额（回收只发生在 socket 关闭事件里）。
@@ -1117,7 +1180,7 @@ export class SignalingHub extends DurableObject<Env> {
       // 发生在 close 事件里，而那时 clientBySocket 还没写，等于永久泄漏。
       if (server.readyState !== WebSocket.OPEN) {
         await rollbackQuota();
-        return new Response(null, { status: 101, webSocket: client });
+        return acceptClient(client);
       }
       const race = classifySignalingSessionRace({
         planned: existing,
@@ -1126,13 +1189,13 @@ export class SignalingHub extends DurableObject<Env> {
       if (race !== 'different') return null;
       await rollbackQuota();
       this.sendSessionConflict(server, peerId, now);
-      return new Response(null, { status: 101, webSocket: client });
+      return acceptClient(client);
     };
 
     const execution = await executeRegistrationPlan(actions, {
       rejectConflict: async () => {
         this.sendSessionConflict(server, peerId, now);
-        return new Response(null, { status: 101, webSocket: client });
+        return acceptClient(client);
       },
       reserveGlobalSlot: async () => {
         // 接管时复用旧槽位（reserve 会原地续期并转移归属）。先释放再领取的话，一旦领取
@@ -1141,7 +1204,16 @@ export class SignalingHub extends DurableObject<Env> {
           isTakeover && existingAttachment?.slotId
             ? existingAttachment.slotId
             : crypto.randomUUID();
-        if (!(await this.reserveSignalingSessionSlot(slotId, clientKey))) {
+        const reservation = await this.reserveSignalingSessionSlot(slotId, clientKey);
+        if (reservation !== 'granted') {
+          if (reservation === 'unavailable') {
+            // 计数服务故障与「真的满了」必须分开：前者可重试（503），后者是终态（4029）。
+            signalingTelemetry.record('signal_session_slot_unavailable', {
+              shardCount: this.getSignalingShardCount(),
+            });
+            slotUnavailable = true;
+            return null;
+          }
           signalingTelemetry.record('signal_session_slot_rejected', {
             shardCount: this.getSignalingShardCount(),
           });
@@ -1279,7 +1351,7 @@ export class SignalingHub extends DurableObject<Env> {
           });
         }
       },
-      sendRateLimited: respondRateLimited,
+      sendRateLimited: () => (slotUnavailable ? respondSlotUnavailable() : respondRateLimited()),
     });
     if (execution.kind === 'respond') return execution.response;
     // 席位补领失败：动作序列已经跑完（旧 socket 已驱逐），但这条连接不该被计入
@@ -1288,7 +1360,7 @@ export class SignalingHub extends DurableObject<Env> {
       await rollbackQuota();
       return respondRateLimited();
     }
-    return new Response(null, { status: 101, webSocket: client });
+    return acceptClient(client);
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
@@ -1379,7 +1451,8 @@ export class SignalingHub extends DurableObject<Env> {
           'Too many connection requests',
           payload.connectionId,
           payload.targetPeerId,
-          payload.kind
+          payload.kind,
+          rateLimitDecision.retryAfterMs
         );
         return;
       }
@@ -1967,10 +2040,17 @@ export class SignalingHub extends DurableObject<Env> {
 
   /**
    * 领取一个全局会话名额。计数在 shard 0；本片就是 shard 0 时直接走本地表。
-   * 计数服务不可用时放行：名额是防滥用，不是身份校验，不能因为计数故障让信令整体不可用。
+   *
+   * 返回值是三态而不是布尔：名额服务不可达（超时/非 2xx/坏 body）与「真的满了」在
+   * 调用方是完全不同的处置——前者 503 可重试，后者 4029 终态。旧实现两种都 `return true`，
+   * 于是 shard 0 抖动期间注册会带着一个从未落库的 slotId 跑完，全局 12 会话上限被绕过；
+   * 而若改成两种都拒，一次计数故障又会把整站信令打成不可用。
    */
-  private async reserveSignalingSessionSlot(slotId: string, clientKey: string): Promise<boolean> {
-    if (this.getSignalingShardCount() <= 1) return true;
+  private async reserveSignalingSessionSlot(
+    slotId: string,
+    clientKey: string
+  ): Promise<SignalingSlotReservation> {
+    if (this.getSignalingShardCount() <= 1) return 'granted';
     if (this.isShardZero()) {
       return applySessionSlotReserve(this.getSql(), {
         slotId,
@@ -1978,7 +2058,9 @@ export class SignalingHub extends DurableObject<Env> {
         now: Date.now(),
         maxSessions: this.maxSignalingSessions,
         ttlMs: SIGNALING_SESSION_SLOT_TTL_MS,
-      });
+      })
+        ? 'granted'
+        : 'exhausted';
     }
     try {
       const response = await this.signalingStub(signalingShardName(0)).fetch(
@@ -1988,12 +2070,12 @@ export class SignalingHub extends DurableObject<Env> {
           body: JSON.stringify({ action: 'reserve', slotId, clientKey, now: Date.now() }),
         })
       );
-      if (!response.ok) return true;
+      if (!response.ok) return 'unavailable';
       const body = (await response.json()) as { granted?: unknown } | null;
-      return body?.granted !== false;
+      return body?.granted === false ? 'exhausted' : 'granted';
     } catch (error) {
       console.warn('signaling session slot reserve failed', error);
-      return true;
+      return 'unavailable';
     }
   }
 
@@ -2078,10 +2160,11 @@ export class SignalingHub extends DurableObject<Env> {
       return { status: 'rebind-rejected' };
     }
 
-    // 同一 peerId 只保留最新一张码，避免反复建码把表堆大。
-    deleteShareCodesForPeer(this.getSql(), peerId);
-
-    return allocateShareCode({
+    // 同一 peerId 只保留最新一张码，避免反复建码把表堆大。但删除必须排在分配成功之后：
+    // 自定义口令撞车时 allocate 返回 taken，先删就把仍然有效的旧码销毁了，观众当场 404、
+    // 发送端重连拿不到 token。insertShareCode 现在支持同 peerId 原地续期，所以不再需要
+    // 「先删一次给续期腾位置」。
+    const allocation = allocateShareCode({
       peerId,
       secretHash,
       code: requestedCode,
@@ -2089,6 +2172,10 @@ export class SignalingHub extends DurableObject<Env> {
       ttlMs,
       tryInsert: (record) => insertShareCodeRow(this.getSql(), record, now),
     });
+    if (allocation.status === 'ok') {
+      deleteShareCodesForPeer(this.getSql(), peerId, allocation.record.code);
+    }
+    return allocation;
   }
 
   /**
@@ -2250,7 +2337,8 @@ export class SignalingHub extends DurableObject<Env> {
     message: string,
     connectionId?: string,
     targetPeerId?: string,
-    kind?: 'data' | 'media'
+    kind?: 'data' | 'media',
+    retryAfterMs?: number
   ): void {
     ws.send(
       JSON.stringify({
@@ -2260,6 +2348,7 @@ export class SignalingHub extends DurableObject<Env> {
         connectionId,
         targetPeerId,
         kind,
+        retryAfterMs,
       } satisfies SignalingEnvelope)
     );
   }

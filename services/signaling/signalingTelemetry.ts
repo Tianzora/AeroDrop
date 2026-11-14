@@ -17,6 +17,8 @@ export type SignalingTelemetryEvent =
   | 'signal_cross_shard_failed'
   /** 全局会话名额拒绝了一个新注册。 */
   | 'signal_session_slot_rejected'
+  /** 全局名额表不可达（shard 0 抖动）：注册按可重试的 503 结束，而不是绕过上限。 */
+  | 'signal_session_slot_unavailable'
   /** 会话接管被拒（缺 proof / proof 不匹配）。 */
   | 'signal_session_conflict'
   /** 分片模式的握手预算耗尽。 */

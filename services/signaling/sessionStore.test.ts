@@ -12,6 +12,7 @@ import {
   appendPendingSessionProof,
   buildPendingSessionProofHistory,
   commitSessionBindingRotation,
+  deleteShareCodesByPeerId,
   findActiveShareCode,
   findSessionBinding,
   initializeSessionBindingSchema,
@@ -500,7 +501,21 @@ test('insertShareCode reports a code collision instead of overwriting', () => {
     insertShareCode(collided.sql, { code: '123456', peerId: 'peer-1', secretHash, expiresAt: 5_000 }, 1_000),
     false
   );
-  assert.ok(collided.calls[0].sql.includes('ON CONFLICT(code) DO NOTHING'));
+  // 冲突时旧行必须分毫未动：只允许同一 peerId 原地续期（WHERE share_codes.peer_id = excluded.peer_id），
+  // 否则「别人的码」会被抢占，或「自己的旧码」被无声删除。
+  const collisionSql = collided.calls[0].sql;
+  assert.ok(collisionSql.includes('ON CONFLICT(code) DO UPDATE'));
+  assert.ok(collisionSql.includes('WHERE share_codes.peer_id = excluded.peer_id'));
+});
+
+test('deleteShareCodesByPeerId keeps the freshly allocated code when asked', () => {
+  const sql = createFakeSql(() => ({ rows: [] }));
+  deleteShareCodesByPeerId(sql.sql, 'peer-1', '654321');
+  assert.equal(sql.calls.at(-1)?.sql, 'DELETE FROM share_codes WHERE peer_id = ? AND code <> ?');
+  assert.deepEqual(sql.calls.at(-1)?.params, ['peer-1', '654321']);
+
+  deleteShareCodesByPeerId(sql.sql, 'peer-1');
+  assert.equal(sql.calls.at(-1)?.sql, 'DELETE FROM share_codes WHERE peer_id = ?');
 });
 
 /* ------------------------------------------------------------------ */

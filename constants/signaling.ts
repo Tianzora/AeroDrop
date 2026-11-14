@@ -98,3 +98,29 @@ export const SESSION_COMMIT_RETRY_DELAY_MS = 50;
 
 /** shard 0 绑定表不可达时，WS 升级返回 503 的 Retry-After（秒）。 */
 export const SIGNALING_BINDING_UNAVAILABLE_RETRY_AFTER_SECONDS = 5;
+
+/**
+ * shard 0 的全局会话名额表不可达时，WS 升级返回 503 的 Retry-After（秒）。
+ *
+ * 名额是防滥用而非身份校验，但 fail-open 会让整台出口 IP 在 shard 0 抖动期绕过全局上限，
+ * 所以改成可重试的 503。5 秒与绑定不可达保持一致，客户端已有的退避逻辑直接复用。
+ */
+export const SIGNALING_QUOTA_UNAVAILABLE_RETRY_AFTER_SECONDS = 5;
+
+/**
+ * offer 的每出口配额与静默期。
+ *
+ * 一个观众要发两条 offer（数据通道 + 媒体），屏幕共享房号又最多 6 个观众，所以
+ * 6 个观众 = 12 条 offer。旧值 10 条/分比容量本身更早生效：公司/校园这类共用出口
+ * （CGNAT）打开第 6 个链接就被本地限流拒绝，还被误报成「人数已满」。
+ *
+ * 24 条/分 = 12 个观众首连，或 6 个观众各自再重连一次；静默期收到一个窗口，
+ * 是因为 10 分钟封锁同样惩罚了被误触发的整出口（刷新页面也不会解除）。滥用成本
+ * 仍由「每出口每分钟 24 条」+ 6 位口令 + 未知码预算约束，枚举不会因此变便宜。
+ * 观众端点「重试连接」时用这里的 blockMs 做倒计时兜底。
+ */
+export const SIGNALING_OFFER_RATE_LIMIT = {
+  windowMs: 60 * 1000,
+  maxAttemptsPerClientWindow: 24,
+  blockMs: 60 * 1000,
+} as const;

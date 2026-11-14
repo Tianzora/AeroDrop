@@ -549,13 +549,16 @@ const toShareCodeRecord = (row: ShareCodeRow): ShareCodeRecord => ({
 });
 
 /**
- * 按码读活跃记录。先清理过期行再读，与旧实现一致：查询路径顺手把 TTL 到期变成墓碑。
+ * 按码读活跃记录。**读路径不再写库**：以前这里每次查询都顺手跑一遍过期清理，
+ * 而未认证的 `GET /api/share-code/:code` 会直接落到这里，等于让公网匿名请求在
+ * shard 0 上开写事务（既放大写量，也和读的语义不符）。过期行改由写路径清理：
+ * 登记/撤销/恢复都会先 `purgeExpiredShareCodes`，而分配的冲突判定也在那次清理之后，
+ * 所以「过期行挡住复用」的问题不会出现。这里只按 `expires_at`/`revoke_after` 过滤。
  */
 export const findActiveShareCode = (
   sql: SqlLike,
   input: { code: string; now: number; tombstoneMs: number }
 ): ShareCodeRecord | null => {
-  deleteExpiredShareCodes(sql, { now: input.now, tombstoneMs: input.tombstoneMs });
   const rows = sql
     .exec<ShareCodeRow>(
       'SELECT code, peer_id, secret_hash, expires_at, revoke_after FROM share_codes WHERE code = ?',
@@ -604,11 +607,24 @@ export const findRecentTombstoneByPeerId = (
   return rows[0] ? { secretHash: rows[0].secret_hash } : null;
 };
 
+/**
+ * 登记一张码。`code` 冲突时**只允许同一 peerId 原地续期**：
+ * - 别的 peerId 占着这张码 → `DO UPDATE ... WHERE peer_id = excluded.peer_id` 不命中，
+ *   RETURNING 无行，调用方得到 `taken`，且旧行分毫未动；
+ * - 请求方自己的旧码要续期/换摘要 → 原地更新，不需要「先删后插」。
+ *
+ * 之前的实现靠调用方 `deleteShareCodesForPeer` + 纯 `DO NOTHING` 来支持续期，一旦自定义码
+ * 撞车就变成「旧码已删、新码没建成」，观众拿到 404、发送端重连 unauthorized。
+ */
 export const insertShareCode = (sql: SqlLike, record: ShareCodeRecord, now: number): boolean => {
   const inserted = sql
     .exec<{ code: string }>(
       'INSERT INTO share_codes (code, peer_id, secret_hash, expires_at, created_at) ' +
-        'VALUES (?, ?, ?, ?, ?) ON CONFLICT(code) DO NOTHING RETURNING code',
+        'VALUES (?, ?, ?, ?, ?) ' +
+        'ON CONFLICT(code) DO UPDATE SET ' +
+        'secret_hash = excluded.secret_hash, expires_at = excluded.expires_at, revoke_after = NULL ' +
+        'WHERE share_codes.peer_id = excluded.peer_id ' +
+        'RETURNING code',
       record.code,
       record.peerId,
       record.secretHash,
@@ -619,9 +635,20 @@ export const insertShareCode = (sql: SqlLike, record: ShareCodeRecord, now: numb
   return inserted.length > 0;
 };
 
-/** 同一 peerId 只保留最新一张码，避免反复建码把表堆大。 */
-export const deleteShareCodesByPeerId = (sql: SqlLike, peerId: string): void => {
-  sql.exec('DELETE FROM share_codes WHERE peer_id = ?', peerId);
+/**
+ * 同一 peerId 只保留最新一张码，避免反复建码把表堆大。调用方必须在**新码落库成功之后**
+ * 才调用，并传 `keepCode` 保住刚建成的那张——先删后插会在冲突失败时连旧码一起弄丢。
+ */
+export const deleteShareCodesByPeerId = (
+  sql: SqlLike,
+  peerId: string,
+  keepCode?: string
+): void => {
+  if (keepCode === undefined) {
+    sql.exec('DELETE FROM share_codes WHERE peer_id = ?', peerId);
+    return;
+  }
+  sql.exec('DELETE FROM share_codes WHERE peer_id = ? AND code <> ?', peerId, keepCode);
 };
 
 export const deferShareCodeRevoke = (

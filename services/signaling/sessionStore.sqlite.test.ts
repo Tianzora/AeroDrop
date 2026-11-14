@@ -10,6 +10,7 @@ import {
   applySessionSlotRenew,
   commitSessionBindingRotation,
   deferShareCodeRevoke,
+  deleteShareCodesByPeerId,
   findActiveShareCode,
   findRecentTombstoneByPeerId,
   findSessionBinding,
@@ -217,15 +218,17 @@ test('口令表：RETURNING 语义、延迟注销与墓碑在真实库上成立'
   };
 
   assert.equal(insertShareCode(sql, record, now), true);
-  assert.equal(insertShareCode(sql, record, now), false, '同码重复插入必须返回 false 而不是抛错');
+  // 同一个 peerId 重复登记同一张码 = 续期，必须原地更新而不是撞冲突：
+  // 发送端在 TTL 边界重新登记时不能失败，也不能把行删了重建。
+  const renewed: ShareCodeRecord = { ...record, expiresAt: now + 2 * HOUR };
+  assert.equal(insertShareCode(sql, renewed, now + 1), true);
   assert.equal(countRows(db, 'share_codes'), 1);
-
-  assert.deepEqual(findActiveShareCode(sql, { code: 'ABC123', now, tombstoneMs: 24 * HOUR }), record);
+  assert.deepEqual(findActiveShareCode(sql, { code: 'ABC123', now, tombstoneMs: 24 * HOUR }), renewed);
 
   // 延迟注销：写入 revoke_after 但尚未到点，口令仍可用，且必须在宽限期内能 resume。
   assert.equal(deferShareCodeRevoke(sql, record, now + 60_000), true);
   assert.equal(resumeShareCode(sql, record), true, '宽限期内必须能 resume');
-  assert.deepEqual(findActiveShareCode(sql, { code: 'ABC123', now: now + 1, tombstoneMs: 24 * HOUR }), record);
+  assert.deepEqual(findActiveShareCode(sql, { code: 'ABC123', now: now + 1, tombstoneMs: 24 * HOUR }), renewed);
 
   // 注销：先写墓碑再删活跃行，两块都必须在真实库上生效。
   assert.equal(revokeShareCode(sql, record, now + 500), true);
@@ -235,7 +238,7 @@ test('口令表：RETURNING 语义、延迟注销与墓碑在真实库上成立'
     { secretHash }
   );
 
-  // 自然到期也算一次注销：findActive 清理过期行，并留下墓碑。
+  // 自然到期：读路径只过滤、不写库（见下一条用例），过期行会留到下一次写路径 purge。
   const shortLived: ShareCodeRecord = { ...record, code: 'XYZ789', expiresAt: now + 10 };
   assert.equal(insertShareCode(sql, shortLived, now), true);
   assert.equal(
@@ -243,7 +246,7 @@ test('口令表：RETURNING 语义、延迟注销与墓碑在真实库上成立'
     null,
     '过期的口令不能被当成活跃口令返回'
   );
-  assert.equal(countRows(db, 'share_codes'), 0);
+  assert.equal(countRows(db, 'share_codes'), 1);
   db.close();
 });
 
@@ -403,5 +406,65 @@ test('自愈补写 pending proof 也走 CAS：接管者换了权威 proof 后不
     .get() as { proof_hash: string; recent_hashes: string };
   assert.equal(stored.proof_hash, 'c'.repeat(64));
   assert.equal(stored.recent_hashes.includes('d'.repeat(64)), false);
+  db.close();
+});
+
+test('口令登记：别人的码撞车时旧行分毫未动，且删旧码时保住刚建成的那张', () => {
+  const db = new DatabaseSync(':memory:');
+  const sql = createSqlite(db);
+  initializeShareCodeSchema(sql);
+  const now = 1_000;
+  const ownerRow: ShareCodeRecord = {
+    code: 'ABCDEF',
+    peerId: 'peer-owner',
+    secretHash: 'a'.repeat(64),
+    expiresAt: now + HOUR,
+  };
+  assert.equal(insertShareCode(sql, ownerRow, now), true);
+
+  // 另一个 peerId 抢同一个自定义码：必须 taken，且原行的归属/摘要/到期时间一个字都不许变。
+  // 旧实现（先 deleteShareCodesByPeerId 再 DO NOTHING 插入）会在这里把 owner 的活跃码删掉，
+  // 观众当场 404、发送端重连 unauthorized。
+  const intruder: ShareCodeRecord = {
+    code: 'ABCDEF',
+    peerId: 'peer-intruder',
+    secretHash: 'b'.repeat(64),
+    expiresAt: now + 5 * HOUR,
+  };
+  assert.equal(insertShareCode(sql, intruder, now + 10), false);
+  assert.equal(countRows(db, 'share_codes'), 1);
+  assert.deepEqual(findActiveShareCode(sql, { code: 'ABCDEF', now, tombstoneMs: 24 * HOUR }), ownerRow);
+
+  // 同一 peerId 换一张码成功后，才清掉它的其它旧码，并且必须保住新码。
+  const fresh: ShareCodeRecord = {
+    code: 'GHIJKL',
+    peerId: 'peer-owner',
+    secretHash: 'c'.repeat(64),
+    expiresAt: now + 6 * HOUR,
+  };
+  assert.equal(insertShareCode(sql, fresh, now + 20), true);
+  deleteShareCodesByPeerId(sql, 'peer-owner', fresh.code);
+  assert.equal(findActiveShareCode(sql, { code: 'ABCDEF', now: now + 21, tombstoneMs: 24 * HOUR }), null);
+  assert.deepEqual(findActiveShareCode(sql, { code: 'GHIJKL', now: now + 21, tombstoneMs: 24 * HOUR }), fresh);
+  db.close();
+});
+
+test('读路径不再写库：过期行仍在表里，但 findActiveShareCode 必须过滤掉', () => {
+  const db = new DatabaseSync(':memory:');
+  const sql = createSqlite(db);
+  initializeShareCodeSchema(sql);
+  const now = 1_000;
+  const expired: ShareCodeRecord = {
+    code: 'EXPIRD',
+    peerId: 'peer-expired',
+    secretHash: 'd'.repeat(64),
+    expiresAt: now - 1,
+  };
+  assert.equal(insertShareCode(sql, expired, now - HOUR), true);
+
+  assert.equal(findActiveShareCode(sql, { code: 'EXPIRD', now, tombstoneMs: 24 * HOUR }), null);
+  // 未认证的 GET /api/share-code/:code 会走这条路径。以前它顺手跑 DELETE，等于让匿名请求
+  // 在 shard 0 开写事务；现在读就是读，行要等写路径（登记/撤销）的 purge 才清掉。
+  assert.equal(countRows(db, 'share_codes'), 1);
   db.close();
 });

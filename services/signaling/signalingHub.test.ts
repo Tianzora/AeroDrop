@@ -18,14 +18,21 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import { DatabaseSync } from 'node:sqlite';
 import { createSqlite } from '../../scripts/test-stubs/sqlite-adapter.ts';
+import { SIGNALING_QUOTA_UNAVAILABLE_RETRY_AFTER_SECONDS } from '../../constants/signaling';
 
 import {
+  SIGNALING_OFFER_RATE_LIMIT,
   SIGNALING_SESSION_SLOT_REFRESH_MS,
   SIGNALING_SESSION_SLOT_TTL_MS,
 } from '../../constants/signaling.ts';
 import { MAX_SIGNALING_MESSAGES_PER_WINDOW } from '../signalingRateLimitPolicy.ts';
 import { rendezvousShardIndex } from './shardRouting.ts';
 import { applySessionSlotRelease, applySessionSlotReserve } from './sessionStore.ts';
+import {
+  WS_BASE_PROTOCOL,
+  WS_CREDENTIAL_PROTOCOL_PREFIX,
+  encodeWsCredentials,
+} from './wsCredentialTransport.ts';
 
 type Sent = { data: string };
 
@@ -120,6 +127,10 @@ class FakeResponse {
     if (this.status === 101 && this.bodyText !== null) {
       throw new Error('101 response must not carry a body');
     }
+  }
+
+  static json(body: unknown, init: { status?: number; headers?: Record<string, string> } = {}): FakeResponse {
+    return new FakeResponse(JSON.stringify(body), init);
   }
 
   get ok(): boolean {
@@ -1196,4 +1207,187 @@ test('同 IP 接管投递 registered 失败：席位随回滚释放，不会永�
     'registered',
     '回滚必须释放 transfer 来的席位，否则该 IP 的名额被永久吃掉'
   );
+});
+
+// ---- 凭证传输：Sec-WebSocket-Protocol ----
+//
+// 背景（安全复评 P3）：`code`/`token`/`sessionSecretHash`/`sessionProof` 放进 WSS 的 query
+// 会随请求行进接入日志与边缘日志；日志里的 proof 被抢用会把原持有者锁成 4010（绑定 24h）。
+// 服务端必须同时支持两条路径：协议头优先、query 回落（旧客户端与既有测试都靠回落）。
+
+test('凭证只走 Sec-WebSocket-Protocol：query 不带摘要也能完成绑定并回显非秘密协议', async () => {
+  const { hub } = await createHub();
+  const secretHash = hash('c');
+  const { protocol, baseProtocol } = encodeWsCredentials({ sessionSecretHash: secretHash });
+
+  const accepted = await upgrade(hub, 'peerId=AERO-WSPROTO01', '198.51.100.231', {
+    'Sec-WebSocket-Protocol': `${baseProtocol}, ${protocol}`,
+  });
+  assert.equal(accepted.status, 101);
+  assert.equal(
+    accepted.headers.get('Sec-WebSocket-Protocol'),
+    baseProtocol,
+    '只回显 aerodrop.v1；回显凭证协议等于把它再写进响应头'
+  );
+
+  const server = serverOf(accepted.webSocket);
+  const registered = server.lastMessage() as { type: string; sessionProof?: string };
+  assert.equal(registered.type, 'registered');
+  assert.match(registered.sessionProof ?? '', /^[0-9a-f]{64}$/, '协议头里的摘要必须真的被采纳');
+
+  // 采纳的证据：同 peerId 不带任何凭证的连接会被判冲突（否则说明摘要没进绑定表）。
+  const attacker = serverOf((await upgrade(hub, 'peerId=AERO-WSPROTO01', '198.51.100.232')).webSocket);
+  assert.equal(attacker.lastMessage()?.code, 'session-conflict');
+  assert.equal(closedCode(attacker), 4010);
+});
+
+test('协议头坏掉时回落到 query：坏凭证不能把旧客户端打死', async () => {
+  const { hub } = await createHub();
+  const secretHash = hash('d');
+
+  const accepted = await upgrade(
+    hub,
+    `peerId=AERO-WSPROTO02&sessionSecretHash=${secretHash}`,
+    '198.51.100.233',
+    { 'Sec-WebSocket-Protocol': `${WS_BASE_PROTOCOL}, ${WS_CREDENTIAL_PROTOCOL_PREFIX}!!!not-base64!!!` }
+  );
+  assert.equal(accepted.status, 101);
+  const server = serverOf(accepted.webSocket);
+  const registered = server.lastMessage() as { type: string; sessionProof?: string };
+  assert.equal(registered.type, 'registered');
+  assert.match(registered.sessionProof ?? '', /^[0-9a-f]{64}$/);
+
+  // 回落用的确实是 query 里的摘要：不带凭证的连接仍旧被判冲突。
+  const attacker = serverOf((await upgrade(hub, 'peerId=AERO-WSPROTO02', '198.51.100.234')).webSocket);
+  assert.equal(attacker.lastMessage()?.code, 'session-conflict');
+  assert.equal(closedCode(attacker), 4010);
+});
+
+test('shard 0 名额表不可达：升级回 503 + Retry-After，而不是放行超限注册', async () => {
+  // 旧实现把「名额服务故障」和「名额已满」混成同一个 true：shard 0 抖动期间注册会带着
+  // 一个从未落库的 slotId 跑完，全局 12 会话上限被整台出口 IP 绕过。现在故障是可重试的
+  // 503——客户端已有退避重连逻辑，代价只是一次可重试的失败。
+  const created = await createHub({
+    shardCount: '2',
+    shardName: 'signaling-shard-1',
+    maxSessions: '1',
+    signalingHub: {
+      respond: (call) => {
+        const body = call.body as { action?: string } | null;
+        if (call.url.endsWith('/internal/session-binding')) {
+          return { status: 200, body: { allowed: true } };
+        }
+        if (call.url.endsWith('/internal/session-slot') && body?.action === 'reserve') {
+          return { status: 500, body: { error: 'boom' } };
+        }
+        return { status: 200, body: { granted: false } };
+      },
+    },
+  });
+
+  const response = await upgrade(created.hub, 'peerId=AERO-SLOTFAIL', '203.0.113.61');
+  await created.settle();
+
+  assert.equal(response.status, 503, '名额服务不可达必须在 accept 之前结束升级');
+  assert.equal(response.webSocket, null, '503 不能带 webSocket，否则客户端会以为连上了');
+  assert.equal(
+    response.headers.get('Retry-After'),
+    String(SIGNALING_QUOTA_UNAVAILABLE_RETRY_AFTER_SECONDS)
+  );
+  assert.equal(readSlotRows(created.db).length, 0, '不可达路径不得写入任何名额行');
+  // 结构上 accept 早于名额判定，所以这里断言的是「服务端 socket 被 1013 关掉、没有 registered」，
+  // 而不是「根本没 accept」：客户端拿到的是 503，不会把它当成一条可用的连接。
+  const socket = created.sockets.at(-1);
+  assert.ok(socket, 'socket 已 accept');
+  assert.equal(socket.lastMessage(), null, '名额不可达时不得发出 registered');
+  assert.equal(closedCode(socket), 1013, '僵尸连接必须被 1013 关闭');
+  const events = created.metrics().map((entry) => entry.event);
+  assert.ok(events.includes('signal_session_slot_unavailable'), '必须留一条可告警的指标');
+  assert.ok(!events.includes('signal_session_slot_rejected'), '故障不能被记成「满了」');
+});
+
+test('口令重登记撞车：旧活跃码必须原样保留，只有分配成功后才清理自己的旧码', async () => {
+  const created = await createHub({ shardCount: '1' });
+  const call = (body: Record<string, unknown>): Promise<Response> =>
+    (created.hub as { fetch(request: Request): Promise<Response> }).fetch(
+      new Request('https://signaling.internal/internal/share-codes', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      })
+    );
+
+  const hashA = 'a'.repeat(64);
+  const first = await call({ op: 'create', peerId: 'peer-code-owner', secretHash: hashA, code: '111111' });
+  assert.equal(first.status, 200);
+
+  // 另一个 peerId 抢同一张自定义码：必须 409，且不能把 owner 的码删掉。
+  const taken = await call({
+    op: 'create',
+    peerId: 'peer-code-intruder',
+    secretHash: 'b'.repeat(64),
+    code: '111111',
+  });
+  assert.equal(taken.status, 409);
+
+  const ownerLookup = await call({ op: 'lookup', code: '111111' });
+  assert.equal(ownerLookup.status, 200, '撞车失败不能销毁别人的活跃码');
+  const ownerBody = (await ownerLookup.json()) as { peerId?: string } | null;
+  assert.equal(ownerBody?.peerId, 'peer-code-owner');
+
+  // 同一 peerId 换码成功后才清理旧码：旧码应当失效，新码可用。
+  const second = await call({
+    op: 'create',
+    peerId: 'peer-code-owner',
+    secretHash: hashA,
+    code: '222222',
+  });
+  assert.equal(second.status, 200);
+  assert.equal((await call({ op: 'lookup', code: '111111' })).status, 404);
+  assert.equal((await call({ op: 'lookup', code: '222222' })).status, 200);
+});
+
+test('offer 限流的 error 必须带上 retryAfterMs：客户端据此显示倒计时而不是「立刻可重试」', async () => {
+  const { hub, settle } = await createHub();
+
+  // 独立 IP，避免与其它用例的限流桶互相污染。
+  const sender = serverOf((await upgrade(hub, 'peerId=AERO-OFRLMT01', '192.0.2.201')).webSocket);
+  const target = serverOf((await upgrade(hub, 'peerId=AERO-OFRLMT02', '192.0.2.201')).webSocket);
+  assert.equal(sender.lastMessage()?.type, 'registered');
+
+  const limit = SIGNALING_OFFER_RATE_LIMIT.maxAttemptsPerClientWindow;
+  for (let index = 0; index < limit; index += 1) {
+    await sendFrame(hub, sender, {
+      type: 'offer',
+      targetPeerId: 'AERO-OFRLMT02',
+      connectionId: `conn-${index}`,
+      kind: 'data',
+    });
+  }
+  await settle();
+  assert.equal(
+    sender.sent.filter((frame) => JSON.parse(frame.data).code === 'rate-limited').length,
+    0,
+    '配额之内的 offer 不能被限流'
+  );
+
+  // 超配额的那一条：error 必须带 retryAfterMs，且落在静默期内（> 0、不超过 blockMs）。
+  await sendFrame(hub, sender, {
+    type: 'offer',
+    targetPeerId: 'AERO-OFRLMT02',
+    connectionId: 'conn-over',
+    kind: 'data',
+  });
+  await settle();
+
+  const limited = sender.lastMessage() as { type?: string; code?: string; retryAfterMs?: number } | null;
+  assert.equal(limited?.type, 'error');
+  assert.equal(limited?.code, 'rate-limited');
+  assert.equal(typeof limited?.retryAfterMs, 'number', '限流拒绝必须给出建议等待时长');
+  assert.ok((limited?.retryAfterMs ?? 0) > 0, 'retryAfterMs 必须为正数');
+  assert.ok(
+    (limited?.retryAfterMs ?? Infinity) <= SIGNALING_OFFER_RATE_LIMIT.blockMs,
+    'retryAfterMs 不能超过静默期'
+  );
+  assert.equal(target.sent.filter((frame) => JSON.parse(frame.data).type === 'offer').length, limit);
 });

@@ -2,6 +2,7 @@ import { logDebug } from './diagnostics';
 import { getAeroDropE2EHooks, type AeroDropPeerRuntimeModuleLike } from './e2eHooks';
 import { CONNECTION_TIMINGS } from '../constants/transfer';
 import { shouldResetReconnectBudget } from './connectionPolicy';
+import { encodeWsCredentials } from './signaling/wsCredentialTransport';
 
 type Listener = (...args: any[]) => void;
 
@@ -92,6 +93,8 @@ type ErrorEnvelope = {
   connectionId?: string;
   targetPeerId?: string;
   kind?: ChannelKind;
+  /** 可重试拒绝的建议等待时长（毫秒），透传到 `PeerRuntimeError.retryAfterMs`。 */
+  retryAfterMs?: number;
 };
 type OfferEnvelope = {
   type: 'offer';
@@ -243,23 +246,34 @@ const toWebSocketUrl = (base: string): string => {
   return `${window.location.protocol === 'https:' ? 'wss://' : 'ws://'}${base}`;
 };
 
-// 信令 URL 里的 token / sessionSecretHash / sessionProof 等价于凭证：只允许真正用于建连，日志/指标一律脱敏。
+// URL 里的 token / sessionSecretHash / sessionProof 等价于凭证：只允许真正用于建连，日志/指标一律脱敏。
+// 新客户端已经把这些字段挪进 Sec-WebSocket-Protocol（见 createSignalingConnection），
+// 这里保留脱敏是对「旧版页面仍连着 worker」这类混用状态的兜底。
 const redactSignalingUrl = (url: string): string =>
   url.replace(/([?&](?:token|sessionSecretHash|sessionProof)=)[^&]*/gi, '$1<redacted>');
 
-const createSignalingUrl = (peerId: string, options: PeerOptions = {}): string => {
+/**
+ * 信令连接的 URL 与子协议。
+ *
+ * 凭证（code / token / sessionSecretHash / sessionProof）只走 `Sec-WebSocket-Protocol`：
+ * 放进 query 会随请求行进接入日志、边缘/代理日志和浏览器历史，而 proof 在绑定期内被抢用
+ * 会把原持有者轮换掉、锁成 4010。`peerId` 不是秘密（分片路由与握手预算都要用），仍留在
+ * URL 里；服务端只回显非秘密的 `aerodrop.v1`，客户端带回的凭证协议不会被回显。
+ */
+const createSignalingConnection = (
+  peerId: string,
+  options: PeerOptions = {}
+): { url: string; protocols: string[] } => {
   const baseUrl = new URL(toWebSocketUrl(SIGNALING_BASE));
   const wsUrl = new URL(SIGNALING_PATH, baseUrl);
   wsUrl.searchParams.set('peerId', peerId);
-  if (options.signalingCode) wsUrl.searchParams.set('code', options.signalingCode);
-  if (options.signalingToken) wsUrl.searchParams.set('token', options.signalingToken);
-  if (options.sessionSecretHash) {
-    wsUrl.searchParams.set('sessionSecretHash', options.sessionSecretHash);
-  }
-  if (options.sessionProof) {
-    wsUrl.searchParams.set('sessionProof', options.sessionProof);
-  }
-  return wsUrl.toString();
+  const { protocol, baseProtocol } = encodeWsCredentials({
+    code: options.signalingCode,
+    token: options.signalingToken,
+    sessionSecretHash: options.sessionSecretHash,
+    sessionProof: options.sessionProof,
+  });
+  return { url: wsUrl.toString(), protocols: [baseProtocol, protocol] };
 };
 
 const parseCandidateDetails = (candidate: RTCIceCandidateInit) => {
@@ -738,6 +752,8 @@ export class MediaConnection extends BaseConnection<MediaConnectionEvents> {
 
 export type PeerRuntimeError = Error & {
   type: PeerRuntimeErrorType;
+  /** 服务端在 `rate-limited` 等可重试拒绝上给出的建议等待时长（毫秒）。 */
+  retryAfterMs?: number;
 };
 
 export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
@@ -883,11 +899,11 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     // 终态拒绝只针对「被拒的那一次注册」。自动重连不会走到这里（终态路径直接 return），
     // 所以在这里复位不会重新制造重连循环；反之不复位会让一个实例被拒一次后永久失联。
     this.registrationRejected = false;
-    const url = createSignalingUrl(
+    const { url, protocols } = createSignalingConnection(
       this.id,
       this.sessionProof
         ? // 拿到 proof 之后就不再发静态摘要：服务端此时只认 proof，多带一份长期 bearer
-          // 只会让它在 URL/日志里重复出现。
+          // 只会让它在握手头里重复出现。
           { ...this.options, sessionProof: this.sessionProof, sessionSecretHash: undefined }
         : this.options
     );
@@ -895,8 +911,9 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       url: redactSignalingUrl(url),
       signalingBase: SIGNALING_BASE,
       signalingPath: SIGNALING_PATH,
+      credentialTransport: 'ws-protocol',
     });
-    const websocket = new WebSocket(url);
+    const websocket = new WebSocket(url, protocols);
     this.websocket = websocket;
     // 只处理「当前」socket 的事件：旧 socket 迟到的 close/error/message 不应该再改写
     // 重连状态（例如把刚建立的新连接的退避计数清零，或给新连接打上终态标记）。
@@ -1124,6 +1141,9 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
         (message.code as PeerRuntimeErrorType) ?? 'server-error',
         message.message || String(message.code || 'Signaling error')
       );
+      if (typeof message.retryAfterMs === 'number' && Number.isFinite(message.retryAfterMs)) {
+        error.retryAfterMs = message.retryAfterMs;
+      }
       if (TERMINAL_SIGNALING_ERROR_CODES.has(message.code)) {
         this.registrationRejected = true;
         this.log('warn', 'signaling_registration_rejected', { code: message.code });

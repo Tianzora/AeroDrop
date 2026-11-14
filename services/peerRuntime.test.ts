@@ -2,6 +2,12 @@ import assert from 'node:assert/strict';
 import test from 'node:test';
 
 import { CONNECTION_TIMINGS } from '../constants/transfer.ts';
+import {
+  WS_BASE_PROTOCOL,
+  decodeWsCredentials,
+  parseWsProtocols,
+  pickAcceptedProtocol,
+} from './signaling/wsCredentialTransport.ts';
 
 class FakeDataChannel {
   public static instances: FakeDataChannel[] = [];
@@ -88,7 +94,10 @@ class FakeWebSocket {
   public onerror: (() => void) | null = null;
   public onmessage: ((event: { data: unknown }) => void) | null = null;
 
-  constructor(public readonly url: string) {
+  constructor(
+    public readonly url: string,
+    public readonly protocols: string[] = []
+  ) {
     FakeWebSocket.instances.push(this);
   }
 
@@ -421,7 +430,7 @@ test('收到终态 error（peerId 被顶替）后主动断开信令且不再重�
   }
 });
 
-test('分享会话密钥摘要随信令注册 URL 上行，未提供时不出现该参数', async () => {
+test('凭证走子协议而不是 URL：摘要不出现在 query 里，peerId 仍保留', async () => {
   FakeWebSocket.instances.length = 0;
 
   const { restore } = installFakeTimers();
@@ -430,25 +439,31 @@ test('分享会话密钥摘要随信令注册 URL 上行，未提供时不出现
     const { default: WorkerSignaledPeer } = await import('./peerRuntime.ts');
     const sessionSecretHash = 'a'.repeat(64);
     const boundPeer = new WorkerSignaledPeer({ debug: 0, sessionSecretHash });
-    assert.equal(
-      new URL(FakeWebSocket.instances[0].url).searchParams.get('sessionSecretHash'),
-      sessionSecretHash
+    const first = FakeWebSocket.instances[0];
+
+    // 凭证进 URL 会随请求行进接入日志/代理日志：泄漏的 proof 足以把原持有者挤成 4010。
+    assert.equal(new URL(first.url).searchParams.has('sessionSecretHash'), false);
+    assert.equal(new URL(first.url).searchParams.has('token'), false);
+    assert.ok(new URL(first.url).searchParams.get('peerId'), 'peerId 不是秘密，仍留在 URL');
+    assert.deepEqual(
+      decodeWsCredentials(parseWsProtocols(first.protocols.join(', '))),
+      { sessionSecretHash }
     );
+    assert.equal(pickAcceptedProtocol(first.protocols), WS_BASE_PROTOCOL, '必须带可回显的非秘密协议');
     boundPeer.destroy();
 
-    // 文件传输 / 观众端不传摘要：多带一个空参数会改变服务端的接管判定输入。
+    // 文件传输 / 观众端不传摘要：载荷里不能出现该字段，否则服务端接管判定输入被改写。
     const plainPeer = new WorkerSignaledPeer({ debug: 0 });
-    assert.equal(
-      new URL(FakeWebSocket.instances[1].url).searchParams.has('sessionSecretHash'),
-      false
-    );
+    const second = FakeWebSocket.instances[1];
+    assert.equal(new URL(second.url).searchParams.has('sessionSecretHash'), false);
+    assert.deepEqual(decodeWsCredentials(second.protocols), {});
     plainPeer.destroy();
   } finally {
     restore();
   }
 });
 
-test('服务端下发的 sessionProof 轮换后替换静态摘要，并出现在重连 URL 上', async () => {
+test('服务端下发的 sessionProof 轮换后替换静态摘要，并出现在重连的握手头里', async () => {
   FakeWebSocket.instances.length = 0;
 
   const { scheduledTimeouts, restore } = installFakeTimers();
@@ -473,10 +488,10 @@ test('服务端下发的 sessionProof 轮换后替换静态摘要，并出现在
     reconnectTimers[0].fn();
     assert.equal(FakeWebSocket.instances.length, 2);
 
-    const reconnectUrl = new URL(FakeWebSocket.instances[1].url);
-    assert.equal(reconnectUrl.searchParams.get('sessionProof'), proof);
+    const reconnect = FakeWebSocket.instances[1];
+    assert.equal(new URL(reconnect.url).searchParams.has('sessionProof'), false);
     // 首次注册之后静态 bearer 不再重复出现：服务端只认 proof。
-    assert.equal(reconnectUrl.searchParams.has('sessionSecretHash'), false);
+    assert.deepEqual(decodeWsCredentials(reconnect.protocols), { sessionProof: proof });
 
     peer.destroy();
   } finally {
@@ -812,6 +827,53 @@ test('signalingRecoveryState separates reconnectable states from terminal ones',
 
     peer.destroy();
     assert.equal(peer.signalingRecoveryState(), 'destroyed');
+  } finally {
+    restore();
+  }
+});
+
+test('rate-limited 的 error 信封把 retryAfterMs 透给上层，供倒计时使用', async () => {
+  FakeWebSocket.instances.length = 0;
+
+  const { restore } = installFakeTimers();
+
+  try {
+    const { default: WorkerSignaledPeer } = await import('./peerRuntime.ts');
+    const peer = new WorkerSignaledPeer({ debug: 0 });
+    const caught: { type: string; retryAfterMs?: number }[] = [];
+    peer.on('error', (error) => {
+      caught.push({ type: error.type, retryAfterMs: error.retryAfterMs });
+    });
+
+    const socket = FakeWebSocket.instances[0];
+    socket.readyState = FakeWebSocket.OPEN;
+    socket.onmessage?.({
+      data: JSON.stringify({
+        type: 'error',
+        code: 'rate-limited',
+        message: 'Too many connection requests',
+        connectionId: 'conn-1',
+        retryAfterMs: 42_000,
+      }),
+    });
+
+    assert.deepEqual(caught, [{ type: 'rate-limited', retryAfterMs: 42_000 }]);
+
+    // 没有该字段时不能凭空造一个（客户端据此回退到静默期兜底）。
+    const other = new WorkerSignaledPeer({ debug: 0 });
+    const plain: (number | undefined)[] = [];
+    other.on('error', (error) => {
+      plain.push(error.retryAfterMs);
+    });
+    const otherSocket = FakeWebSocket.instances[1];
+    otherSocket.readyState = FakeWebSocket.OPEN;
+    otherSocket.onmessage?.({
+      data: JSON.stringify({ type: 'error', code: 'server-error', message: 'boom' }),
+    });
+    assert.deepEqual(plain, [undefined]);
+
+    peer.destroy();
+    other.destroy();
   } finally {
     restore();
   }
