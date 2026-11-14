@@ -140,3 +140,13 @@ WS 凭证移出 URL query（`Sec-WebSocket-Protocol`）、读路径不再写库�
 组件覆盖率分母守卫（路径匹配 + 同名遮蔽 + self-test）、真实 `wrangler dev` 的 `e2e-product` job。
 
 状态: 完成 (第三轮复评 must-fix 全部收口；复评待跑, 2026-11-14)
+
+## 阶段 8：第九轮复评后的收口（2026-11-14）
+
+对应 `docs/design-scale-out.md` §8.11。三项复评（安全 86 / 产品 92 / 工程 85）的 must-fix 逐条收口：
+
+- 安全：名额归属从 `clientKey`（出口 IP，同一 NAT 下会撞车）改为每连接唯一的 `release_token`，接管走 `replaces` 让出旧行，并发接管后只留一条活名额。
+- 产品：分享端重建窗口不再被判死链（3s 有限重试 + 语气诚实的终态文案）、重开共享前释放旧采集、观看中信令错误不再落不可关闭红条、429 冷却不可被「关闭」按钮绕过。
+- 工程：组件覆盖率门槛改为只按 scope 内行判定、`sessionCoordinator` 移出白名单并补 18 条单测、信令基址惰性化让组件可在 Node import、E2E 失败留 trace/screenshot 并在 CI 上传、CI 下采集探测失败必须红、删掉 product-transfer 里 inert 的 TURN 注入。
+
+状态: 完成 (第九轮复评 must-fix 全部收口；门禁全绿，待推送与复评, 2026-11-14)
