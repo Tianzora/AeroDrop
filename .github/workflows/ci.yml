@@ -35,26 +35,23 @@ jobs:
       - name: Unit tests
         run: npm run test:all
 
-      # 覆盖率门槛用 node:test 内置能力，不引入依赖；阈值在 scripts/node-test-args.mjs。
-      # 这一步跑 scripts/check-coverage-scope.mjs：它先跑一次普通覆盖率报告，再用 git 清单
-      # 要求 services/ 与 src/ 下每个生产源文件都出现在报告里（可以 0%，但不能消失）。
-      # Node 的覆盖率报告只列「被加载过」的文件，所以必须有这层 git 对比守卫来补分母；
-      # 刻意不使用 `--test-coverage-include`（Node 22.12 上会让测试进程一行报告都不产出）。
-      # 无法在 Node 宿主里加载的少数文件登记在脚本的 ALLOWED_UNCOVERED 里，并写明理由。
-      - name: Unit test coverage gate
-        run: node ./scripts/check-coverage-scope.mjs
+      # 覆盖率门槛用 node:test 内置能力，不引入依赖；阈值与白名单都在 scripts/check-coverage-scope.mjs。
+      # 这一步做三件事：跑一遍 services/src 的覆盖率报告、用 git 清单要求每个生产源文件都出现在
+      # 报告里（可以 0%，但不能消失）、拒绝「进了分母但 line 覆盖率 0%」的文件。
+      # 刻意不使用 `--test-coverage-include`：它在 Node 22.12 上会让测试进程一行报告都不产出。
+      # 无法在 Node 宿主里加载的少数文件登记在该脚本的 allowlist 里，并写明理由。
+      - name: Unit test coverage gate (services + src)
+        run: node ./scripts/check-coverage-scope.mjs --scope=services
 
-      # 组件覆盖率单独卡一套更低的阈值（计入未被测试加载的组件后：61.7 行 / 64.6 分支 / 43.6 函数）：
-      # 组件测试大量走 DOM 桩，函数覆盖率天然偏低，用 services 的阈值会逼出无意义断言。
-      # 这里同样走普通报告（不传 include，避免 Node 22.12 的过滤器问题）；分母完整性由上面
-      # services 那道 git 对比门禁负责。
+      # 组件覆盖率单独一套更低的阈值（实测 all files 66.67 行 / 65.38 分支 / 42.86 函数，
+      # 其中包含组件测试顺带加载的 constants/services/types 文件）：组件测试大量走 DOM 桩，
+      # 函数覆盖率天然偏低，用 services 的阈值会逼出无意义断言。
+      # 分母同样由 git 清单对比保证：components/ 下 12 个生产文件里 Receiver / ScreenShare /
+      # Sender 三个登记为白名单（模块顶层读写 window/document，Node 里 import 即抛
+      # ReferenceError），ErrorBoundary 与 PWAInstallPrompt 由
+      # scripts/component-import-smoke.test.ts 拉进分母。
       - name: Component coverage gate
-        env:
-          NODE_TEST_COVERAGE: '1'
-          NODE_TEST_COVERAGE_MIN_LINES: '60'
-          NODE_TEST_COVERAGE_MIN_BRANCHES: '58'
-          NODE_TEST_COVERAGE_MIN_FUNCTIONS: '40'
-        run: node ./scripts/run-node-tests.mjs components
+        run: node ./scripts/check-coverage-scope.mjs --scope=components
 
       - name: Build
         run: npm run build

@@ -173,8 +173,12 @@ type Entry = {
   hubFetchCount: () => number;
 };
 
-/** 建一个入口：真 env（ASSETS stub）+ 真 SignalingHub 实例当 SIGNALING_HUB 命名空间。 */
-const createEntry = async (): Promise<Entry> => {
+/**
+ * 建一个入口：真 env（ASSETS stub）+ 真 SignalingHub 实例当 SIGNALING_HUB 命名空间。
+ * `envOverrides` 用来给单个用例补配置（TURN 凭证等）：入口行为由 env 决定，
+ * 不补这一层就只能测「没配置」那一条分支。
+ */
+const createEntry = async (envOverrides: Record<string, unknown> = {}): Promise<Entry> => {
   restores.push(installWorkerGlobals());
 
   // 遥测走 console.log（未知码 miss 每个都记一行），测试里静音。
@@ -200,6 +204,8 @@ const createEntry = async (): Promise<Entry> => {
       },
     },
   } as EntryEnv;
+
+  Object.assign(env, envOverrides);
 
   const ctx = {
     storage: { sql: createSqlite(db) },
@@ -459,4 +465,181 @@ test('/api/share-code：GET 超过 30 次/10s 的固定窗口后返回 429 + Ret
   assert.ok(Number(limited.headers.get('Retry-After')) >= 1, 'Retry-After 必须是正整数秒');
   // 429 在入口层就返回，没有继续打 DO（DO 的未知码预算是另一层 200/10s）。
   assert.equal(entry.hubFetchCount(), 30);
+});
+test('/api/ice-config：没配 TURN 时回退 STUN-only，并套上 no-store 缓存策略', async () => {
+  const entry = await createEntry();
+  const response = await entry.call(
+    request('/api/ice-config', { headers: { [CF_IP_HEADER]: '203.0.113.60' } })
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  assert.equal(response.headers.get('Vary'), 'Origin, Referer');
+
+  const payload = (await response.json()) as {
+    iceServers: { urls: string | string[] }[];
+    secure: boolean;
+    iceCandidatePoolSize: number;
+    hasTurn: boolean;
+  };
+  assert.equal(payload.secure, true);
+  assert.equal(payload.iceCandidatePoolSize, 20);
+  // 只配了 STUN 时 hasTurn 必须为 false，否则前端会以为有中继兜底。
+  assert.equal(payload.hasTurn, false);
+  const urls = payload.iceServers.flatMap((server) =>
+    Array.isArray(server.urls) ? server.urls : [server.urls]
+  );
+  assert.ok(urls.includes('stun:stun.l.google.com:19302'));
+  assert.ok(urls.includes('stun:stun.cloudflare.com:3478'));
+  assert.equal(urls.some((url) => /^turns?:/i.test(url)), false);
+  // 全局额度记在 DO 里（每 colo 一张表），所以这里必须是一次 DO 调用。
+  assert.ok(entry.hubFetchCount() >= 1, '冰服务器额度应该走 Durable Object');
+});
+
+test('/api/ice-config：跨站 Origin 直接 403，既不签凭证也不打 DO', async () => {
+  const entry = await createEntry();
+  const response = await entry.call(
+    request('/api/ice-config', {
+      origin: 'https://evil.example',
+      headers: { [CF_IP_HEADER]: '203.0.113.61' },
+    })
+  );
+
+  assert.equal(response.status, 403);
+  assert.deepEqual(await response.json(), { error: 'Forbidden' });
+  assert.equal(response.headers.get('Cache-Control'), 'no-store');
+  assert.equal(entry.hubFetchCount(), 0);
+});
+
+test('/api/ice-config：配了 TURN 时签发短期凭证（username=ttl+realm，credential=HMAC base64）', async () => {
+  const entry = await createEntry({
+    TURN_URLS: 'turns:turn.example.com:5349',
+    TURN_SHARED_SECRET: 'self-hosted-turn-test-secret',
+    TURN_REALM: 'aerodrop.test',
+    TURN_TTL_SECONDS: '600',
+  });
+  const response = await entry.call(
+    request('/api/ice-config', { headers: { [CF_IP_HEADER]: '203.0.113.62' } })
+  );
+  assert.equal(response.status, 200);
+
+  const payload = (await response.json()) as {
+    iceServers: { urls: string | string[]; username?: string; credential?: string }[];
+    hasTurn: boolean;
+  };
+  assert.equal(payload.hasTurn, true);
+
+  const turnServer = payload.iceServers.find((server) =>
+    (Array.isArray(server.urls) ? server.urls : [server.urls]).some((url) => /^turns:/i.test(url))
+  );
+  assert.ok(turnServer, '期望出现 turns: 服务器');
+  assert.ok(turnServer.username, 'TURN 服务器必须带 username');
+  assert.ok(turnServer.credential, 'TURN 服务器必须带 credential');
+  assert.match(turnServer.username, /^\d+:aerodrop\.test$/);
+  // base64(HMAC-SHA1) 固定 20 字节 → 28 个字符；顺带证明凭证不是随便一串。
+  assert.match(turnServer.credential, /^[A-Za-z0-9+/]{27}=$/);
+
+  // username 前缀是「当前秒 + TTL」，不是绝对值：前端拿到的必须是还能用 600 秒的凭证。
+  const expiresAt = Number(turnServer.username.split(':')[0]);
+  const ttl = expiresAt - Math.floor(Date.now() / 1000);
+  assert.ok(ttl > 500 && ttl <= 600, `凭证 TTL 应在 600 秒附近，实际 ${ttl}`);
+});
+
+test('/api/network-check：返回风险评估形状，且不缓存', async () => {
+  const entry = await createEntry();
+  const response = await entry.call(
+    request('/api/network-check', { headers: { [CF_IP_HEADER]: '203.0.113.63' } })
+  );
+
+  assert.equal(response.status, 200);
+  assert.equal(
+    response.headers.get('Cache-Control'),
+    'no-store, no-cache, must-revalidate, proxy-revalidate'
+  );
+
+  const payload = (await response.json()) as Record<string, unknown>;
+  assert.deepEqual(Object.keys(payload).sort(), ['country', 'details', 'isRisk', 'isp', 'reason']);
+  assert.equal(typeof payload.isRisk, 'boolean');
+  assert.equal(typeof payload.isp, 'string');
+  assert.equal(typeof payload.country, 'string');
+});
+
+test('/api/share-code：撤销带 grace 后可 resume 取消注销，错摘要仍 403', async () => {
+  const entry = await createEntry();
+  const headers = { [CF_IP_HEADER]: '203.0.113.70', 'Content-Type': 'application/json' };
+  const credential = { peerId: 'ENTRYSHARE02', secretHash: 'c'.repeat(64) };
+
+  const created = await entry.call(
+    request('/api/share-code', { method: 'POST', headers, body: JSON.stringify(credential) })
+  );
+  assert.equal(created.status, 200);
+  const { code } = (await created.json()) as { code: string };
+
+  // grace 撤销不是立刻删除：返回可撤销窗口，前端在这段时间里还能「续传」。
+  const deferred = await entry.call(
+    request(`/api/share-code/${code}/revoke`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...credential, graceMs: 60_000 }),
+    })
+  );
+  assert.equal(deferred.status, 200);
+  const deferredBody = (await deferred.json()) as {
+    revoked: boolean;
+    deferredUntil: number;
+    code: string;
+  };
+  assert.equal(deferredBody.revoked, false);
+  assert.equal(deferredBody.code, code);
+  assert.ok(deferredBody.deferredUntil > Date.now(), 'deferredUntil 必须是未来的时间点');
+
+  const wrongSecret = await entry.call(
+    request(`/api/share-code/${code}/resume`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ ...credential, secretHash: 'd'.repeat(64) }),
+    })
+  );
+  assert.equal(wrongSecret.status, 403);
+  assert.deepEqual(await wrongSecret.json(), SHARE_CODE_FORBIDDEN_BODY);
+
+  const resumed = await entry.call(
+    request(`/api/share-code/${code}/resume`, {
+      method: 'POST',
+      headers,
+      body: JSON.stringify(credential),
+    })
+  );
+  assert.equal(resumed.status, 200);
+  assert.deepEqual(await resumed.json(), { resumed: true, code });
+
+  // 恢复后码重新可查：resume 真的把「待注销」退回 active，而不是只回一个 200。
+  const lookup = await entry.call(
+    request(`/api/share-code?code=${code}`, { headers: { [CF_IP_HEADER]: '203.0.113.71' } })
+  );
+  assert.equal(lookup.status, 200);
+});
+
+test('/api/share-code：超过 4 KiB 的 body 413、非法 JSON 400（都在入口挡住，不入 DO）', async () => {
+  const entry = await createEntry();
+  const headers = { [CF_IP_HEADER]: '203.0.113.80', 'Content-Type': 'application/json' };
+
+  // 没有 Content-Length 的分块上传也走流式限长（undici 的 Request 不自动带该头）。
+  const tooLarge = await entry.call(
+    request('/api/share-code', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({ peerId: 'ENTRYSHARE03', secretHash: 'e'.repeat(64), padding: 'x'.repeat(5000) }),
+    })
+  );
+  assert.equal(tooLarge.status, 413);
+  assert.deepEqual(await tooLarge.json(), { error: 'Body too large' });
+
+  const invalid = await entry.call(
+    request('/api/share-code', { method: 'POST', headers, body: 'not json' })
+  );
+  assert.equal(invalid.status, 400);
+  assert.deepEqual(await invalid.json(), { error: 'Invalid JSON body' });
+
+  assert.equal(entry.hubFetchCount(), 0, 'body 不合法的请求不应该打到 Durable Object');
 });

@@ -53,8 +53,9 @@ export const buildNodeTestArgs = (files, { coverageFiltersAvailable = coverageFi
   '--experimental-sqlite',
   // CI 用 NODE_TEST_COVERAGE=1 打开覆盖率并卡阈值；本地默认关闭，保持测试快。
   // 默认覆盖率只统计「被加载过」的文件：新增一个没人 import 的模块不进分母，门槛
-  // 会永久绿灯。NODE_TEST_COVERAGE_INCLUDE 让 CI 指定整个目录，未被任何测试加载
-  // 的文件按 0 计入（Node 22.12 是否支持该旗标未验证，所以先探测再传）。
+  // 会永久绿灯。`--test-coverage-include` 只是**报告过滤器**，不会把未加载的文件补进
+  // 分母（它在 Node 22.12 上还会让测试进程一行报告都不产出），所以 CI 刻意不传它；
+  // 分母的完整性由 scripts/check-coverage-scope.mjs 的 git 清单对比负责。
   ...(process.env.NODE_TEST_COVERAGE === '1'
     ? [
         '--experimental-test-coverage',
