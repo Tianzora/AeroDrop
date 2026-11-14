@@ -26,8 +26,12 @@
 import { execFileSync, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import path from 'node:path';
+import { existsSync } from 'node:fs';
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+
+// 报告是逐行解析的：拼换行统一用它，免得源码里出现转义字符。
+const NEWLINE = String.fromCharCode(10);
 
 const readArg = (name, fallback) => {
   const hit = process.argv.find((arg) => arg.startsWith(`--${name}=`));
@@ -38,7 +42,9 @@ const stripAnsi = (text) => text.replace(/\x1b\[[0-9;]*m/g, '');
 
 // 行首标记不写死：本地 Node 24 是 `ℹ`，CI 上的 Node 22 观察到 `#`，日志前缀偶尔还会
 // 把它替换掉。先剥 ANSI，再接受「可选标记 + 文件名 + 竖线」。
-const REPORT_ROW = /^\s*(?:[ℹ#]\s*)?([^\s|]+\.tsx?)\s+\|/;
+const REPORT_ROW = /^\s*[ℹ#]?\s?([^|]*)\|/;
+const FILE_NAME = /\.tsx?$/;
+const DASHES_ONLY = /^-+$/;
 
 const listTrackedSources = (dirs) => {
   const listed = execFileSync('git', ['ls-files', ...dirs], { cwd: root, encoding: 'utf8' })
@@ -58,27 +64,33 @@ const listTrackedSources = (dirs) => {
 const SCOPES = {
   services: {
     title: 'services/ + src/',
+    // 分母 = 这两个目录下的全部生产源文件；components/ 由另一个 scope 负责。
+    roots: ['services', 'src'],
     listFiles: () => listTrackedSources(['services', 'src']),
+    // 分母 = services/ + src/ 全部源码。服务测试会顺带加载 constants/ 与 types/，
+    // 不排除的话 all files 汇总行是混合口径，范围外文件掉点也能把判定拉过去。
+    coverageExclude: ['components/**', 'constants/**', 'types/**', 'e2e/**', 'scripts/**'],
     suiteTargets: ['services'],
     defaults: { minLines: '85', minBranches: '78', minFunctions: '75' },
     allowedUncovered: new Map([
       [
         'services/crc32.worker.ts',
-        'Web Worker 入口：模块加载即读 self.onmessage，Node 宿主里无法加载；算法本体已由 crc32.test.ts 覆盖',
+        'module worker 入口：模块顶层读取 `self` 并挂 `self.onmessage`，Node 全局没有 `self`，import 即抛 ReferenceError；CRC32 算法本体在 services/hashUtils.ts，已有单测',
       ],
       [
         'services/receive/persistedDirectoryHandle.ts',
-        '依赖 File System Access API（showDirectoryPicker 等），Node 无对应实现；纯判定已抽到可测模块',
-      ],
-      [
-        'services/receive/sessionCoordinator.ts',
-        '会话级集成编排，需要真实 IndexedDB/OPFS 与页面生命周期；等浏览器 harness 落地后再收',
+        '真实路径需要浏览器：Node 没有 IndexedDB（IDBFactory），存进库里的又是 FileSystemDirectoryHandle，测试里造不出可结构化克隆的句柄；假 IDB 只能验证调用序列，验证不了句柄往返',
       ],
     ]),
   },
   components: {
     title: 'components/',
+    roots: ['components'],
     listFiles: () => listTrackedSources(['components']),
+    // 组件套件会顺带加载 services/、constants/、types/ 的文件（它们属于 services scope
+    // 的分母）。不排除的话 node:test 的「all files」汇总行是混合口径：组件实际掉到
+    // 51.8% 也能过 60% 的门槛。这条 exclude 让门槛只落在 components/ 上。
+    coverageExclude: ['services/**', 'constants/**', 'types/**', 'src/**'],
     // 组件套件之外再显式加载 scripts/component-import-smoke.test.ts：ErrorBoundary 和
     // PWAInstallPrompt 在 Node 里本来就能加载（实测 import 成功），却没有任何组件测试
     // import 它们。没有这条冒烟，它们永远进不了分母，守卫就又变成一句空话。
@@ -91,11 +103,11 @@ const SCOPES = {
       ],
       [
         'components/ScreenShare.tsx',
-        '模块顶层 import 的 services/peerRuntime.ts 在模块顶层直接读 window.location.origin（SIGNALING_BASE 初始化），Node 里 import 即抛 ReferenceError: window is not defined；屏幕共享流程由 test:e2e:product-transfer 的 screenshare 用例覆盖',
+        '没有任何组件测试 import 它：整棵树依赖真实屏幕采集（getDisplayMedia）、RTCPeerConnection 与信令，Node 里 import 得进来但渲染不出有意义的状态（只会是 0% 行覆盖率）；共享/恢复/满员流程由 test:e2e:product-transfer 的 9 条 screenshare 用例覆盖',
       ],
       [
         'components/Sender.tsx',
-        '同样在 import 阶段命中 services/peerRuntime.ts 模块顶层读取的 window.location.origin（ReferenceError: window is not defined）；传输路由/重试已抽到 services/send/ 并有单测，UI 由 e2e 覆盖',
+        '没有任何组件测试 import 它：渲染需要真实 RTCPeerConnection、文件选择与 DataChannel，Node 里 import 得进来但跑不出状态机；传输路由/重试/分片已经抽到 services/send/（有单测），组件层由 test:e2e 的 sender-sharing 用例覆盖',
       ],
     ]),
   },
@@ -106,19 +118,104 @@ const SCOPES = {
 // ---------------------------------------------------------------------------
 
 /** 解析人类可读覆盖率报告，只保留「报告里的路径 + line%」；表头/分隔线/目录行不计入。 */
+const parsePercent = (cell) => {
+  const value = Number.parseFloat((cell ?? '').trim());
+  return Number.isFinite(value) ? value : null;
+};
+
+/**
+ * 覆盖率报告是分组打印的：目录行没有扩展名（`services`、`receive` 这种多级目录靠缩进
+ * 表示层级），文件行印的是裸文件名、缩进比所属目录多一层。所以裸名必须用目录栈还原成
+ * 相对路径，否则 `constants/signaling.ts` 会被当成 `services/signaling.ts`。
+ */
 const parseReport = (output) => {
   const rows = [];
+  const dirs = [];
   for (const line of stripAnsi(output).split('\n')) {
     const match = line.match(REPORT_ROW);
     if (!match) continue;
     const cells = line.split('|');
-    const percent = Number.parseFloat((cells[1] ?? '').trim());
+    // 只吃掉「标记 + 一个空格」，其余前导空格就是层级。
+    const body = line.replace(/^\s*[\u2139#]?\s?/, '');
+    const indent = body.length - body.trimStart().length;
+    const name = match[1].trim();
+    if (!name || DASHES_ONLY.test(name)) continue;
+    if (!FILE_NAME.test(name)) {
+      // 表头 `file`、目录行都走到这里：只有形如标识符的名字才是目录。
+      if (/^[\w.-]+$/.test(name) && name !== 'file') {
+        dirs.length = indent + 1;
+        dirs[indent] = name;
+      }
+      continue;
+    }
+    const prefix = dirs.slice(0, indent).filter(Boolean).join('/');
     rows.push({
-      name: match[1].trim(),
-      linePercent: Number.isFinite(percent) ? percent : null,
+      name: prefix ? `${prefix}/${name}` : name,
+      linePercent: parsePercent(cells[1]),
+      branchPercent: parsePercent(cells[2]),
+      functionsPercent: parsePercent(cells[3]),
     });
   }
   return rows;
+};
+
+/**
+ * 取报告末尾的 `all files` 汇总行。门槛必须落在这一行上：它由 node:test 按真实的
+ * 行/分支/函数计数加权算出，而我们手上只有每行百分比，自己求平均是假口径。
+ * 配合 scope.coverageExclude，这条汇总行就恰好只统计本 scope 的文件。
+ */
+const AGGREGATE_ROW = /^\s*(?:[\u2139#]\s*)?all files\s+\|/;
+
+const parseAggregate = (output) => {
+  for (const line of stripAnsi(output).split('\n')) {
+    if (!AGGREGATE_ROW.test(line)) continue;
+    const cells = line.split('|');
+    return {
+      linePercent: parsePercent(cells[1]),
+      branchPercent: parsePercent(cells[2]),
+      functionsPercent: parsePercent(cells[3]),
+    };
+  }
+  return null;
+};
+
+const formatAggregate = (aggregate) => {
+  if (!aggregate) return '（报告里没有 all files 汇总行）';
+  const show = (value) => (value === null ? 'n/a' : `${value.toFixed(2)}%`);
+  return `行 ${show(aggregate.linePercent)} / 分支 ${show(aggregate.branchPercent)} / 函数 ${show(aggregate.functionsPercent)}`;
+};
+
+/**
+ * 门槛判定：只看 scope 汇总行，且必须显式给出三个数字。缺失汇总行按失败处理——
+ * 上游输出格式一变就红，而不是安静地跳过门槛。
+ */
+const THRESHOLD_CHECKS = [
+  ['行覆盖率', 'linePercent', 'minLines'],
+  ['分支覆盖率', 'branchPercent', 'minBranches'],
+  ['函数覆盖率', 'functionsPercent', 'minFunctions'],
+];
+
+const evaluateThresholds = ({ aggregate, thresholds }) => {
+  if (!aggregate) {
+    return ['覆盖率报告里没有 all files 汇总行，无法判定门槛（解析规则可能已失效）'];
+  }
+  const failures = [];
+  for (const [label, valueKey, minimumKey] of THRESHOLD_CHECKS) {
+    const value = aggregate[valueKey];
+    const minimum = thresholds[minimumKey];
+    if (value === null) {
+      failures.push(`${label}无法从报告里解析出来`);
+      continue;
+    }
+    if (!Number.isFinite(minimum)) {
+      failures.push(`门槛 ${minimumKey} 不是合法数字（收到 ${minimum}）`);
+      continue;
+    }
+    if (value < minimum) {
+      failures.push(`${label} ${value.toFixed(2)}% 低于门槛 ${minimum}%`);
+    }
+  }
+  return failures;
 };
 
 /**
@@ -132,12 +229,21 @@ const parseReport = (output) => {
 const resolveRowFiles = (name, expected) =>
   expected.filter((file) => file === name || file.endsWith(`/${name}`));
 
-const inspect = ({ expected, rows, allowedUncovered }) => {
+const inspect = ({ expected, rows, allowedUncovered, untrackedFiles = new Set() }) => {
   const resolved = rows.map((row) => ({ row, files: resolveRowFiles(row.name, expected) }));
   const ambiguous = resolved.filter((entry) => entry.files.length > 1);
   const matched = new Set(
     resolved.flatMap((entry) => (entry.files.length === 1 ? entry.files : []))
   );
+  // 报告里的行解析不到本 scope 的任何文件 = 范围外文件混进了分母（coverageExclude
+  // 漏了某个目录，或者新加了一个会被顺带加载的源码目录）。以前这种行是被静默忽略的。
+  const unresolved = resolved
+    .filter((entry) => entry.files.length === 0)
+    .map((entry) => entry.row.name);
+  // 工作树里还没 `git add` 的新源码（别人正在改的文件）会出现在本地报告里，却不在 git
+  // 清单里。CI 上不存在这种行，本地不该因此判红，只提示一句。
+  const untracked = unresolved.filter((name) => untrackedFiles.has(name));
+  const unmatched = unresolved.filter((name) => !untrackedFiles.has(name));
   const missingAll = expected.filter((file) => !matched.has(file));
   const allowedMissing = missingAll.filter((file) => allowedUncovered.has(file));
   const missing = missingAll.filter((file) => !allowedUncovered.has(file));
@@ -154,6 +260,8 @@ const inspect = ({ expected, rows, allowedUncovered }) => {
     allowedMissing,
     missing,
     ambiguous,
+    unmatched,
+    untracked,
     zeroLine,
   };
 };
@@ -175,6 +283,15 @@ const describeFailures = (state) => {
           .map((entry) => `  - ${entry.row.name} → ${entry.files.join(' / ')}`)
           .join('\n') +
         '\n给同名文件改名，或改成完整相对路径后再放行。'
+    );
+  }
+  if (state.unmatched.length > 0) {
+    failures.push(
+      '报告里出现了不属于本 scope 的文件行（分母被范围外文件污染，门槛会被它们拉偏）：' +
+        NEWLINE +
+        state.unmatched.map((name) => `  - ${name}`).join(NEWLINE) +
+        NEWLINE +
+        '把它们加进该 scope 的 coverageExclude，或确认它们本来就该由另一个 scope 统计。'
     );
   }
   if (state.zeroLine.length > 0) {
@@ -279,11 +396,85 @@ const SELF_TEST_CASES = [
     wantFailure: null,
   },
   {
+    name: '分组缩进的裸文件名按目录栈还原（services 组印成 send/X.ts）',
+    report:
+      '\u2139 services                     |        |          |         |' +
+      NEWLINE +
+      '\u2139  send                        |        |          |         |' +
+      NEWLINE +
+      '\u2139   sendFileSequence.ts        |  90.00 |   70.00 |   50.00 |' +
+      NEWLINE +
+      '\u2139 all files                    |  90.00 |   70.00 |   50.00 |',
+    expected: ['services/send/sendFileSequence.ts'],
+    allowedUncovered: new Map(),
+    wantFailure: null,
+    wantRowCount: 1,
+  },
+  {
+    name: '工作树里未跟踪的新文件只提示、不判红',
+    report:
+      '\u2139 services                                   |        |          |         |' +
+      NEWLINE +
+      '\u2139  screenShare                              |        |          |         |' +
+      NEWLINE +
+      '\u2139   shareStreamLifecycle.ts                 |   0.00 |    0.00 |    0.00 | 1-40' +
+      NEWLINE +
+      '\u2139 all files                                 |   0.00 |    0.00 |    0.00 |',
+    expected: [],
+    allowedUncovered: new Map(),
+    untrackedFiles: new Set(['services/screenShare/shareStreamLifecycle.ts']),
+    wantFailure: null,
+    wantUntracked: ['services/screenShare/shareStreamLifecycle.ts'],
+  },
+  {
     name: '报告行给后缀路径（components 组印成 receiver/X.tsx）能对上',
     report: 'ℹ receiver/ReceiverUI.tsx | 60.00 | 50.00 | 58.00 |',
     expected: ['components/receiver/ReceiverUI.tsx'],
     allowedUncovered: new Map(),
     wantFailure: null,
+  },
+  {
+    name: 'scope 内掉点会红（门槛只看 all files 汇总行）',
+    report:
+      '\u2139 Foo.tsx | 40.00 | 58.00 | 40.00 |' + NEWLINE + '\u2139 all files | 51.80 | 58.00 | 40.00 |',
+    expected: ['components/Foo.tsx'],
+    allowedUncovered: new Map(),
+    wantFailure: null,
+    // 组件目录之外被顺带加载的文件已经被 coverageExclude 挡在这次报告之外，所以这里
+    // 的汇总行就是组件自己的口径：51.8% 必须红。
+    thresholds: { minLines: 60, minBranches: 58, minFunctions: 40 },
+    wantThresholdFailure: '行覆盖率 51.80% 低于门槛 60%',
+  },
+  {
+    name: 'exclude 生效的报告：scope 数字达标即通过',
+    report:
+      '\u2139 Foo.tsx | 90.00 | 70.00 | 50.00 |' + NEWLINE + '\u2139 all files | 62.00 | 60.00 | 45.00 |',
+    expected: ['components/Foo.tsx'],
+    allowedUncovered: new Map(),
+    wantFailure: null,
+    thresholds: { minLines: 60, minBranches: 58, minFunctions: 40 },
+    wantThresholdFailure: null,
+  },
+  {
+    name: '报告缺少 all files 汇总行按解析失效处理',
+    report: '\u2139 Foo.tsx | 100.00 | 100.00 | 100.00 |',
+    expected: ['components/Foo.tsx'],
+    allowedUncovered: new Map(),
+    wantFailure: null,
+    thresholds: { minLines: 60, minBranches: 58, minFunctions: 40 },
+    wantThresholdFailure: 'all files 汇总行',
+  },
+  {
+    name: '范围外文件混进报告（exclude 失效）必须失败',
+    report:
+      '\u2139 Foo.tsx | 100.00 | 100.00 | 100.00 |' +
+      NEWLINE +
+      '\u2139 constants/transfer.ts | 10.00 | 10.00 | 10.00 |' +
+      NEWLINE +
+      '\u2139 all files | 55.00 | 55.00 | 55.00 |',
+    expected: ['components/Foo.tsx'],
+    allowedUncovered: new Map(),
+    wantFailure: '不属于本 scope',
   },
   {
     name: '同名文件遮蔽（两个目录同名、报告只给裸名）必须失败',
@@ -300,7 +491,12 @@ const runSelfTest = () => {
   const failures = [];
   for (const testCase of SELF_TEST_CASES) {
     const rows = parseReport(testCase.report);
-    const state = inspect({ expected: testCase.expected, rows, allowedUncovered: testCase.allowedUncovered });
+    const state = inspect({
+      expected: testCase.expected,
+      rows,
+      allowedUncovered: testCase.allowedUncovered,
+      untrackedFiles: testCase.untrackedFiles ?? new Set(),
+    });
     const problems = describeFailures(state);
 
     if (testCase.wantRowCount !== undefined && state.rowCount !== testCase.wantRowCount) {
@@ -317,9 +513,63 @@ const runSelfTest = () => {
         `[${testCase.name}] 期望失败信息包含「${testCase.wantFailure}」，实际：\n${problems.join('\n') || '（无失败）'}`
       );
     }
+    for (const pending of testCase.wantUntracked ?? []) {
+      if (!state.untracked.includes(pending)) {
+        failures.push(`[${testCase.name}] 期望 ${pending} 被记为未跟踪提示，实际没有`);
+      }
+    }
     for (const allowed of testCase.wantAllowedMissing ?? []) {
       if (!state.allowedMissing.includes(allowed)) {
         failures.push(`[${testCase.name}] 期望 ${allowed} 被记为已知例外，实际没有`);
+      }
+    }
+    if (testCase.thresholds) {
+      const problems = evaluateThresholds({
+        aggregate: parseAggregate(testCase.report),
+        thresholds: testCase.thresholds,
+      });
+      if (testCase.wantThresholdFailure === null) {
+        if (problems.length > 0) {
+          failures.push(`[${testCase.name}] 期望门槛通过，实际失败：${problems.join('；')}`);
+        }
+      } else if (!problems.some((problem) => problem.includes(testCase.wantThresholdFailure))) {
+        failures.push(
+          `[${testCase.name}] 期望门槛失败信息包含「${testCase.wantThresholdFailure}」，实际：${problems.join('；') || '（无失败）'}`
+        );
+      }
+    }
+  }
+
+  // 白名单和排除项的卫生检查：条目过期、理由失真、把本 scope 自己排掉，都会让守卫
+  // 变成一句空话。这些检查是数据驱动的（直接读 git 清单），不是内联 fixture。
+  const allTracked = listTrackedSources(['.']);
+  for (const [scopeName, scope] of Object.entries(SCOPES)) {
+    for (const [file, reason] of scope.allowedUncovered) {
+      if (!allTracked.includes(file)) {
+        failures.push(`[${scopeName}] 白名单条目 ${file} 不在 git 清单里（条目已过期或路径写错）`);
+      }
+      if (typeof reason !== 'string' || reason.trim().length < 20) {
+        failures.push(`[${scopeName}] 白名单条目 ${file} 的理由太短，写清楚真实约束`);
+      }
+      for (const referenced of reason.match(/[\w./-]+\.test\.tsx?/g) ?? []) {
+        if (!allTracked.includes(referenced)) {
+          failures.push(
+            `[${scopeName}] 白名单条目 ${file} 的理由引用了不存在的测试文件 ${referenced}`
+          );
+        }
+      }
+    }
+    for (const pattern of scope.coverageExclude) {
+      const prefix = pattern.replace(/\/\*\*$/, '/');
+      const hits = allTracked.filter((file) => file === pattern || file.startsWith(prefix));
+      if (hits.length === 0) {
+        failures.push(`[${scopeName}] coverageExclude 条目 ${pattern} 没有命中任何源文件（过期或写错）`);
+      }
+      const own = scope.listFiles().filter((file) => file === pattern || file.startsWith(prefix));
+      if (own.length > 0) {
+        failures.push(
+          `[${scopeName}] coverageExclude 把本 scope 的源文件也排除了（${own.slice(0, 3).join(' / ')}…），门槛会失去意义`
+        );
       }
     }
   }
@@ -330,7 +580,7 @@ const runSelfTest = () => {
     process.exit(1);
   }
   console.log(
-    `check-coverage-scope: self-test passed —— ${SELF_TEST_CASES.length} 个 fixture 全部符合预期（含缺失文件、0% 行、行数不足、同名遮蔽四条失败路径）`
+    `check-coverage-scope: self-test passed —— ${SELF_TEST_CASES.length} 个 fixture 全部符合预期（含缺失文件、0% 行、行数不足、同名遮蔽、范围外文件污染、门槛口径六条失败路径，以及白名单/排除项卫生检查）`
   );
 };
 
@@ -352,9 +602,11 @@ if (!scope) {
   process.exit(2);
 }
 
-const minLines = readArg('min-lines', scope.defaults.minLines);
-const minBranches = readArg('min-branches', scope.defaults.minBranches);
-const minFunctions = readArg('min-functions', scope.defaults.minFunctions);
+const thresholds = {
+  minLines: Number(readArg('min-lines', scope.defaults.minLines)),
+  minBranches: Number(readArg('min-branches', scope.defaults.minBranches)),
+  minFunctions: Number(readArg('min-functions', scope.defaults.minFunctions)),
+};
 
 const expected = scope.listFiles();
 if (expected.length === 0) {
@@ -362,32 +614,54 @@ if (expected.length === 0) {
   process.exit(2);
 }
 
-const result = spawnSync(process.execPath, ['./scripts/run-node-tests.mjs', ...scope.suiteTargets], {
-  cwd: root,
-  encoding: 'utf8',
-  // 刻意不传 `--test-coverage-include`：它在 Node 22.12 的 CI 上会让子进程直接退出、
-  // 一行报告都留不下（本地 Node 24 才复现得了差异）。include 只是报告过滤器，不会把
-  // 未加载的文件补进分母；分母的完整性由下面的 git 清单对比保证。
-  env: {
-    ...process.env,
-    NODE_TEST_COVERAGE: '1',
-    NODE_TEST_COVERAGE_INCLUDE: '',
-    NODE_TEST_COVERAGE_MIN_LINES: minLines,
-    NODE_TEST_COVERAGE_MIN_BRANCHES: minBranches,
-    NODE_TEST_COVERAGE_MIN_FUNCTIONS: minFunctions,
-  },
-});
+/**
+ * 跑一次覆盖率。`coverageExclude` 决定哪些范围外文件不进报告——这同时决定了
+ * 「all files」汇总行的口径，所以门槛必须建立在排除后的报告上。
+ * node:test 自己的阈值在这里一律置 0：门槛判定由下面的 evaluateThresholds 负责，
+ * 否则它又会作用在混合分母上（组件掉到 51.8% 仍能过 60% 的老问题）。
+ */
+const runSuite = (coverageExclude) =>
+  spawnSync(process.execPath, ['./scripts/run-node-tests.mjs', ...scope.suiteTargets], {
+    cwd: root,
+    encoding: 'utf8',
+    // 刻意不传 `--test-coverage-include`：它在 Node 22.12 的 CI 上会让子进程直接退出、
+    // 一行报告都留不下（本地 Node 24 才复现得了差异）。include 只是报告过滤器，不会把
+    // 未加载的文件补进分母；分母的完整性由下面的 git 清单对比保证。
+    env: {
+      ...process.env,
+      NODE_TEST_COVERAGE: '1',
+      NODE_TEST_COVERAGE_INCLUDE: '',
+      NODE_TEST_COVERAGE_EXCLUDE: coverageExclude.join(','),
+      NODE_TEST_COVERAGE_MIN_LINES: '0',
+      NODE_TEST_COVERAGE_MIN_BRANCHES: '0',
+      NODE_TEST_COVERAGE_MIN_FUNCTIONS: '0',
+    },
+  });
 
-const rows = parseReport(`${result.stdout ?? ''}\n${result.stderr ?? ''}`);
-const state = inspect({ expected, rows, allowedUncovered: scope.allowedUncovered });
+const scopeRun = runSuite(scope.coverageExclude);
+const scopeOutput = `${scopeRun.stdout ?? ''}${NEWLINE}${scopeRun.stderr ?? ''}`;
+const rows = parseReport(scopeOutput);
+const aggregate = parseAggregate(scopeOutput);
+const trackedEverywhere = new Set(listTrackedSources(['.']));
+const untrackedFiles = new Set(
+  rows
+    .map((row) => row.name)
+    .filter((name) => !trackedEverywhere.has(name) && existsSync(path.join(root, name)))
+);
+const state = inspect({
+  expected,
+  rows,
+  allowedUncovered: scope.allowedUncovered,
+  untrackedFiles,
+});
 
 // 子进程如果连一行报告都没产出，先说清楚这一点：否则会把「测试没跑起来」误报成
 // 「所有文件都没被加载」，上一版就因此在 CI 上给出过误导性的 108 文件全缺清单。
 if (state.rowCount === 0) {
   console.error('check-coverage-scope: 覆盖率报告里没有任何文件行，测试进程很可能在产出报告前就退出了');
-  console.error(`  子进程退出码: ${result.status ?? 'null'}${result.signal ? `，信号: ${result.signal}` : ''}`);
-  if (result.stdout) process.stdout.write(result.stdout.slice(-6000));
-  if (result.stderr) process.stderr.write(result.stderr.slice(-6000));
+  console.error(`  子进程退出码: ${scopeRun.status ?? 'null'}${scopeRun.signal ? `，信号: ${scopeRun.signal}` : ''}`);
+  if (scopeRun.stdout) process.stdout.write(scopeRun.stdout.slice(-6000));
+  if (scopeRun.stderr) process.stderr.write(scopeRun.stderr.slice(-6000));
   process.exit(1);
 }
 
@@ -399,20 +673,40 @@ console.log(
 for (const file of state.allowedMissing) {
   console.log(`  ~ ${file}（例外：${scope.allowedUncovered.get(file)}）`);
 }
+for (const file of state.untracked) {
+  console.log(`  ! ${file}（工作树新增、尚未被 git 跟踪：本次不参与判定，提交后自动进入分母）`);
+}
 
-const failures = describeFailures(state);
+console.log(
+  `check-coverage-scope[${scopeName}]: scope 内覆盖率 ${formatAggregate(aggregate)}（门槛 行 ${thresholds.minLines}% / 分支 ${thresholds.minBranches}% / 函数 ${thresholds.minFunctions}%）`
+);
+
+// 混合口径只作为参考数字打印：它把范围外文件也算进分母，曾经让「组件 60%」变成
+// 混合分母的 60%。成功输出里同时给出两个数字，避免下一个人再被它误导。
+if (scope.coverageExclude.length > 0) {
+  const mixedRun = runSuite([]);
+  const mixedAggregate = parseAggregate(`${mixedRun.stdout ?? ''}${NEWLINE}${mixedRun.stderr ?? ''}`);
+  console.log(
+    mixedAggregate
+      ? `check-coverage-scope[${scopeName}]: 混合口径（含 ${scope.coverageExclude.join(' / ')} 里被顺带加载的文件）${formatAggregate(mixedAggregate)} —— 仅作参考，不参与判定`
+      : `check-coverage-scope[${scopeName}]: 混合口径报告没有产出汇总行，跳过这行参考数字`
+  );
+}
+
+const failures = [...describeFailures(state), ...evaluateThresholds({ aggregate, thresholds })];
 if (failures.length > 0) {
   for (const failure of failures) console.error(`check-coverage-scope: ${failure}`);
 }
 
-const thresholdFailure = result.status !== 0;
-if (thresholdFailure && failures.length === 0) {
-  console.error('check-coverage-scope: 覆盖率门槛未通过（详见上面的报告与失败信息）');
-  if (result.stdout) process.stdout.write(result.stdout.slice(-4000));
-  if (result.stderr) process.stderr.write(result.stderr.slice(-4000));
+// 阈值已经由 evaluateThresholds 判定，这里剩下的非零退出码只可能来自测试失败。
+const testFailure = scopeRun.status !== 0;
+if (testFailure && failures.length === 0) {
+  console.error(`check-coverage-scope: 覆盖率运行时测试进程失败（退出码 ${scopeRun.status ?? 'null'}）`);
+  if (scopeRun.stdout) process.stdout.write(scopeRun.stdout.slice(-4000));
+  if (scopeRun.stderr) process.stderr.write(scopeRun.stderr.slice(-4000));
 }
 
-if (failures.length > 0 || thresholdFailure) process.exit(1);
+if (failures.length > 0 || testFailure) process.exit(1);
 console.log(
-  `check-coverage-scope[${scopeName}]: OK —— 所有生产源文件都进入了覆盖率分母（0% 的也已排查），且门槛通过`
+  `check-coverage-scope[${scopeName}]: OK —— 分母只含本 scope 的源文件（0% 的也已排查），门槛按 scope 汇总行判定通过`
 );

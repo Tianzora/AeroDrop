@@ -154,13 +154,19 @@ const runtimeEnv =
   ((import.meta as ImportMeta & {
     env?: Record<string, string | boolean | undefined>;
   }).env) ?? {};
-const SIGNALING_BASE =
+/**
+ * 信令基址必须是**惰性**求值的：这个模块的 import 链被 Receiver / ScreenShare /
+ * Sender 三个大组件共用，模块顶层读 `window.location.origin` 会让它们在 Node 里
+ * import 即抛 ReferenceError（`window is not defined`），从而永远进不了单测。
+ * 没有 window（单测、脚本）时返回空串；真正连信令一定发生在浏览器里。
+ */
+export const getSignalingBase = (): string =>
   (runtimeEnv.VITE_SIGNALING_WS_URL as string | undefined)?.trim() ||
   (runtimeEnv.VITE_SIGNALING_BASE_URL as string | undefined)?.trim() ||
   // Always go through the page origin: in `npm run dev` the Vite proxy forwards
   // /ws-signaling to wrangler, and the Worker's same-origin gate rejects a
   // cross-origin handshake (browser always sends Origin on WebSocket upgrades).
-  window.location.origin;
+  (typeof window === 'undefined' ? '' : window.location.origin);
 const SIGNALING_PATH =
   ((runtimeEnv.VITE_SIGNALING_PATH as string | undefined)?.trim() || '/ws-signaling').replace(/\/?$/, '');
 const QUIET_SIGNAL_EVENTS = new Set([
@@ -266,7 +272,7 @@ const createSignalingConnection = (
   peerId: string,
   options: PeerOptions = {}
 ): { url: string; protocols: string[] } => {
-  const baseUrl = new URL(toWebSocketUrl(SIGNALING_BASE));
+  const baseUrl = new URL(toWebSocketUrl(getSignalingBase()));
   const wsUrl = new URL(SIGNALING_PATH, baseUrl);
   wsUrl.searchParams.set('peerId', peerId);
   const { protocol, baseProtocol } = encodeWsCredentials({
@@ -913,7 +919,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     );
     this.log('info', 'signaling_ws_connect_start', {
       url: redactSignalingUrl(url),
-      signalingBase: SIGNALING_BASE,
+      signalingBase: getSignalingBase(),
       signalingPath: SIGNALING_PATH,
       credentialTransport: 'ws-protocol',
     });

@@ -43,13 +43,16 @@ jobs:
       - name: Unit test coverage gate (services + src)
         run: node ./scripts/check-coverage-scope.mjs --scope=services
 
-      # 组件覆盖率单独一套更低的阈值（实测 all files 70.68 行 / 65.19 分支 / 42.35 函数，
-      # 其中包含组件测试顺带加载的 constants/services/types 文件）：组件测试大量走 DOM 桩，
-      # 函数覆盖率天然偏低，用 services 的阈值会逼出无意义断言。
-      # 分母同样由 git 清单对比保证：components/ 下 12 个生产文件里 Receiver / ScreenShare /
-      # Sender 三个登记为白名单（模块顶层读写 window/document，Node 里 import 即抛
-      # ReferenceError），ErrorBoundary 与 PWAInstallPrompt 由
-      # scripts/component-import-smoke.test.ts 拉进分母。
+      # 组件 scope 有自己的一套阈值，且**只按组件自己的行判定**：范围外的
+      # services/constants/types/src 由 coverageExclude 挡在报告之外，再用 all files 汇总行
+      # 判门槛。实测（2026-11-14，本仓工作树）scope 内 63.35 行 / 68.42 分支 / 42.86 函数；
+      # 不排除时混合口径是 68.60 / 68.37 / 41.94——旧写法拿混合口径判 60% 行门槛，
+      # 组件实际跌到 51.8% 也能过，脚本现在会把两个数字都打出来便于对照。
+      # 组件测试大量走 DOM 桩，函数覆盖率天然偏低，所以阈值比 services 低。
+      # 分母由 git 清单对比保证：components/ 下 12 个生产文件里 Receiver（streamsaver 在
+      # 模块顶层读 document）、ScreenShare 与 Sender（没有任何组件测试 import、渲染依赖真实
+      # WebRTC/采集能力）三个登记为白名单并写明理由；ErrorBoundary 与 PWAInstallPrompt
+      # 由 scripts/component-import-smoke.test.ts 拉进分母。
       - name: Component coverage gate
         run: node ./scripts/check-coverage-scope.mjs --scope=components
 
@@ -84,6 +87,18 @@ jobs:
       # （本地实测约 2-3 分钟），合进同一个 job 只会拖长反馈时间。
       - name: Browser tests
         run: npm run test:e2e
+
+      # 失败证据：trace/screenshot 由 playwright.config.ts 的 retain-on-failure /
+      # only-on-failure 产出，全落在 test-results/。必须 always() 才拿得到；失败时缺文件
+      # 也要在日志里喊一声（warn），而不是安静地跳过。
+      - name: Upload Playwright artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-e2e
+          path: test-results/
+          retention-days: 7
+          if-no-files-found: warn
 
   e2e-product:
     name: 'e2e (product: transfer + screenshare, real Worker)'
@@ -137,13 +152,13 @@ jobs:
           pkill -f 'wrangler dev' || true
           pkill -f workerd || true
 
-      - name: Upload Playwright artifacts on failure
-        if: failure()
+      - name: Upload Playwright artifacts
+        if: always()
         uses: actions/upload-artifact@v4
         with:
           name: playwright-product-transfer
-          path: |
-            test-results/
-            playwright-report/
+          # reporter 是 list，不会生成 playwright-report/；有内容的只有 test-results/
+          # （trace / screenshot / error-context）。
+          path: test-results/
           retention-days: 7
-          if-no-files-found: ignore
+          if-no-files-found: warn

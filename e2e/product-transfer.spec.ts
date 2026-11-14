@@ -9,44 +9,11 @@ const FILE_BYTES = 2 * 1024 * 1024;
 // 固定口令会在第二次运行时命中 409；每次运行用一个新口令。
 const createShareCode = () => String(Math.floor(100_000 + Math.random() * 900_000));
 
-type ProductIceConfig = {
-  iceServers: RTCIceServer[];
-  secure: boolean;
-  iceCandidatePoolSize: number;
-  iceTransportPolicy: RTCIceTransportPolicy;
-  hasTurn: boolean;
-  relayRecommended: boolean;
-  relayReason: 'network' | null;
-  fetchLatencyMs: number;
-};
-
 type IceRouteEvidence = {
   localCandidateType?: string;
   remoteCandidateType?: string;
   pathType?: string;
   protocol?: string;
-};
-
-const getProductIceConfig = (): ProductIceConfig => {
-  const url = process.env.AERODROP_TURN_URL;
-  const username = process.env.AERODROP_TURN_USERNAME;
-  const credential = process.env.AERODROP_TURN_CREDENTIAL;
-  const configuredValues = [url, username, credential].filter(Boolean).length;
-  if (configuredValues > 0 && configuredValues < 3) {
-    throw new Error('AERODROP_TURN_URL/USERNAME/CREDENTIAL must be configured together');
-  }
-
-  const hasTurn = configuredValues === 3;
-  return {
-    iceServers: hasTurn ? [{ urls: url!, username: username!, credential: credential! }] : [],
-    secure: true,
-    iceCandidatePoolSize: 1,
-    iceTransportPolicy: 'all',
-    hasTurn,
-    relayRecommended: hasTurn,
-    relayReason: hasTurn ? 'network' : null,
-    fetchLatencyMs: 0,
-  };
 };
 
 const createPayload = () => {
@@ -79,22 +46,13 @@ test('serves SEO metadata and keeps share links out of search', async ({ request
 });
 
 test('production Sender and Receiver transfer and download a 2 MiB file', async ({ browser }) => {
-  const iceConfig = getProductIceConfig();
   const shareCode = createShareCode();
   const senderContext = await browser.newContext();
   const receiverContext = await browser.newContext();
 
-  // Only `--mode e2e` builds honor `__AERODROP_E2E__` (see services/e2eHooks.ts).
-  // This spec targets the production bundle served by wrangler, so the override is
-  // inert here and the app uses the worker-issued ICE config. The receiver downloads
-  // straight to the browser download directory, so bytes are verified through
-  // Playwright's download capture.
-  await Promise.all([senderContext, receiverContext].map((context) => context.addInitScript((config) => {
-    (window as Window & { __AERODROP_E2E__?: unknown }).__AERODROP_E2E__ = {
-      getIceConfigOverride: () => config,
-    };
-  }, iceConfig)));
-
+  // 生产包里没有测试钩子可用（`__AERODROP_E2E__` 只在 `vite build --mode e2e` 生效，
+  // 见 services/e2eHooks.ts），所以这里跑的是真实的 Worker 签发 ICE 配置 + 真实 P2P 路由；
+  // 想覆盖 TURN 中继路径得单独用 --mode e2e 的用例，不在这个生产级套件里做。
   // The receiver downloads straight to the browser download directory for in-limit
   // transfers (no save picker), so the file is verified through Playwright's download capture.
 
@@ -163,11 +121,7 @@ test('production Sender and Receiver transfer and download a 2 MiB file', async 
     expect(route?.remoteCandidateType).not.toBe('relay');
     expect(route?.pathType).not.toBe('TURN');
 
-    if (iceConfig.hasTurn) {
-      console.log(`AeroDrop P2P priority with TURN available: ${JSON.stringify(route)}`);
-    } else {
-      console.log(`AeroDrop P2P route: ${JSON.stringify(route)}; TURN-present fallback competition not covered (AERODROP_TURN_* unset)`);
-    }
+    console.log(`AeroDrop P2P route: ${JSON.stringify(route)}`);
     expect(elapsedMs).toBeLessThanOrEqual(process.env.CI ? 15_000 : 5_000);
   } finally {
     await Promise.all([senderContext.close(), receiverContext.close()]);

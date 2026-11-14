@@ -11,8 +11,9 @@ export default defineConfig({
   reporter: 'list',
   use: {
     baseURL: process.env.AERODROP_BASE_URL ?? 'http://127.0.0.1:8787',
-    // Ephemeral TURN credentials are injected into the page for this test.
-    trace: 'off',
+    // 失败证据：trace 与截图都只在失败时留，CI 把 test-results/ 当 artifact 上传。
+    trace: 'retain-on-failure',
+    screenshot: 'only-on-failure',
   },
   projects: [
     {

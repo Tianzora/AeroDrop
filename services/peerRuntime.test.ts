@@ -1,5 +1,8 @@
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import { dirname, resolve } from 'node:path';
 import test from 'node:test';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 
 import { CONNECTION_TIMINGS } from '../constants/transfer.ts';
 import {
@@ -8,6 +11,8 @@ import {
   parseWsProtocols,
   pickAcceptedProtocol,
 } from './signaling/wsCredentialTransport.ts';
+
+import { getSignalingBase } from './peerRuntime.ts';
 
 class FakeDataChannel {
   public static instances: FakeDataChannel[] = [];
@@ -878,5 +883,37 @@ test('rate-limited 的 error 信封把 retryAfterMs 透给上层，供倒计时�
     other.destroy();
   } finally {
     restore();
+  }
+});
+
+// 模块顶层如果又出现 `window.location.origin`，这条会红：子进程没有 window 也没有
+// WebSocket，import 成功才说明这条 import 链（Receiver / ScreenShare / Sender 都要走
+// 它）重新变回「可以在 Node 里被测试」。本进程里模块已缓存，删 window 再 import
+// 证明不了初始化顺序，所以用干净子进程。
+test('模块在没有任何浏览器全局的 Node 进程里可以 import', () => {
+  const repoRoot = resolve(dirname(fileURLToPath(import.meta.url)), '..');
+  const loader = pathToFileURL(resolve(repoRoot, 'node_modules/tsx/dist/loader.mjs')).href;
+  const stubs = pathToFileURL(resolve(repoRoot, 'scripts/test-stubs/register.mjs')).href;
+  const result = spawnSync(
+    process.execPath,
+    ['--import', loader, '--import', stubs, '--input-type=module', '-e', "await import('./services/peerRuntime.ts');"],
+    { cwd: repoRoot, encoding: 'utf8' }
+  );
+
+  assert.equal(result.status, 0, `${result.stdout}
+${result.stderr}`);
+});
+
+test('信令基址惰性求值：没有 window 时为空串，有 window 时用页面 origin', () => {
+  const globalScope = globalThis as unknown as { window?: Window };
+  const originalWindow = globalScope.window;
+  try {
+    globalScope.window = undefined;
+    assert.equal(getSignalingBase(), '');
+
+    globalScope.window = { location: { origin: 'http://127.0.0.1:3000' } } as unknown as Window;
+    assert.equal(getSignalingBase(), 'http://127.0.0.1:3000');
+  } finally {
+    globalScope.window = originalWindow;
   }
 });
