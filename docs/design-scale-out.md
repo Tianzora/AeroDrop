@@ -267,7 +267,7 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 | 限流不随分片翻倍（§2.4 / P1） | `src/worker.ts` | 分片 >1 时改用 shard 0 的 `signaling_session_slots` 全局名额表（原子 reserve/release、6h TTL、槽位 id 存 attachment；接管用 `replaces`（条件删除）让出旧行，而不是「先释放再领取」（后者一旦领取失败就把旧名额白丢了），常驻连接每 30 分钟随 ping 续期），不再让每片各算 12 会话。 |
 | 握手放大面 | `services/signaling/handshakeBudget.ts` | 跨片回源前的 per-isolate 预算（20 次/10s/IP），挡住「未认证握手 → DO 调用风暴」；仅在分片模式消耗。 |
 | 口令回源的批量合并（P2 第一步） | `services/signaling/shareCodeLookupBatch.ts`、`src/worker.ts` | 同一窗口（2ms）内的并发注册共用一次批量 RPC：观众同时打开链接时，shard 0 从「每注册一次读」降到「每批一次读」。批量请求失败或返回条数不符时每个等待者都 reject，调用方仍按「查不到」fail closed；握手预算仍按每次查询消耗。`signal_share_code_lookup_batched` 记录实际合并的批大小（>1 才记）。 |
-| P0 观测（第一层） | `services/signaling/signalingTelemetry.ts`、`src/worker.ts` | 结构化日志即指标（无第三方、无付费）：`signal_shard_selected`（仅分片模式）、`signal_cross_shard_delivered/failed`（带 targetShard 与失败原因）、`signal_session_slot_rejected`、`signal_session_conflict`、`signal_handshake_budget_exhausted`、`signal_share_code_lookup_failed`、`signal_share_code_lookup_batched`。一行一个 JSON，按 `event` 计数即可。 |
+| P0 观测（第一层） | `services/signaling/signalingTelemetry.ts`、`src/worker.ts` | 结构化日志即指标（无第三方、无付费）：`signal_shard_selected`（仅分片模式）、`signal_cross_shard_delivered/failed`（带 targetShard 与失败原因）、`signal_session_slot_rejected`、`signal_session_conflict`、`signal_handshake_budget_exhausted`、`signal_share_code_lookup_unavailable`（回源不可达，升级为 503 + Retry-After）、`signal_share_code_lookup_batched`。一行一个 JSON，按 `event` 计数即可。 |
 | P0 告警（第二层） | Cloudflare「监控器 Beta」4 个阈值监控器（见 8.1 尾表） | 数据集 `logs.workersLogs`，过滤 `message LIKE '%<event>%'`，1 分钟计数阈值，邮件通知；把「5 分钟 > N」折算成每分钟阈值（1m 是该数据集允许的最小间隔，告警更灵敏，靠 `重复通知间隔 1h` 防轰炸）。编辑页 `https://dash.cloudflare.com/<account>/notifications/edit/<id>`。 |
 | 口令回源的读放大（P2 前置） | `src/worker.ts` | 补 `share_codes(peer_id)` 索引；分片后每次回源按 peer_id 查，否则 shard 0 每条注册都全表扫。 |
 | 分片数变更的身份 fencing（§8.2 原硬前置） | `src/worker.ts`、`services/signaling/sessionBinding.ts` | 绑定（摘要 + proof 链）的权威副本只住 shard 0：分片模式下每次注册都回 shard 0 做「判定 + 签发新 proof」（因此每次注册多一次 DO RPC，受握手预算约束），本片不再落绑定表。`SIGNALING_SHARD_COUNT` 变更导致 peerId 改片时，新片仍查得到同一条绑定；**不带 proof 的接管、以及「等旧 socket 断开再以全新注册身份挤进来」都会被拒**（后者以前是洞：非接管注册曾走「无 hash/proof 直接放行」的捷径）。回源不可达时接管 fail closed、全新注册 fail open，并记 `signal_session_binding_unavailable`。|
@@ -287,7 +287,7 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 
 ### 8.2 仍未做（保持原优先级）
 
-- **P0 观测（告警已完成，看板未做）**：4 个阈值监控器已在 Cloudflare「监控器 Beta」创建（清单见 8.1 尾表），覆盖 `signal_session_conflict`、`signal_session_binding_unavailable`、`signal_handshake_budget_exhausted`、`signal_cross_shard_failed`。仍缺：①`signal_share_code_lookup_failed` / `signal_cross_shard_delivered` 的看板（用 Workers Logs 查询或 Analytics Engine）；②`proof 轮换失败` 目前是客户端事件（`signaling_session_proof_rotated`），服务端尚未对应计数；③告警只在部署后生效，本地开发不进线上日志。
+- **P0 观测（告警已完成，看板未做）**：4 个阈值监控器已在 Cloudflare「监控器 Beta」创建（清单见 8.1 尾表），覆盖 `signal_session_conflict`、`signal_session_binding_unavailable`、`signal_handshake_budget_exhausted`、`signal_cross_shard_failed`。仍缺：①`signal_share_code_lookup_unavailable` / `signal_cross_shard_delivered` 的看板（用 Workers Logs 查询或 Analytics Engine）；②`proof 轮换失败` 目前是客户端事件（`signaling_session_proof_rotated`），服务端尚未对应计数；③告警只在部署后生效，本地开发不进线上日志。
 - **§2.5 目录租约 + fencing**：当前没有跨片目录，分片数变化会让部分 peerId 改片；因为默认不分片，暂时没有暴露，但扩容前必须按 §2.5 落地。
 - **§2.3 次生问题**：分片后每次注册多一次跨 DO RPC（口令回源），预算只是削弱放大。并发窗口内的查询已合并成批量 RPC（`shareCodeLookupBatch`），本地短 TTL 缓存仍未做（缓存与注销语义冲突，需先定可接受的陈旧窗口）。
 - **P2 口令存储拆分、P4/P5 SFU 适配层与切换**：未开始，判据与取舍见正文 §3。
@@ -405,7 +405,7 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 
 ### 8.7 第五轮复评后的补齐（2026-11-14，复评基线 93 / 88 / 89）
 
-> 数字说明：§8.4–§8.12 里的覆盖率、文件数、行数与用例数都是各轮**当时的快照**；`src/worker.ts` 的覆盖率、组件/服务文件数等会随后续提交变化，当前实测一律以 §8.15 末尾为准。
+> 数字说明：§8.4–§8.12 里的覆盖率、文件数、行数与用例数都是各轮**当时的快照**；`src/worker.ts` 的覆盖率、组件/服务文件数等会随后续提交变化，当前实测一律以 §8.17 末尾为准。
 
 第五轮的三份复评（安全 93、产品 88、工程 89）都只差「最后一公里」的证明，因此这一轮几乎没有新抽象，主要是把已有模块接进测试与 CI：
 
@@ -416,9 +416,9 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 | 屏幕共享重建时的 proof 组装/落盘/清理散在组件里，调用点无测试 | 抽 `services/screenShare/screenShareSessionProof.ts`（room + storage 注入）：`resolveScreenSharePeerCredentials` / `rememberScreenShareSessionProof` / `forgetScreenShareSessionProof` | `screenShareSessionProof.test.ts`（有 proof 时凭证不带 `sessionSecretHash`、storage 损坏不抛、终态清理后为空） |
 | 第 7 个观众被拒时发 `{type:'share-full'}` 的分支无测试；data conn 未登记时观众只看到「连接超时…检查网络」而不是「人数已满」 | 抽 `planViewerAdmission`（`admit` / `reject-share-full` + `reserveSeat` + `delivery`）与 `deliverShareFull`（已登记连接直发，未登记反向连一条） | `viewerAdmission.test.ts` +151 行（pending 占位、已满、dc 未登记仍能投放）；E2E 见下行 |
 | 三条失败路径只有单测、没有真实浏览器证据 | `e2e/screenshare.spec.ts` 新增：房号过期（琥珀「链接已失效」+ 复制禁用）、停止→立刻重开（30s 内重新出现链接）、观众媒体失败（重试提示 → 「重试连接」终态） | 新增 3 条 + 2 条既有终态用例，product 套件 **11 passed (1.2m)** |
-| `src/worker.ts` 默认导出 `fetch` 从未执行：同源门/鉴权/分派被改坏仍全绿 | 把 `isAllowedSameOriginRequest` 逐字抽到 `services/signaling/httpOriginPolicy.ts`；`services/signaling/workerEntry.test.ts` 直接驱动入口 fetch | `httpOriginPolicy.test.ts`（10 例）+ `workerEntry.test.ts`（9 例：ASSETS/426/403/400/101 + share-code HMAC/429）；worker.ts 行覆盖 71.53% → **81.75%**、函数 53.33% → **68.13%**（第八轮快照；当前 89.22 / 75.37 / 79.61，见 §8.15）；负对照 16/19、3、1 条变红 |
-| `--test-coverage-include` 只是报告过滤器：未被测试加载的文件按 0 计入分母的说法不成立（实测组件套件只报出 4 个文件），任何新模块只要没人 import 就完全逃过门槛 | `scripts/check-coverage-scope.mjs` 按 scope 运行（`--scope=services|components`）：期望清单来自 `git ls-files`，报告行数 < 期望 − 白名单即失败；报告里 line 覆盖率为 `0%` 且不在白名单的文件同样失败（「进了分母但一行没跑」不算回归证据）；解析先剥 ANSI、行首标记可选（本地 `ℹ`、CI runner 上观察到 `#`），避免把「格式变了」误报成「所有文件都没加载」；`--self-test` 用内联 fixture 固定解析与判定规则；**不传 include**，分母完整性由 git 对比保证 | 负对照：去掉白名单过滤 ⇒ exit 1 并点名；`--scope=services` ⇒ 118 个生产源文件 / 报告 116 行 / 例外 2；`--scope=components` ⇒ 13 个生产文件 / 报告 10 行 / 例外 3（第八轮快照；当前数字见 §8.15）；CI run `43557683645` 复现「报告完整但解析 0 行」，`43558142248` 转绿；全仓行覆盖 89.78% |
-| 组件覆盖率门禁是假的：`components/Receiver.tsx`（3367 行）、`components/ScreenShare.tsx`（2856 行）、`components/Sender.tsx`（1670 行）在组件套件里一行都没进报告，而 CI 注释宣称「未加载组件按 0 计入」 | 把同一个守卫扩到 components scope：期望清单 = `git ls-files components` 的 `.ts/.tsx` 去掉测试文件；白名单只收「Node 宿主里确实无法 import」的三个组件（`Receiver.tsx` 顶层访问 document，`ScreenShare.tsx` / `Sender.tsx` 顶层访问 window，交互分别由 Playwright e2e 与 `test:e2e:product-transfer` 覆盖）；能加载却没人测的组件（`ErrorBoundary.tsx`、`PWAInstallPrompt.tsx`）用 `scripts/component-import-smoke.test.ts` 拉进分母，不允许进白名单；因此 components scope 的测试目标是 `['components', 'scripts/component-import-smoke.test.ts']` | 真实分母 13 个生产文件、10 个必须出现且全部在册；门槛只按 scope 内行判定（当轮快照 63.35 行 / 68.42 分支 / 42.86 函数；当前 65.43 / 71.43 / 42.86，见 §8.15）；负对照：把白名单扩到可加载组件 ⇒ 该文件立刻被判缺测试 |
+| `src/worker.ts` 默认导出 `fetch` 从未执行：同源门/鉴权/分派被改坏仍全绿 | 把 `isAllowedSameOriginRequest` 逐字抽到 `services/signaling/httpOriginPolicy.ts`；`services/signaling/workerEntry.test.ts` 直接驱动入口 fetch | `httpOriginPolicy.test.ts`（10 例）+ `workerEntry.test.ts`（9 例：ASSETS/426/403/400/101 + share-code HMAC/429）；worker.ts 行覆盖 71.53% → **81.75%**、函数 53.33% → **68.13%**（第八轮快照；当前 89.22 / 75.37 / 79.61，见 §8.17）；负对照 16/19、3、1 条变红 |
+| `--test-coverage-include` 只是报告过滤器：未被测试加载的文件按 0 计入分母的说法不成立（实测组件套件只报出 4 个文件），任何新模块只要没人 import 就完全逃过门槛 | `scripts/check-coverage-scope.mjs` 按 scope 运行（`--scope=services|components`）：期望清单来自 `git ls-files`，报告行数 < 期望 − 白名单即失败；报告里 line 覆盖率为 `0%` 且不在白名单的文件同样失败（「进了分母但一行没跑」不算回归证据）；解析先剥 ANSI、行首标记可选（本地 `ℹ`、CI runner 上观察到 `#`），避免把「格式变了」误报成「所有文件都没加载」；`--self-test` 用内联 fixture 固定解析与判定规则；**不传 include**，分母完整性由 git 对比保证 | 负对照：去掉白名单过滤 ⇒ exit 1 并点名；`--scope=services` ⇒ 118 个生产源文件 / 报告 116 行 / 例外 2；`--scope=components` ⇒ 13 个生产文件 / 报告 10 行 / 例外 3（第八轮快照；当前数字见 §8.17）；CI run `43557683645` 复现「报告完整但解析 0 行」，`43558142248` 转绿；全仓行覆盖 89.78% |
+| 组件覆盖率门禁是假的：`components/Receiver.tsx`（3367 行）、`components/ScreenShare.tsx`（2856 行）、`components/Sender.tsx`（1670 行）在组件套件里一行都没进报告，而 CI 注释宣称「未加载组件按 0 计入」 | 把同一个守卫扩到 components scope：期望清单 = `git ls-files components` 的 `.ts/.tsx` 去掉测试文件；白名单只收「Node 宿主里确实无法 import」的三个组件（`Receiver.tsx` 顶层访问 document，`ScreenShare.tsx` / `Sender.tsx` 顶层访问 window，交互分别由 Playwright e2e 与 `test:e2e:product-transfer` 覆盖）；能加载却没人测的组件（`ErrorBoundary.tsx`、`PWAInstallPrompt.tsx`）用 `scripts/component-import-smoke.test.ts` 拉进分母，不允许进白名单；因此 components scope 的测试目标是 `['components', 'scripts/component-import-smoke.test.ts']` | 真实分母 13 个生产文件、10 个必须出现且全部在册；门槛只按 scope 内行判定（当轮快照 63.35 行 / 68.42 分支 / 42.86 函数；当前 65.43 / 71.43 / 42.86，见 §8.17）；负对照：把白名单扩到可加载组件 ⇒ 该文件立刻被判缺测试 |
 | 覆盖率过滤器探测失败会静默退化（Node 22.12 没有 `--test-coverage-include`） | `buildNodeTestArgs` 在 `NODE_TEST_COVERAGE=1` 但过滤器不可用时直接 throw，不再只统计已加载文件 | `run-node-tests.test.ts` +3 例（throw、两旗标判定、include/exclude 参数） |
 | 补测 6 个从未被 import 的模块（`fileUtils`、`routeProbeLog`、`logicalReceiverSessions`、`committedReconnectResume`、`receiverRouteSessionId`、`sessionTransferState`） | 逐模块补真值表/边界用例，而不是只「import 一次」凑覆盖率 | `services` 552 → **606 tests**；`services/signaling` 137 pass |
 
@@ -666,11 +666,11 @@ CI 仍是信号不是闸门（Cloudflare Git 集成不读 GitHub 检查，除非
 
 本轮实测（干净树，2026-11-14）：
 
-- `npm run typecheck` → 0；`npm run test:all` → services **717** / components **47** / scripts **21** 全 pass。
-- `node ./scripts/run-node-tests.mjs services/signaling` → **178 tests / 178 pass**。
-- `src/worker.ts` 覆盖率 **89.22 / 75.37 / 79.61**。
-- `--scope=services`：118 个生产源文件 / 报告 116 行 / 2 例外，scope 内 **91.53 / 84.01 / 84.72**，白名单预算 152/17468 行（0.87%，上限 5%）。
-- `--scope=components`：13 文件 / 报告 10 行 / 3 例外，scope 内 **65.43 / 71.43 / 42.86**，白名单预算 7893/10459 行（75.47%，上限 80%）。
+- `npm run typecheck` → 0；`npm run test:all` → services **714** / components **47** / scripts **16** 全 pass（当轮快照）。
+- `node ./scripts/run-node-tests.mjs services/signaling` → **175 tests / 175 pass**（当轮快照）。
+- `src/worker.ts` 行覆盖当轮未单独复测；第十四轮实测 89.22 / 75.37 / 79.61，见 §8.16。
+- `--scope=services`：118 个生产源文件 / 报告 116 行 / 2 例外，scope 内 **91.33 / 83.76 / 84.72**，白名单预算 152/17463 行（0.87%，上限 5%）。
+- `--scope=components`：13 文件 / 报告 10 行 / 3 例外，scope 内 **65.43 / 71.43 / 42.86**，白名单预算 7883/10449 行（75.44%，上限 80%）。
 - `--self-test` → 19 个报告 fixture + 5 个预算 fixture + 3 个理由 fixture 全过。
 - `npm run test:e2e` → 9 passed；`npm run test:e2e:product-transfer` → 13 passed。
 - 仍然存在的已知取舍：与 §8.14 相同（组件白名单占约 3/4 行数、冷却归零与采集释放只有 helper 契约测试、CI 仍是信号不是闸门、千行组件与 AGENTS 的张力未解）；另加一条：`e2e/screenshare.spec.ts` 的 `FRAME_TIMEOUT_MS` 从 30s 提到 45s，只是吸收「全量套件 + 生产环境 + 代理网络」的抖动，真正的失败仍由帧数持续增长断言判定。
@@ -700,3 +700,45 @@ CI 仍是信号不是闸门（Cloudflare Git 集成不读 GitHub 检查，除非
 - `--scope=components`：13 文件 / 10 行 / 3 例外，**65.43 / 71.43 / 42.86**，预算 7893/10459（75.47%，上限 80%）。
 - `--self-test` → 19 + 5 + 3 fixture 全过；`npm run test:e2e` 9 passed；`npm run test:e2e:product-transfer` 13 passed。
 - 仍未解（与 §8.15 相同并新增一条）：组件白名单占 75.47% 行数、千行组件与 AGENTS 的张力、CI 是信号不是闸门；新增「冷却归零 / 采集释放只有 helper 契约测试，没有渲染级断言」与「`sessionStore.renew` 仍只按 slotId 续期（靠 UUID 唯一性）」。
+
+### 8.17 第十五轮复评后的收口（2026-11-14，复评基线 安全 80 / 产品 87 / 工程 78）
+
+第十五轮的三份报告指向同一件事：**前十四轮修掉的是「已知路径上的错误」，这一轮暴露的是「路径本身的条件判断」**——
+空白凭证、回源失败、传输层失败、门禁组成，任何一条判错都会让前面的修复整体失效。安全的两条 especially：
+一条能把分享链接的接收方骗到攻击者的 PeerConnection 上，另一条让 shard 0 抖动期所有已绑定 peerId 退回无凭证路径。
+
+| 缺口 | 修法 | 验证 |
+| --- | --- | --- |
+| 安全（MF1）：分片模式下 `code='   '` 既 truthy（跳过「该 peerId 已被分享占用」的问询）又在 registry 里等于没有码（走无凭证分支）⇒ 拿到 6 位码的人可抢注发送方 peerId，把接收方引到自己的连接上 | 判据改用 normalize 后的口令（`!normalizedCodeParam`），不再看原始 query 值；`readCredential` 保持不 trim（trim 会把空白摘要从 400 变成「无凭证」，是放宽而不是收紧） | `signalingHub.test.ts`「分片模式下空白口令不能跳过『该 peerId 已被分享占用』的判定」+ 同 peerId 无凭证控制组；断言 `peerIdQueries.length === 1` 证明 normalize 后仍然问询。负对照：改回 `!codeParam` ⇒ 红 |
+| 安全（MF2）：口令回源失败被当成「peerId 未占用」（`return null`）⇒ shard 0 抖动期任何已绑定 peerId 都 fail-open，MF1 的冒充路径只需重试 | `lookupShareCodeRemotely` 改三态 `found / missing / failed`；`failed` 在 accept 之前直接 `503 + Retry-After`（`SIGNALING_SHARE_CODE_LOOKUP_UNAVAILABLE_RETRY_AFTER_SECONDS`），并记 `signal_share_code_lookup_unavailable` | 两条用例（回源 503、回源抛错）断言 503 + Retry-After、无 socket、无名额行、指标出现；负对照：catch 改回 `missing` ⇒ 两条红 |
+| 安全（测试债）：本轮的 by-peerId 回源此前**没有任何测试钉住**（整条拔掉仍 178 全绿），7 条分片用例一直是靠「lookup 打不通 = 未绑定」才绿的 | 给 `createHub` 加 `shareCodeLookup: 'miss' | 'stub'`（默认 miss，按 `lookups` 条数返回 null），自己接管 lookup 的用例显式标 `'stub'` | 上述两条新用例 + 空白码用例把该路径钉住；后续任何「不再问询」的退化解法都会红 |
+| 产品（MF1）：首帧前的媒体建连失败（对称 NAT / 无 TURN）与「第 7 个观众被拒」在判定输入上完全相同 ⇒ 用户看到「可能人数已满」 | 传输层失败作为独立输入：`MediaConnection.emitClose` 带 cause，`planViewerCallEndOutcome` 增 `transportFailed` → 新结论 `'media-failed'`，用媒体失败文案；`suspected-share-full` 只留给「远端干净关闭且无流」 | `viewerShareFullFallback` 用例 + e2e 死链用例；负对照：删 `transportFailed` 分支 ⇒ 红 |
+| 产品（MF2）：登记成功但从未连上时仍说「此前分享的链接已失效」——链接卡要等 WS open 才有 peerId | 新增 `linkPublishedRef`（设置 peerId 时置 true，start/stop 清），`hadShareLink` 用它而不是 `room !== null` | `ScreenShareUI` 用例 + 负对照（改回 `room !== null` ⇒ 红） |
+| 产品（MF3）：`call.on('close')` 不消费 `'sharer-unavailable'`，且 `shouldReconnectAfterCallEnd` 全仓只有测试引用（死代码） | 抽「outcome → 动作」纯函数，组件只消费它；`'sharer-unavailable'` 交 peer 级分类（不重连、不报满员）；删死函数 | 纯函数用例覆盖每个 outcome 的动作；负对照：把 `'sharer-unavailable'` 当作「重连」⇒ 红 |
+| 产品（MF4）：429 冷却的入口守卫没有任何测试（把分享端守卫改恒 false 后 test:all 仍全绿） | e2e 补三件事：按钮 disabled 且 `aria-describedby` 指向倒计时、force 点击后 `__shareCodeAttempts` 仍为 1、冷却到期后可恢复 | 负对照：守卫改恒 false ⇒ 该 e2e 红 |
+| 工程（MF1）：`test:all` 加 `|| true` 或删一个 suite 就能让门禁静默失效 | `ci-wiring.test.ts` 精确断言三个 suite 的 target，拒绝 `||`/`;`/`2>/dev/null` | 负对照：删 `test:scripts` ⇒ 红 |
+| 工程（MF2）：CI 的 job/step 可被整体删掉或加 `if: false`/`continue-on-error` 而不被任何测试发现 | `ci-wiring.test.ts` 改 job/step 感知解析（按缩进切 job、按 `- name:` 切 step、先剥注释），断言四个 job 的必需 step 与四条 job 级约束 | 负对照：job 级 `if: false`、删 Typecheck step ⇒ 各红一条 |
+| 工程（MF3）：`playwright.product.config.ts` 删一个 spec、删上传 step、删 8787 空闲断言都能全绿 | inventory 测试绑 `--list` 的用例数，并断言两个上传 step 的 `if: always()`/`path` 与 8787 断言 step 存在 | 负对照：删 `screenshare.spec.ts` 的 `testMatch` ⇒ 红 |
+| 工程（MF4）：覆盖率阈值/白名单预算改松仍 `--self-test` 绿 | `POLICY_CASES` 钉住真实政策（85/78/75、60/58/40、2/0.05、3/0.8） | 负对照：任一阈值改松 ⇒ 红 |
+| 工程（MF5）：文档「当前」指针再次悬空、§8.15 的当轮实测被第十四轮数字追溯覆盖 | 恢复 §8.15 为当轮快照；新增 `scripts/docs-current-pointer.test.ts` 断言横幅/所有「当前」指针指向最新章节，且 §8.15 与 §8.16 的实测块不相同 | 负对照：把横幅指针改回 §8.15、把 §8.15 实测块替换成 §8.16 内容 ⇒ 各红 |
+| 工程（MF6）：结构债只记录数字，没有解除路径 | 见下方「结构债的解除路径」四阶段表；`scripts/debt-budget.test.ts` 把当轮上限钉成测试（as any ≤16 且分布固定、三个千行组件行数上限、白名单预算取值） | 负对照：上限改小/注入一处 `as any` ⇒ 红 |
+
+#### 结构债的解除路径
+
+数字不是结论，路径才是。四个阶段各自可独立验收，每完成一阶段就把 `scripts/debt-budget.test.ts` 的上限下调一档。
+
+| 阶段 | 目标 | 做法 | 验收 |
+| --- | --- | --- | --- |
+| 阶段 1：`noUncheckedIndexedAccess` 从 200 降到 0 | 让「可能为 undefined」在类型层可见 | 先修测试里的 200 处（`peerRuntime.test` 66、`senderSession.test` 15、`shareCodeClient.test` 13、`signalingHub.test` 12，其余零散），再按目录启用（先 `services/signaling`、再 `services/`、最后 `components/`）；新增 `scripts/check-strict-index.mjs` 钉住「≤ 当轮上限」，随阶段下调直到 0 | `tsc --noEmit` 在开启该 flag 下 exit 0；`check-strict-index.mjs` 报 0 |
+| 阶段 2：`as any` 从 16 降到 0 | 去掉类型逃逸 | 逐条替换：`ScreenShare.tsx` 的 11 处用会话状态联合类型（`SharerState`/`ViewerState`）替代、`Sender.tsx` 2 处用 `TransferEvent` 判别联合、`sendFileSequence.ts` 1 处、`peerRuntime.ts` 1 处、`crc32.worker.ts` 1 处（`self` 类型用 `DedicatedWorkerGlobalScope` 断言一次集中） | `scripts/debt-budget.test.ts` 的上限从 16 调到 0 |
+| 阶段 3：组件抽离（体积债） | 把传输状态机搬回 `services/`，组件只留渲染 | `Receiver` → `services/receive/`（目标 < 1500 行）、`ScreenShare` → `services/screenShare/`（目标 < 1200 行）、`Sender`（目标 < 1000 行）；每阶段下调 components 白名单的行/条目预算 | `debt-budget` 的行数上限逐阶段下调；白名单行占比同步下降 |
+| 阶段 4：验收线 | 让「结构债」变成可判定的门 | 白名单行占比 75.47% → < 50%、`as any` 16 → 0、`noUncheckedIndexedAccess` 200 → 0、三个组件行数达标 | `debt-budget.test.ts` 的四个上限同时到位；`docs` 末尾记录当轮数字 |
+
+本轮实测（干净树，2026-11-14）：
+
+- `npm run typecheck` → 0；`npm run test:all` → services **726** / components **47** / scripts **31** 全 pass。
+- `node ./scripts/run-node-tests.mjs services/signaling` → **181 tests / 181 pass**。
+- `src/worker.ts` 覆盖率 **89.11 / 75.21 / 80.58**；`--scope=services` 118 文件 / 117 行 / 2 例外，**91.51 / 83.86 / 84.74**，预算 152/17528（0.87%）。
+- `--scope=components`：13 文件 / 10 行 / 3 例外，**65.43 / 71.43 / 42.86**，预算 7900/10466（75.48%，上限 80%）。
+- `--self-test` → 19 报告 + 5 预算 + 3 理由 + 10 阈值政策 fixture 全过；`npm run test:e2e` 9 passed；`npm run test:e2e:product-transfer` **15 passed**（product-transfer 3 + screenshare 12）。
+- 仍未解（与前几轮同类）：组件白名单占 75.48% 行数、千行组件与 AGENTS 的张力、CI 是信号不是闸门；`sessionStore.renew` 仍只按 slotId 续期；`replace` commit 永久失败时旧行活到 6h TTL。

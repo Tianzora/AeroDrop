@@ -203,3 +203,13 @@ WS 凭证移出 URL query（`Sec-WebSocket-Protocol`）、读路径不再写库�
 - 门禁实测：typecheck 0；services 717 / components 47 / scripts 21；`services/signaling` 178/178；两个 scope 守卫 OK；self-test 19+5+3；e2e 9 passed；product-transfer 13 passed。
 
 状态: 完成 (第十四轮复评 must-fix 全部收口；门禁全绿，待推送与复评, 2026-11-14)
+
+## 阶段 14：第十五轮复评后的收口（2026-11-14）
+
+对应 `docs/design-scale-out.md` §8.17。三项复评（安全 80 / 产品 87 / 工程 78）的 must-fix 逐条收口：
+
+- 安全：分片模式下 `code='   '` 不再绕过「该 peerId 已被分享占用」的问询（判据改用 normalize 后的口令）；口令回源失败从「当成没查到」改成三态 + `503 + Retry-After`，不再让 shard 0 抖动把已绑定 peerId 退回无凭证路径。
+- 产品：首帧前的媒体建连失败有独立结论（`'media-failed'`），不再先报「人数已满」；链接是否真的发布过用 `linkPublishedRef` 判定，不再靠 `room !== null`；`call.on('close')` 消费 `'sharer-unavailable'`（删掉只在测试里被引用的死函数）；429 冷却的入口守卫补 e2e。
+- 工程：`ci-wiring.test.ts` 改为 job/step 感知解析，钉住四个 job 的必需 step 与「不得加 `if: false` / `continue-on-error`」；覆盖率政策用 `POLICY_CASES` 钉住真实阈值；`playwright.product.config.ts` 与两个上传 step、8787 空闲断言都被 inventory 测试绑定；新增 `scripts/debt-budget.test.ts`（结构债上限）与 `scripts/docs-current-pointer.test.ts`（「当前」指针不得悬空、历史快照不得被追溯覆盖）；文档补「结构债的解除路径」四阶段表。
+
+状态: 进行中（第十五轮复评 must-fix 已收口，待全量门禁与推送, 2026-11-14）
