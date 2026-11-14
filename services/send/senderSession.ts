@@ -407,6 +407,18 @@ export class SenderSession {
       this.host.setShareRevoked(null);
       this.startCountdown();
     });
+    customPeer.on('signaling:restored', () => {
+      // 自动重连成功后 peerRuntime 只发 'open' 一次，之后靠这个事件通知恢复。
+      // 不监听就会出现「已经连回去、UI 还挂着链接已失效」的假终态：降级位一旦
+      // 写入就是持久的，只能靠一次成功的注册把它清掉。
+      if (!this.isActivityCurrent(token) || this.host.getPeer() !== customPeer) return;
+      this.host.markSignalingOpen();
+      this.host.markConnectionSuccess(signalingCode);
+      this.host.setPhase('waiting');
+      this.host.setConnectionStatus('');
+      this.host.setShareRevoked(null);
+      this.host.notify('信令已恢复，新设备可以继续加入', 'success');
+    });
     customPeer.on('error', (err) => {
       clearSignalingOpenTimeout();
       this.handlePeerError(err, token, customPeer);

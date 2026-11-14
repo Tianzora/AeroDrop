@@ -28,6 +28,19 @@ export const SHARE_SIGNALING_LOST_MESSAGE =
 export const SHARE_EXPIRED_REMAINING_TEXT = '已失效';
 
 /**
+ * 观众侧重连预算用尽后的终态：媒体一直连不上时，必须给一个「已经不再自动重试」的
+ * 明确状态和手动重试入口，不能永远停在「正在重试」。
+ */
+export const VIEWER_RECONNECT_EXHAUSTED_MESSAGE =
+  '连接断开，已达到最大重试次数，请手动重试';
+
+/** 自动重连等待期的文案：把秒数写进同一处，避免组件里各拼一份。 */
+export const describeViewerReconnectWait = (delayMs: number): string => {
+  const seconds = Number.isFinite(delayMs) ? Math.max(1, Math.round(delayMs / 1000)) : 1;
+  return `连接断开，${seconds}秒后尝试重连...`;
+};
+
+/**
  * peerRuntime 的 error.type 到用户可懂文案的唯一映射点。
  *
  * 这里刻意不把技术标识拼进文案：用户看不懂 `peer-unavailable`，而原始错误已经由

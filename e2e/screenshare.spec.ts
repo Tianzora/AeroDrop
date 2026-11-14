@@ -389,4 +389,194 @@ test.describe('screen share', () => {
     await expect(page.locator('a[href*="view="]')).toHaveCount(0);
     await expect(page.getByRole('button', { name: '重新开始共享' })).toBeVisible();
   });
+  // 失败路径：房号到期。分享端以前只在「续期连续失败 3 次」时提示，房号真过期了界面
+  // 还是绿色「正在共享」+ 一条能复制但打不开的链接。这里让登记返回一个已经快过期的
+  // 房号、续期一律 429，再触发一次续期（online 事件），必须立刻切到「链接已失效」。
+  test('an expired share room flips the link and badge to a dead state instead of a green LIVE', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      const nativeFetch = window.fetch.bind(window);
+      const state = window as typeof window & { __shareCodeCalls?: number };
+      state.__shareCodeCalls = 0;
+
+      window.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
+        const rawUrl = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url;
+        const method = (init?.method ?? (input instanceof Request ? input.method : 'GET')).toUpperCase();
+        if (method === 'POST' && new URL(rawUrl, location.href).pathname === '/api/share-code') {
+          state.__shareCodeCalls = (state.__shareCodeCalls ?? 0) + 1;
+          if (state.__shareCodeCalls === 1) {
+            // 房号必须真的登记在服务端，否则信令会因为「未知口令」直接拒绝会话；
+            // 这里只把服务端给的 expiresAt 改短，模拟「TTL 已经被前一轮共享吃光」。
+            const response = await nativeFetch(input as RequestInfo, init);
+            if (!response.ok) return response;
+            const payload = await response.clone().json();
+            return Response.json({ ...payload, expiresAt: Date.now() + 1_200 });
+          }
+          // 续期一律失败：房号已经过期，服务端不会再续。
+          return new Response('', { status: 429, headers: { 'Retry-After': '60' } });
+        }
+        return nativeFetch(input as RequestInfo, init);
+      }) as typeof window.fetch;
+    });
+
+    await page.goto('/');
+    const supported = await page.evaluate(
+      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
+    );
+    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+
+    await page.getByRole('button', { name: '共享' }).click();
+    await page.getByRole('button', { name: '开始共享屏幕' }).click();
+    await expect(page.getByText('正在共享')).toBeVisible({ timeout: 20_000 });
+    await expect(page.locator('a[href*="view="]')).toHaveCount(1);
+
+    // 等房号真的过期（mock 里只剩 1.2s），再触发一次续期——回到前台/网络恢复时分享端
+    // 会立即续期，用它代替 60s 的过期看门狗，同时验证「续期失败 + 已过期」这条分支。
+    await page.waitForTimeout(1_500);
+    await page.evaluate(() => window.dispatchEvent(new Event('online')));
+
+    // 过期之后不能继续宣称「正在共享」，也不能让人复制一条已经无效的链接。
+    await expect(page.getByText('正在共享')).toHaveCount(0, { timeout: 15_000 });
+    await expect(page.getByText('链接已失效', { exact: true })).toBeVisible();
+    await expect(
+      page.getByText('分享链接已失效，需要重新开始共享才能让新观众加入')
+    ).toBeVisible();
+    await expect(page.getByRole('button', { name: '复制分享链接' })).toHaveAttribute(
+      'title',
+      '分享链接已失效'
+    );
+  });
+
+  // 失败路径：停止后立刻再开始，而且上一轮初始化还在飞。旧实现的单飞闸门停完不换新
+  // 对象，新会话的初始化拿到 false 被丢弃，只能等上一轮（或恢复定时器）结束。
+  // 断言用「两条登记请求的先后」而不是固定时间窗：第二次登记必须在上一次还没返回时
+  // 就已经发出去，这样用例既确定，也不会因为机器慢而偶发失败。
+  test('stopping and immediately restarting sharing registers while the previous init is still in flight', async ({
+    page,
+  }) => {
+    await page.goto('/');
+    const supported = await page.evaluate(
+      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
+    );
+    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+
+    const arrivals: number[] = [];
+    let firstResolved = false;
+    let secondBeforeFirst = false;
+    await page.route('**/api/share-code', async (route) => {
+      const index = arrivals.length;
+      arrivals.push(Date.now());
+      // 第一次登记故意慢 7s（小于客户端 8s 超时）：停止时它必然还在飞。
+      if (index === 0) {
+        await new Promise((resolve) => setTimeout(resolve, 7_000));
+        firstResolved = true;
+      } else if (index === 1) {
+        // 关键观察点：第二次登记发出时，第一次是不是还没返回。
+        secondBeforeFirst = !firstResolved;
+      }
+      await route.continue();
+    });
+
+    await page.getByRole('button', { name: '共享' }).click();
+    await page.getByRole('button', { name: '开始共享屏幕' }).click();
+    await expect(page.getByRole('button', { name: '停止共享' })).toBeVisible({ timeout: 20_000 });
+    await expect.poll(() => arrivals.length, { timeout: 20_000 }).toBe(1);
+
+    await page.getByRole('button', { name: '停止共享' }).click();
+    await page.getByRole('button', { name: '开始共享屏幕' }).click();
+
+    await expect.poll(() => arrivals.length, { timeout: 30_000 }).toBeGreaterThanOrEqual(2);
+    expect(secondBeforeFirst).toBe(true);
+    await expect(page.locator('a[href*="view="]')).toHaveCount(1, { timeout: 30_000 });
+    await expect(page.getByText('正在共享')).toBeVisible({ timeout: 30_000 });
+  });
+  // 失败路径：观众侧媒体通道一直连不上（ICE 失败）。以前信令一 open 就把重连计数
+  // 清零，ICE 反复失败时观众永远停在「正在重试」，既看不到终态也没有重试按钮。
+  test('viewer media failures end in a manual-retry terminal state, not an endless retry loop', async ({
+    browser,
+    page,
+  }) => {
+    await page.goto('/');
+    const supported = await page.evaluate(
+      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
+    );
+    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+
+    await startSharing(page);
+    const shareLink = await getShareLink(page);
+
+    const viewerContext = await browser.newContext();
+    const viewer = await viewerContext.newPage();
+    // 观众页：记录下来每一条 RTCPeerConnection。打开开关之后，所有「新建连接」都在
+    // 300ms 内被判定为 failed —— 等价于媒体通道永远接不通（ICE 不收敛）。
+    await viewer.addInitScript(() => {
+      const Native = window.RTCPeerConnection;
+      const state = window as typeof window & {
+        __pcs?: RTCPeerConnection[];
+        __failAllMedia?: boolean;
+        __failCurrentMedia?: () => void;
+      };
+      const list: RTCPeerConnection[] = [];
+      state.__pcs = list;
+      state.__failAllMedia = false;
+
+      const markFailed = (pc: RTCPeerConnection) => {
+        try {
+          Object.defineProperty(pc, 'connectionState', { configurable: true, get: () => 'failed' });
+          pc.dispatchEvent(new Event('connectionstatechange'));
+        } catch {
+          /* 浏览器不允许重定义该属性时，这条注入就只是无效，不应让用例崩掉 */
+        }
+      };
+
+      const Wrapped = function (this: unknown, ...args: unknown[]) {
+        const pc = new Native(...(args as ConstructorParameters<typeof RTCPeerConnection>));
+        list.push(pc);
+        // 开关打开后，新连接从创建那一刻起就是 failed：不能先让它真的连上几毫秒，
+        // 否则 connectionState 会短暂变成 connected，重连预算就被清零（无限重连）。
+        if (state.__failAllMedia) {
+          markFailed(pc);
+        }
+        return pc;
+      } as unknown as typeof RTCPeerConnection;
+      Wrapped.prototype = Native.prototype;
+      window.RTCPeerConnection = Wrapped;
+
+      state.__failCurrentMedia = () => {
+        const current = list[list.length - 1];
+        if (current) markFailed(current);
+      };
+    });
+
+    try {
+      await viewer.goto(shareLink);
+      await dismissAutoplayOverlay(viewer);
+      await waitForViewerFrames(viewer);
+
+      // 先让当前这条媒体连接失败，并让之后每条新连接也失败。
+      await viewer.evaluate(() => {
+        const state = window as typeof window & {
+          __failAllMedia?: boolean;
+          __failCurrentMedia?: () => void;
+        };
+        state.__failAllMedia = true;
+        state.__failCurrentMedia?.();
+      });
+
+      // 先看到「会重连」的提示（不是黑屏静默）。
+      await expect(viewer.getByText(/秒后尝试重连/)).toBeVisible({ timeout: 20_000 });
+
+
+
+      // 重连预算用尽后必须给出终态和手动重试入口。
+      await expect(viewer.getByText('连接断开，已达到最大重试次数，请手动重试')).toBeVisible({
+        timeout: 55_000,
+      });
+      await expect(viewer.getByRole('button', { name: '重试连接' })).toBeVisible();
+    } finally {
+      await viewer.context().close();
+    }
+  });
+
 })

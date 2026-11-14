@@ -649,7 +649,7 @@ test('限流且已有连接在传时不进 error：提示链接失效但保留�
   );
 });
 
-test('信令恢复（open）会清掉降级状态位，不留一条过期提示', async () => {
+test('信令恢复（signaling:restored）会清掉降级状态位，不留一条过期提示', async () => {
   const { host, log, peer, setActiveConnections } = createHost();
   const { deps } = createDeps();
   const session = createSenderSession(host, deps);
@@ -661,7 +661,9 @@ test('信令恢复（open）会清掉降级状态位，不留一条过期提示'
   await Promise.resolve();
   assert.equal(log.connectionStatuses[log.connectionStatuses.length - 1], SHARE_SIGNALING_LOST_MESSAGE);
 
-  peer()?.emit('open');
+  // peerRuntime 的 'open' 只会在首次注册时发一次，自动重连成功走的是
+  // 'signaling:restored'；这里必须用它，重发 'open' 的旧断言掩盖了真实缺口。
+  peer()?.emit('signaling:restored');
   assert.equal(log.connectionStatuses[log.connectionStatuses.length - 1], '');
 });
 
@@ -680,7 +682,7 @@ test('口令被注销后降级位要留下来：作废是持久事实，不能�
   assert.equal(log.shareRevoked.at(-1), SHARE_SIGNALING_LOST_MESSAGE);
   assert.notEqual(log.phase(), 'error', '有在途传输时不能把传输列表撤掉');
 
-  peer()?.emit('open');
+  peer()?.emit('signaling:restored');
   assert.equal(log.shareRevoked.at(-1), null, '信令恢复后必须清掉降级位，否则界面一直说链接失效');
 });
 
