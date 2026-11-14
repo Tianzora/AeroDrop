@@ -276,6 +276,14 @@ const evaluateAllowlistBudget = ({ entries, totalLines, budget }) => {
   }
   const excludedLines = entries.reduce((sum, entry) => sum + entry.lines, 0);
   const share = totalLines > 0 ? excludedLines / totalLines : 0;
+  // totalLines=0 意味着行数这一半被静默废掉了（统计函数返回 0、根路径写错、文件读空）。
+  // 白名单非空时这一定是 bug，不能当成「占比 0%，绿灯」。
+  if (totalLines === 0 && entries.length > 0) {
+    shareFailures.push(
+      `白名单有 ${entries.length} 条，但本 scope 的总行数算出来是 0：占比预算失效，` +
+        '检查 countSourceLines / root 路径，不要把这个状态下当成通过'
+    );
+  }
   if (totalLines > 0 && share > budget.maxExcludedLineShare) {
     shareFailures.push(
       `白名单把 ${excludedLines}/${totalLines} 行（${(share * 100).toFixed(2)}%）整块挪出了分母，` +
@@ -324,10 +332,15 @@ const inspect = ({ expected, rows, allowedUncovered, untrackedFiles = new Set() 
     .filter((entry) => entry.files.length === 1 && entry.row.linePercent === 0)
     .map((entry) => entry.files[0])
     .filter((file) => !allowedUncovered.has(file));
+  // 白名单条目必须属于本 scope：范围外的条目既不会被预算统计，又会把
+  // `minimumReported` 悄悄降一格 —— 等于凭空给自己发一张免检券。
+  const strayAllowed = [...allowedUncovered.keys()].filter((file) => !expected.includes(file));
+
   return {
     rows,
     rowCount: rows.length,
-    minimumReported: expected.length - allowedUncovered.size,
+    minimumReported: expected.filter((file) => !allowedUncovered.has(file)).length,
+    strayAllowed,
     missingAll,
     allowedMissing,
     missing,
@@ -364,6 +377,15 @@ const describeFailures = (state) => {
         state.unmatched.map((name) => `  - ${name}`).join(NEWLINE) +
         NEWLINE +
         '把它们加进该 scope 的 coverageExclude，或确认它们本来就该由另一个 scope 统计。'
+    );
+  }
+  if (state.strayAllowed.length > 0) {
+    failures.push(
+      '以下白名单条目不属于本 scope（它既不在预算里，又会让「报告行数下限」凭空减少）：' +
+        NEWLINE +
+        state.strayAllowed.map((file) => `  - ${file}`).join(NEWLINE) +
+        NEWLINE +
+        '把条目移到它真正的 scope，或删掉。'
     );
   }
   if (state.zeroLine.length > 0) {
@@ -579,6 +601,16 @@ const SELF_TEST_CASES = [
     allowedUncovered: new Map([['services/b/Foo.tsx', 'self-test']]),
     wantFailure: '同名遮蔽',
   },
+  {
+    name: '白名单条目属于别的 scope 必须失败',
+    report: [
+      'ℹ all files               |  90.00 |    90.00 |   90.00 |',
+      'ℹ services/a/Foo.tsx      |  90.00 |    90.00 |   90.00 |',
+    ].join(NEWLINE),
+    expected: ['services/a/Foo.tsx'],
+    allowedUncovered: new Map([['components/Other.tsx', 'self-test']]),
+    wantFailure: '不属于本 scope',
+  },
 ];
 
 // 白名单预算的 fixture：合成数据，只验证规则本身（条目数上限 / 行数占比上限）。
@@ -603,6 +635,13 @@ const BUDGET_CASES = [
     totalLines: 1000,
     limit: { maxEntries: 3, maxExcludedLineShare: 0.7 },
     wantFailure: '超过上限 70%',
+  },
+  {
+    name: '总行数算成 0 时占比预算必须失败，不能当成 0% 通过',
+    entries: [{ lines: 10 }],
+    totalLines: 0,
+    limit: { maxEntries: 3, maxExcludedLineShare: 0.8 },
+    wantFailure: '总行数算出来是 0',
   },
   {
     name: '条目上限配置坏掉，必须失败',
@@ -734,6 +773,21 @@ const runSelfTest = () => {
         `check-coverage-scope: 注意 [${scopeName}] ${formatAllowlistBudget(budgetReport, scope.allowlistBudget)} —— 该 scope 运行时判定会因此失败`
       );
     }
+  }
+
+  // 理由审计用的是真实 knownPaths：合成 fixture 只能证明规则本身，证明不了
+  // `listKnownPaths()` 取到的是真 git 清单（旧实现按 basename 会漏掉 *.test.ts）。
+  if (!knownPaths.has('scripts/check-coverage-scope.test.ts')) {
+    failures.push('真实 knownPaths 里没有 scripts/check-coverage-scope.test.ts：listKnownPaths 取值不对');
+  }
+  const realReasonProblems = auditAllowlistReason({
+    reason: '算法本体在 scripts/check-coverage-scope.test.ts 里覆盖，这里只是入口',
+    knownPaths,
+  });
+  if (realReasonProblems.length > 0) {
+    failures.push(
+      `引用真实存在的测试文件仍被判无效（knownPaths 取值坏了）：${realReasonProblems.join('；')}`
+    );
   }
 
   for (const testCase of BUDGET_CASES) {
