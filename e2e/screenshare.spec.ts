@@ -19,7 +19,9 @@ import { expect, test, type Browser, type Page } from '@playwright/test';
  * skip 并打印原因，不会静默通过。
  */
 
-const FRAME_TIMEOUT_MS = 30_000;
+// 30s 在「全量套件 + 生产环境 + 代理网络」下会偶发超时（单跑必过），45s 只是吸收抖动，
+// 真正的失败仍由后续帧数持续增长断言判定。
+const FRAME_TIMEOUT_MS = 45_000;
 
 type VideoSample = {
   count: number;
@@ -111,7 +113,7 @@ const openViewer = async (browser: Browser, shareLink: string): Promise<Page> =>
  * 存在的函数，但「没有可采集的桌面」只会在调用时抛错。只有真抓到一帧才算支持。
  *
  * 本机开发者没有显示服务时允许 skip（否则本地/无头环境寸步难行）；但 CI 里
- * fake-capture flag（playwright.product.config.ts）一旦回归，9 条用例会整组 skip
+ * fake-capture flag（playwright.product.config.ts）一旦回归，10 条用例会整组 skip
  * 而 job 依旧全绿——所以 CI 下把探测结果当断言，必须为 true。
  */
 const ensureDisplayCapture = async (page: Page): Promise<void> => {
@@ -302,11 +304,12 @@ test.describe('screen share', () => {
     await page.getByRole('button', { name: '开始共享屏幕' }).click();
 
     const terminalCard = page.getByRole('main');
-    await expect(terminalCard.getByText('共享已中断')).toBeVisible({ timeout: 25_000 });
+    // 登记就失败了，从没生成过链接：标题必须是「未能开始共享」，不能声称旧链接失效。
+    await expect(terminalCard.getByText('未能开始共享')).toBeVisible({ timeout: 25_000 });
     await expect(terminalCard.getByText('创建共享房间过于频繁，请稍后再试')).toBeVisible();
     await expect(page.getByText('正在共享')).toHaveCount(0);
     await expect(page.locator('a[href*="view="]')).toHaveCount(0);
-    await expect(terminalCard.getByText('此前分享的链接已失效，观众无法再加入。')).toBeVisible();
+    await expect(terminalCard.getByText('此前分享的链接已失效，观众无法再加入。')).toHaveCount(0);
 
     // 终态不能靠连打接口熬过去：命中限流后只登记过一次。
     expect(await page.evaluate(() => (window as typeof window & { __shareCodeAttempts?: number }).__shareCodeAttempts)).toBe(1);
@@ -390,8 +393,9 @@ test.describe('screen share', () => {
     await page.getByRole('button', { name: '共享' }).click();
     await page.getByRole('button', { name: '开始共享屏幕' }).click();
 
-    // 第一次 8s 超时 → 退避重试 1s → 第二次 8s 超时 → 终态，约 17s 落地。
-    await expect(page.getByText('共享已中断')).toBeVisible({ timeout: 25_000 });
+    // 第一次 8s 超时 → 退避重试 1s → 第二次 8s 超时 → 终态，约 17s 落地；全程没拿到房号，
+    // 所以是「未能开始共享」，不是「共享已中断」。
+    await expect(page.getByText('未能开始共享')).toBeVisible({ timeout: 25_000 });
     await expect(
       page.getByRole('main').getByText('共享服务长时间无响应，请检查网络后重新开始共享')
     ).toBeVisible();

@@ -34,7 +34,8 @@ interface ScreenShareUIProps {
   shareRoomExpired: boolean;
   /** 是否曾经连上过信令：区分「首连中」与「连上又断」，文案不同。 */
   hasBeenReady: boolean;
-  sharerFailure: { reason: 'signaling_failed'; message: string } | null;
+  /** hadShareLink=false：这次共享从来没生成过链接（房号登记被拒/超时），不能说「链接已失效」。 */
+  sharerFailure: { reason: 'signaling_failed'; message: string; hadShareLink: boolean } | null;
   dismissSharerFailure: () => void;
   /** 限流冷却剩余秒数；null = 没有冷却。有值时不能重新登记房号，按钮要禁用并显示倒计时。 */
   shareRoomRetrySeconds: number | null;
@@ -505,11 +506,17 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                   <div className="flex items-start gap-3">
                     <AlertTriangle size={20} className="mt-0.5 shrink-0 text-red-500" />
                     <div className="min-w-0">
-                      <p className="text-sm font-semibold text-red-700 dark:text-red-300">共享已中断</p>
-                      <p className="mt-1 break-words text-sm text-red-700/90 dark:text-red-300/90">{sharerFailure.message}</p>
-                      <p className="mt-1 text-xs text-red-600/80 dark:text-red-400/80">
-                        此前分享的链接已失效，观众无法再加入。
+                      <p className="text-sm font-semibold text-red-700 dark:text-red-300">
+                        {sharerFailure.hadShareLink ? '共享已中断' : '未能开始共享'}
                       </p>
+                      <p className="mt-1 break-words text-sm text-red-700/90 dark:text-red-300/90">{sharerFailure.message}</p>
+                      {/* 没有链接时不能说「此前分享的链接已失效」：那句话会让人以为刚发出去的
+                          链接死了，而实际上观众从来没拿到过链接。 */}
+                      {sharerFailure.hadShareLink && (
+                        <p className="mt-1 text-xs text-red-600/80 dark:text-red-400/80">
+                          此前分享的链接已失效，观众无法再加入。
+                        </p>
+                      )}
                     </div>
                   </div>
                 </div>

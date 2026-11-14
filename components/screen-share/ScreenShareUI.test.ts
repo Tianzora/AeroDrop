@@ -105,6 +105,7 @@ test('信令终态：展示中断说明并提示旧链接已失效', () => {
     sharerFailure: {
       reason: 'signaling_failed',
       message: '无法连接信令服务器，请检查网络后重试',
+      hadShareLink: true,
     },
   });
 
@@ -114,6 +115,24 @@ test('信令终态：展示中断说明并提示旧链接已失效', () => {
   assert.match(markup, /重新开始共享/);
   assert.doesNotMatch(markup, /正在共享/);
   assert.doesNotMatch(markup, /复制分享链接/);
+});
+
+test('房号登记就失败（从来没有链接）：说「未能开始共享」，不许断言旧链接已失效', () => {
+  // 复现产品评审 B：首次开始共享时房号登记 429/连续超时，shareRoom 仍是 null，
+  // 从未生成链接。旧实现硬编码「共享已中断 + 此前分享的链接已失效」，三句话互相矛盾。
+  const markup = render({
+    sharerFailure: {
+      reason: 'signaling_failed',
+      message: '创建共享房间过于频繁，请稍后再试',
+      hadShareLink: false,
+    },
+  });
+
+  assert.match(markup, /未能开始共享/);
+  assert.match(markup, /创建共享房间过于频繁，请稍后再试/);
+  assert.doesNotMatch(markup, /共享已中断/);
+  assert.doesNotMatch(markup, /此前分享的链接已失效/);
+  assert.match(markup, /重新开始共享/);
 });
 
 test('容量：给出建议人数，超过建议值给出降画质提示', () => {
@@ -178,6 +197,7 @@ test('信令终态只留终态卡里的「重新开始共享」，不再重复�
     sharerFailure: {
       reason: 'signaling_failed',
       message: '无法连接信令服务器，请检查网络后重试',
+      hadShareLink: true,
     },
   });
 
@@ -231,7 +251,7 @@ test('房号过期：链接卡里直接给一颗重建房号的按钮，而不�
 test('重建耗尽 / 首连看门狗超时：终态卡用的是真实文案，且都带「重新开始共享」', () => {
   // 这两条路径以前没有任何自动化覆盖：分享端只会永久停在「正在连接服务器」。
   const exhausted = render({
-    sharerFailure: { reason: 'signaling_failed', message: SHARER_RECONNECT_EXHAUSTED_MESSAGE },
+    sharerFailure: { reason: 'signaling_failed', message: SHARER_RECONNECT_EXHAUSTED_MESSAGE, hadShareLink: true },
   });
   assert.match(exhausted, /信令连接持续失败，请刷新页面后重新开始共享/);
   assert.match(exhausted, /共享已中断/);
@@ -239,7 +259,7 @@ test('重建耗尽 / 首连看门狗超时：终态卡用的是真实文案，�
   assert.match(exhausted, /此前分享的链接已失效/);
 
   const watchdog = render({
-    sharerFailure: { reason: 'signaling_failed', message: SIGNALING_UNREACHABLE_MESSAGE },
+    sharerFailure: { reason: 'signaling_failed', message: SIGNALING_UNREACHABLE_MESSAGE, hadShareLink: true },
   });
   assert.match(watchdog, /无法连接信令服务器，请检查网络后重试/);
   assert.match(watchdog, /重新开始共享/);
@@ -247,7 +267,7 @@ test('重建耗尽 / 首连看门狗超时：终态卡用的是真实文案，�
 
 test('限流冷却期内：显示服务端给的剩余秒数，并禁用「重新开始共享」', () => {
   const markup = render({
-    sharerFailure: { reason: 'signaling_failed', message: '创建共享房间过于频繁，请稍后再试' },
+    sharerFailure: { reason: 'signaling_failed', message: '创建共享房间过于频繁，请稍后再试', hadShareLink: true },
     shareRoomRetrySeconds: 27,
   });
 
@@ -258,7 +278,7 @@ test('限流冷却期内：显示服务端给的剩余秒数，并禁用「重�
 
 test('冷却结束后「重新开始共享」恢复可点，倒计时也从界面上消失', () => {
   const markup = render({
-    sharerFailure: { reason: 'signaling_failed', message: '无法连接信令服务器，请检查网络后重试' },
+    sharerFailure: { reason: 'signaling_failed', message: '无法连接信令服务器，请检查网络后重试', hadShareLink: true },
     shareRoomRetrySeconds: null,
   });
 
@@ -417,7 +437,7 @@ test('观众错误 + 重试块的红条同样是 assertive', () => {
 
 test('分享终态卡是 assertive 的 live region：分享已经停了，必须立刻播报', () => {
   const markup = render({
-    sharerFailure: { reason: 'signaling_failed', message: SIGNALING_UNREACHABLE_MESSAGE },
+    sharerFailure: { reason: 'signaling_failed', message: SIGNALING_UNREACHABLE_MESSAGE, hadShareLink: true },
   });
 
   assert.match(markup, /共享已中断/);
@@ -446,7 +466,7 @@ const elementHtmlAt = (markup: string, attrAt: number): string => {
 
 test('没有冷却时不会渲染出 undefined 秒后可重试', () => {
   const markup = render({
-    sharerFailure: { reason: 'signaling_failed', message: SIGNALING_UNREACHABLE_MESSAGE },
+    sharerFailure: { reason: 'signaling_failed', message: SIGNALING_UNREACHABLE_MESSAGE, hadShareLink: true },
   });
 
   assert.doesNotMatch(markup, /undefined 秒后可重试/);
@@ -455,7 +475,7 @@ test('没有冷却时不会渲染出 undefined 秒后可重试', () => {
 
 test('终态卡的冷却倒计时不在 live region 里：每秒变一次，进去会整卡重播', () => {
   const markup = render({
-    sharerFailure: { reason: 'signaling_failed', message: SIGNALING_UNREACHABLE_MESSAGE },
+    sharerFailure: { reason: 'signaling_failed', message: SIGNALING_UNREACHABLE_MESSAGE, hadShareLink: true },
     shareRoomRetrySeconds: 60,
   });
 

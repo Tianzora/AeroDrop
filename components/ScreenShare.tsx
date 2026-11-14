@@ -172,6 +172,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const [sharerFailure, setSharerFailure] = useState<{
     reason: 'signaling_failed';
     message: string;
+    /**
+     * 终止时是否已经有过可分享的链接。房号登记 429/连续超时的终态从来没生成过链接，
+     * 再写「此前分享的链接已失效」就是自相矛盾的三句话（用户会以为刚刚发出去的链接死了）。
+     */
+    hadShareLink: boolean;
   } | null>(null);
   // 已登记到服务端的房号（peerId + 口令 + secret）。同一分享内的所有重建复用它。
   const [shareRoom, setShareRoom] = useState<ScreenShareRoom | null>(null);
@@ -1393,7 +1398,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     setPeerId(null);
     setCopied(false);
     setError(null);
-    setSharerFailure({ reason: 'signaling_failed', message });
+    setSharerFailure({ reason: 'signaling_failed', message, hadShareLink: room !== null });
     onNotification(message, 'error');
   }, [broadcastShareEnded, onNotification, stopBandwidthMonitoring]);
 
@@ -1857,7 +1862,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       setIsViewing(false);
       setIsConnecting(false);
       setError(getSuspectedShareFullMessage(SCREEN_SHARE_LIMITS.MAX_VIEWERS));
-      onNotification('分享人数已满，请稍后再试', 'info');
+      // 这条是推断出来的（告知丢包），不能像确定拒绝那样用肯定语气。
+      onNotification('可能人数已满，请稍后再试', 'info');
     };
 
     const reportViewerRateLimited = (retryAfterMs: number) => {
@@ -2135,6 +2141,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
         // 同样是「call 结束」，含义可能完全不同：共享方结束、自己取消、满员被拒、
         // 或者真的断链。判定收在纯函数里，测试能证明满员不会被误报成网络故障。
+        // 分享者不在线（peer-unavailable/invalid-id/unauthorized）由 peer 级错误分类，
+        // 这里不重复判断：那条路径会给出有限重试或「分享暂时不可用」终态。
         const outcome = planViewerCallEndOutcome({
           manualStop: isManualStopRef.current,
           shareEnded: remoteShareEndedRef.current,
@@ -2194,6 +2202,15 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           return;
         }
 
+        // 分享者不在线类错误（死链、重建窗口、首帧前 ICE 失败）不能走「疑似满员」：
+        // 名额满不满此时无从判断，先弹满员通知会把用户引到「等别人退出」这个错误行动上。
+        // 交给 peer 级错误分类（有限重试 → 「分享暂时不可用」终态）。
+        const errorType = (err as { type?: string } | null)?.type;
+        const sharerUnavailable =
+          errorType === 'peer-unavailable' ||
+          errorType === 'invalid-id' ||
+          errorType === 'unauthorized';
+
         const outcome = planViewerCallEndOutcome({
           manualStop: isManualStopRef.current,
           shareEnded: remoteShareEndedRef.current,
@@ -2201,7 +2218,13 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
           receivedStream: hasReceivedStream,
           dataChannelOpened,
           rateLimited: viewerRateLimitedRef.current,
+          sharerUnavailable,
         });
+
+        if (outcome === 'sharer-unavailable') {
+          // peer.on('error') 已经在同一次信令错误上跑过分类：这里只保证不落满员文案。
+          return;
+        }
 
         if (outcome === 'share-ended') {
           handleRemoteShareEnded('共享方已结束共享');

@@ -27,6 +27,14 @@ export interface ViewerCallEndInput {
   dataChannelOpened: boolean;
   /** 结束前收到过信令层的限流拒绝：连接压根没建起来，和「名额满了」是两回事。 */
   rateLimited?: boolean;
+  /**
+   * 这次 call 的结束跟着一条「分享者不在线」类的信令错误（peer-unavailable / invalid-id /
+   * unauthorized）。死链、分享端重建 Peer 的几秒窗口、首帧前的 ICE 失败都会走这条路。
+   *
+   * 必须与「疑似满员」分开：分享者根本不在时名额是不是满的完全无关，报「人数已满」
+   * 会让用户以为要等别人退出，而实际上等多久都进不去（或者马上就恢复）。
+   */
+  sharerUnavailable?: boolean;
 }
 
 export type ViewerCallEndOutcome =
@@ -34,6 +42,7 @@ export type ViewerCallEndOutcome =
   | 'share-full'
   | 'manual-stop'
   | 'rate-limited'
+  | 'sharer-unavailable'
   | 'suspected-share-full'
   | 'reconnect';
 
@@ -44,6 +53,7 @@ export const planViewerCallEndOutcome = ({
   receivedStream,
   dataChannelOpened,
   rateLimited = false,
+  sharerUnavailable = false,
 }: ViewerCallEndInput): ViewerCallEndOutcome => {
   // 共享方主动结束优先：它同时会关 call，别把「结束」当成断链去重连。
   if (shareEnded) return 'share-ended';
@@ -51,6 +61,9 @@ export const planViewerCallEndOutcome = ({
   if (manualStop) return 'manual-stop';
   // 限流优先于满员推断：等窗口过去就能连上，跟「名额满了」是相反的行动。
   if (rateLimited && !receivedStream) return 'rate-limited';
+  // 分享者不在线也优先于满员推断：死链/重建窗口/首帧前 ICE 失败时，名额满不满无从谈起，
+  // 报「人数已满」会把用户引到「等别人退出」这个永远不成立的行动上。
+  if (sharerUnavailable && !receivedStream) return 'sharer-unavailable';
   if (!receivedStream && !dataChannelOpened) return 'suspected-share-full';
   return 'reconnect';
 };

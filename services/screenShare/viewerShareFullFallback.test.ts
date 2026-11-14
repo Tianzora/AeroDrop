@@ -37,6 +37,28 @@ test('没收到画面且数据通道从未打开：判为疑似满员，而不�
   );
 });
 
+test('分享者不在线（死链/重建窗口）不能报成「人数已满」', () => {
+  // 反证点：把 sharerUnavailable 分支删掉，这条会掉到 'suspected-share-full'——
+  // 观众先看到确定语气的「分享人数已满」，3 秒后才被 peer 级错误改成「分享者暂时不在线」。
+  // 拿不准是满员还是分享者不在时，宁可交给 peer 级分类，也不要先吓一次人。
+  assert.equal(
+    planViewerCallEndOutcome({
+      ...base,
+      receivedStream: false,
+      dataChannelOpened: false,
+      sharerUnavailable: true,
+    }),
+    'sharer-unavailable',
+  );
+});
+
+test('已经收到过画面时，分享者不在线仍按断链重连处理', () => {
+  assert.equal(
+    planViewerCallEndOutcome({ ...base, receivedStream: true, sharerUnavailable: true }),
+    'reconnect',
+  );
+});
+
 test('收到过画面再断：照旧走重连', () => {
   assert.equal(planViewerCallEndOutcome({ ...base, receivedStream: true }), 'reconnect');
 });
