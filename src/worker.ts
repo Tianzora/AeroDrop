@@ -1085,6 +1085,21 @@ export class SignalingHub extends DurableObject<Env> {
     // 单例模式完全走原来的内存计数，行为不变。
     let sessionSlotId: string | undefined;
     let seatAcquired = false;
+    // transfer 分支的两种落空：旧 socket 在 await 期间自己断开（席位已被 release），
+    // 或补领席位失败。前者要补领，后者必须在注册落定前拒绝——否则这条连接不计数，
+    // 每出口 IP 的上限被悄悄放宽。
+    let seatTransferLost = false;
+    const respondRateLimited = (): Response => {
+      server.send(
+        JSON.stringify({
+          type: 'error',
+          code: 'rate-limited',
+          message: 'Too many signaling sessions',
+        } satisfies SignalingEnvelope)
+      );
+      server.close(4029, 'Too many sessions');
+      return new Response(null, { status: 101, webSocket: client });
+    };
     // 被拒的连接没有归属的 socket 状态可回收：名额必须在这里还回去，否则一次失败的重连
     // 会永久吃掉一个全局名额（回收只发生在 socket 关闭事件里）。
     const rollbackQuota = async (): Promise<void> => {
@@ -1160,6 +1175,18 @@ export class SignalingHub extends DurableObject<Env> {
         }
         if (ownsExistingClient && existingClientKey !== clientKey) {
           this.sessionLimiter.release(existingClientKey);
+        }
+        // 同 IP 接管的席位原先记在旧 socket 上。旧 socket 若在这一轮 await 期间已经
+        // unregisterSocket（它会 release 一次），转移就落空了：新连接现在没有席位，
+        // 必须补领。补领成功则席位归新连接，后续失败路径才释放得回去。
+        if (seatPlan.kind === 'transfer') {
+          if (ownsExistingClient) {
+            seatAcquired = true;
+          } else if (this.sessionLimiter.tryAcquire(clientKey)) {
+            seatAcquired = true;
+          } else {
+            seatTransferLost = true;
+          }
         }
         try {
           existing.send(
@@ -1252,21 +1279,16 @@ export class SignalingHub extends DurableObject<Env> {
           });
         }
       },
-      sendRateLimited: () => {
-        server.send(
-          JSON.stringify({
-            type: 'error',
-            code: 'rate-limited',
-            message: 'Too many signaling sessions',
-          } satisfies SignalingEnvelope)
-        );
-        server.close(4029, 'Too many sessions');
-        return new Response(null, { status: 101, webSocket: client });
-      },
+      sendRateLimited: respondRateLimited,
     });
-    return execution.kind === 'respond'
-      ? execution.response
-      : new Response(null, { status: 101, webSocket: client });
+    if (execution.kind === 'respond') return execution.response;
+    // 席位补领失败：动作序列已经跑完（旧 socket 已驱逐），但这条连接不该被计入
+    // 已注册。先回滚名额，再按限流终态拒绝，避免出现「注册成功却不计数」的漂移。
+    if (seatTransferLost) {
+      await rollbackQuota();
+      return respondRateLimited();
+    }
+    return new Response(null, { status: 101, webSocket: client });
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {

@@ -45,8 +45,13 @@ class FakeSocket {
     // Workers 只允许向 acceptWebSocket 认领过的 socket 发帧。替身照此拒绝，
     // 「先 send 后 accept」的顺序回归才会变红而不是静默通过。
     if (!this.accepted) throw new Error('FakeSocket.send called before acceptWebSocket');
+    // 测试钩子：模拟 registered 帧投递失败（客户端在 accept 后立刻断开）。
+    if (FakeSocket.failSend?.(data)) throw new Error('FakeSocket.send failed (test hook)');
     this.sent.push({ data });
   }
+
+  /** 返回 true 的帧按发送失败处理；用完必须置回 null。 */
+  static failSend: ((data: string) => boolean) | null = null;
 
   close(code: number, reason = ''): void {
     if (this.readyState === 3) return;
@@ -1088,5 +1093,107 @@ test('webSocketError：单独的错误路径也回收会话与席位，且不误
     serverOf(reopened.webSocket).lastMessage()?.type,
     'registered',
     'webSocketError 必须释放席位，否则同 IP 会被自己的死连接 4029'
+  );
+});
+
+test('同 IP 接管时旧 socket 在名额 RPC 期间断开：席位要补领，上限不会被放宽', async () => {
+  // 复现安全评审：席位「转移」判定用的是 reserve 之前的 existingClientKey。旧 socket
+  // 若在 RPC 期间 close（unregisterSocket 已 release 一次），transfer 分支既不 acquire
+  // 也不 release —— 新连接上线却不计数，每出口 IP 的上限被悄悄放宽。
+  const ip = '203.0.113.81';
+  const holder: { current: Awaited<ReturnType<typeof createHub>> | null } = { current: null };
+  let pauseNextReserve = false;
+  let resumeReserve: (() => void) | null = null;
+
+  const created = await createHub({
+    maxSessions: '1',
+    shardCount: '2',
+    shardName: 'signaling-shard-1',
+    signalingHub: {
+      respond: async (call) => {
+        const body = call.body as { action?: string; lookups?: unknown[] } | null;
+        if (call.url.endsWith('/internal/lookup-share-codes')) {
+          const count = Array.isArray(body?.lookups) ? body.lookups.length : 0;
+          return { status: 200, body: { records: Array.from({ length: count }, () => null) } };
+        }
+        if (call.url.endsWith('/internal/session-binding')) {
+          return { status: 200, body: { allowed: true } };
+        }
+        if (body?.action === 'reserve') {
+          if (pauseNextReserve) {
+            pauseNextReserve = false;
+            await new Promise<void>((resolve) => {
+              resumeReserve = resolve;
+            });
+          }
+          // 全局槽位一律放行：这一条只验证 Do 内存里的每出口 IP 席位计数。
+          return { status: 200, body: { granted: true } };
+        }
+        return { status: 200, body: { released: true } };
+      },
+    },
+  });
+  holder.current = created;
+
+  const peer = 'AERO-SEATDRIFT1';
+  const target = serverOf((await upgrade(created.hub, `peerId=${peer}`, ip)).webSocket);
+  assert.equal(target.lastMessage()?.type, 'registered');
+
+  pauseNextReserve = true;
+  const takeover = upgrade(created.hub, `peerId=${peer}`, ip);
+  for (let waited = 0; resumeReserve === null; waited += 1) {
+    if (waited > 400) throw new Error('reserve RPC 没有被挂住，用例前提不成立');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  // 旧 socket 在 RPC 期间断开：它自己的 close 已经把唯一席位还回去了。
+  created.hub.webSocketClose(target as never);
+  await created.settle();
+  (resumeReserve as unknown as () => void)();
+
+  const accepted = await takeover;
+  assert.equal(
+    serverOf(accepted.webSocket).lastMessage()?.type,
+    'registered',
+    '旧 socket 断开不该让接管失败'
+  );
+  await created.settle();
+
+  // 新连接现在必须占着那个唯一席位：同 IP 再来一条必须被拒。
+  const overflow = await upgrade(created.hub, 'peerId=AERO-SEATDRIFT2', ip);
+  assert.equal(
+    serverOf(overflow.webSocket).lastMessage()?.code,
+    'rate-limited',
+    '若 transfer 落空后没有补领席位，这条会被错误放行'
+  );
+});
+
+test('同 IP 接管投递 registered 失败：席位随回滚释放，不会永久吃掉一个名额', async () => {
+  // 复现安全评审：transfer 分支下旧 socket 已从 clientBySocket 摘除，回滚时若不认得
+  // 「席位已经转给新连接」，release 就不会发生 —— 反复失败的接管能把该 IP 的名额耗光。
+  const ip = '203.0.113.91';
+  const { hub, settle } = await createHub({ maxSessions: '1' });
+  const peer = 'AERO-SENDFAIL1';
+  const target = serverOf((await upgrade(hub, `peerId=${peer}`, ip)).webSocket);
+  assert.equal(target.lastMessage()?.type, 'registered');
+
+  FakeSocket.failSend = (data) => data.includes('"type":"registered"');
+  try {
+    const takeover = await upgrade(hub, `peerId=${peer}`, ip);
+    const next = serverOf(takeover.webSocket);
+    assert.equal(
+      next.messages().some((message) => message.type === 'registered'),
+      false,
+      '帧没发出去就不能算注册成功'
+    );
+  } finally {
+    FakeSocket.failSend = null;
+  }
+  await settle();
+
+  const fresh = serverOf((await upgrade(hub, 'peerId=AERO-SENDFAIL2', ip)).webSocket);
+  assert.equal(
+    fresh.lastMessage()?.type,
+    'registered',
+    '回滚必须释放 transfer 来的席位，否则该 IP 的名额被永久吃掉'
   );
 });
