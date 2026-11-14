@@ -351,6 +351,17 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     [viewerRetryAt, retryCooldownTick],
   );
 
+  // 冷却到点就把截止时间清掉：否则 ticker 会为两个永远非 null 的 state 每秒重渲染
+  // 这个 2800 行的组件，直到用户再点一次「开始共享」。
+  useEffect(() => {
+    if (shareRoomRetryAt !== null && describeRetryCooldown(shareRoomRetryAt, Date.now()).canRetry) {
+      setShareRoomRetryAt(null);
+    }
+    if (viewerRetryAt !== null && describeRetryCooldown(viewerRetryAt, Date.now()).canRetry) {
+      setViewerRetryAt(null);
+    }
+  }, [shareRoomRetryAt, viewerRetryAt, retryCooldownTick]);
+
   const browserProfile = useMemo(
     () =>
       getScreenShareBrowserProfile({
@@ -1351,7 +1362,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     setShareRoomExpired(false);
 
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
+      // 统一走 releaseCapturedStream：先摘 onended 再停轨。裸 stop() 现在不触发 ended，
+      // 但哪天有人改成「stop + ended」就会打回 stopScreenShare，把终态再跑一遍。
+      releaseCapturedStream(streamRef.current);
       streamRef.current = null;
     }
 
@@ -1742,12 +1755,13 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       remoteShareEndedRef.current = false;
       remoteShareEndHandledRef.current = false;
       remoteShareFullRef.current = false;
+      // 有限重试的预算只在「用户自己发起新连接」时重置：放在 isRetry 之外会让 3 秒
+      // 自动重试每次清零计数，peer-unavailable 永远停在重试态，永不进终态。
+      shareUnavailableAttemptsRef.current = 0;
     }
     // 新的一次建连：上一次的限流结论不再适用（冷却结束后才允许点重试）。
     viewerRateLimitedRef.current = false;
     setViewerRetryAt(null);
-    // 有限重试的预算按「一次观众连接」计：用户重新打开链接就重新给一次机会。
-    shareUnavailableAttemptsRef.current = 0;
 
     if (peerRef.current) {
       peerRef.current.destroy();
@@ -2447,7 +2461,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       viewerHeartbeatsRef.current = {};
 
       if (streamRef.current) {
-        streamRef.current.getTracks().forEach(track => track.stop());
+        releaseCapturedStream(streamRef.current);
       }
 
       activeCallsRef.current.forEach(call => call.close());
@@ -2709,7 +2723,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     setShareRoomRetryAt(null);
 
     if (streamRef.current) {
-      streamRef.current.getTracks().forEach((track) => track.stop());
+      // 同 failSharerSession：停轨统一走 helper，别在这里留一份裸 stop()。
+      releaseCapturedStream(streamRef.current);
       streamRef.current = null;
     }
 

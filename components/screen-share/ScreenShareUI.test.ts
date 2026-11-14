@@ -392,3 +392,34 @@ test('分享状态变化会被读屏播报：徽标区是 role=status 的实时�
   assert.match(markup, /role="status"/);
   assert.match(markup, /aria-live="polite"/);
 });
+
+test('观众「正在连接」是 polite 的 live region：读屏能听到还在连', () => {
+  const markup = render({ isConnecting: true, targetSharerId: 'sharer-1' });
+
+  assert.match(markup, /正在连接/);
+  // 过程信息用 polite：不该打断用户正在听的内容。
+  assert.match(markup, /role="status"[^>]*aria-live="polite"/);
+});
+
+test('通用错误红条是 assertive 的 live region：做不了事要立刻念出来', () => {
+  const markup = render({ error: '无法获取屏幕采集权限，请重试' });
+
+  assert.match(markup, /无法获取屏幕采集权限/);
+  assert.match(markup, /role="alert"[^>]*aria-live="assertive"/);
+});
+
+test('观众错误 + 重试块的红条同样是 assertive', () => {
+  const markup = render({ error: '找不到该分享者', targetSharerId: 'sharer-1' });
+
+  assert.match(markup, /找不到该分享者/);
+  assert.match(markup, /role="alert"[^>]*aria-live="assertive"/);
+});
+
+test('分享终态卡是 assertive 的 live region：分享已经停了，必须立刻播报', () => {
+  const markup = render({
+    sharerFailure: { reason: 'signaling_failed', message: SIGNALING_UNREACHABLE_MESSAGE },
+  });
+
+  assert.match(markup, /共享已中断/);
+  assert.match(markup, /role="alert"[^>]*aria-live="assertive"/);
+});

@@ -15,6 +15,7 @@ import {
   type Mode,
 } from './services/initialRouteState';
 import { shouldEnqueueNotification } from './services/notificationPolicy';
+import { TOASTER_PROPS } from './components/toasterProps';
 import { appendNetworkProfileQuery, getBrowserNetworkProfile } from './services/networkProfile';
 import { writeScreenShareViewSession } from './services/screenShareViewerSession';
 import { MODE_ORDER, resolveSwipeTarget, SwipeTracker } from './services/swipeNavigation';
@@ -517,14 +518,7 @@ const App: React.FC = () => {
       )}
 
       {/* sonner：官方 toast 组件，自带图标、堆叠、滑动手势与深浅色主题；固定底部避免遮挡顶部导航 */}
-      <Toaster
-        position="bottom-center"
-        theme="system"
-        duration={4000}
-        offset={16}
-        mobileOffset={16}
-        toastOptions={{ className: 'font-sans', style: { fontSize: '14px' } }}
-      />
+      <Toaster {...TOASTER_PROPS} />
 
             {/* 顶部留出 env(safe-area-inset-top)：PWA/刘海屏下让 header 自己的底色铺到状态栏后面（沉浸），
           而不是让状态栏区域露出页面底色。 */}

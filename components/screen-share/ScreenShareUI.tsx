@@ -280,7 +280,13 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
         )}
 
         {error && !(targetSharerId && !isConnecting && !isViewing && !isSharing) && (
-          <div className="mb-6 p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-card flex items-start gap-3">
+          /* 阻断性错误（采集失败、信令拒绝、超时）要立刻念出来：这是「现在做不了事」，
+             不是「稍后会好」的过程信息，所以用 assertive 而不是 polite。 */
+          <div
+            role="alert"
+            aria-live="assertive"
+            className="mb-6 p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-card flex items-start gap-3"
+          >
             <AlertCircle size={20} className="text-red-500 flex-shrink-0" />
             <span className="min-w-0 flex-1 text-sm break-words text-red-700 dark:text-red-300">{error}</span>
             {/* 信令抖一下就会落一条错误：没有关闭入口的话它会一直占着版面，
@@ -296,7 +302,12 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
         )}
 
         {isConnecting && (
-          <div className="mb-6 flex flex-col items-center justify-center py-12">
+          /* 连接阶段是过程信息：读屏用户需要知道「还在连」，但不该打断正在听的内容。 */
+          <div
+            role="status"
+            aria-live="polite"
+            className="mb-6 flex flex-col items-center justify-center py-12"
+          >
             <Loader2 size={32} className="text-brand-600 animate-spin mb-4" />
             <p className="text-sm text-slate-600 dark:text-night-300 font-medium mb-4">
               {viewerConnectingStage === 'fetching_ice' && '正在获取网络配置...'}
@@ -317,7 +328,11 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
 
         {error && !isConnecting && !isViewing && !isSharing && targetSharerId && (
           <div className="mb-6">
-            <div className="p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-card flex items-center gap-3 mb-4">
+            <div
+              role="alert"
+              aria-live="assertive"
+              className="p-4 bg-red-50 dark:bg-red-500/10 border border-red-200 dark:border-red-500/30 rounded-card flex items-center gap-3 mb-4"
+            >
               <AlertCircle size={20} className="text-red-500 flex-shrink-0" />
               <span className="min-w-0 text-sm break-words text-red-700 dark:text-red-300">{error}</span>
             </div>
@@ -464,7 +479,12 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
             {sharerFailure && !isSharing && (
               /* 信令终态：不能只弹 toast。绿色 LIVE 消失、预览停止、链接作废，
                  这里说明原因并给一条重新开始的路。 */
-              <div className="mb-4 rounded-card border border-red-200 bg-red-50 p-4 dark:border-red-500/30 dark:bg-red-500/10">
+              /* 终态卡是「分享已经停了」：比普通错误更严重，必须立刻播报。 */
+              <div
+                role="alert"
+                aria-live="assertive"
+                className="mb-4 rounded-card border border-red-200 bg-red-50 p-4 dark:border-red-500/30 dark:bg-red-500/10"
+              >
                 <div className="flex items-start gap-3">
                   <AlertTriangle size={20} className="mt-0.5 shrink-0 text-red-500" />
                   <div className="min-w-0">

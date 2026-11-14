@@ -589,6 +589,42 @@ test.describe('screen share', () => {
       await viewer.context().close();
     }
   });
+  // 分享端崩溃/断网时不会发 revoke，房号行按 24h TTL 活着，但信令层的目标 peer 已经
+  // 没有活 socket。旧实现里「有限重试」的预算被 connectToSharer 无条件清零，于是每 3s
+  // 重连一次、永不进终态——比之前的「重试 5 次后终态」更差。这条用例钉住它会停。
+  test('a link whose sharer has no live session ends in a terminal state instead of retrying forever', async ({
+    browser,
+    page,
+  }) => {
+    test.setTimeout(90_000);
+    await page.goto('/');
+    // 从没注册过信令的 peerId：房号接口不做校验，信令层投递时才会回 peer-unavailable。
+    const peerId = await page.evaluate(() => crypto.randomUUID());
+    const viewerContext = await browser.newContext();
+    const viewer = await viewerContext.newPage();
+    try {
+      await viewer.goto(`/?view=${peerId}`);
+      // 一次 3s 重试之后必须落到终态，而不是永远转圈。
+      // 同一句文案会同时出现在终态卡与提示条里，所以取第一个匹配即可。
+      await expect(
+        viewer
+          .getByText('分享暂时不可用（可能已结束，或分享者正在重连），请稍后重新打开此链接')
+          .first()
+      ).toBeVisible({ timeout: 45_000 });
+      // 终态之后不许再有新的「正在重试」提示把状态盖回去。
+      await viewer.waitForTimeout(8_000);
+      await expect(viewer.getByText('分享者暂时不在线，正在重试...')).toHaveCount(0);
+      // 终态是稳定的：既不能被「正在重试」盖回去，也不该退化成通用的网络超时文案。
+      await expect(
+        viewer
+          .getByText('分享暂时不可用（可能已结束，或分享者正在重连），请稍后重新打开此链接')
+          .first()
+      ).toBeVisible();
+      await expect(viewer.getByText('连接超时，请检查网络')).toHaveCount(0);
+    } finally {
+      await viewerContext.close();
+    }
+  });
   // 满员是容量拒绝，不是网络故障。share-full 的告知是 best-effort：送不到时观众只看到
   // call 被关，旧实现会把它当断链、先显示「正在重连」再在 20s 后报「连接超时」，
   // 用户于是去查网络/防火墙。这条用例钉住第 7 个观众看到的是「人已满」。
