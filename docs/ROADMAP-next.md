@@ -171,3 +171,13 @@ WS 凭证移出 URL query（`Sec-WebSocket-Protocol`）、读路径不再写库�
 - 门禁实测：typecheck 0；services 711 / components 46 / scripts 14；两个 scope 覆盖率守卫 OK（services 118 文件 91.27/83.83/84.69，components 13 文件 65.24/69.95/42.86，预算 75.49% ≤ 80%）；e2e 9 passed；product-transfer 13 passed；build 715.80 kB。
 
 状态: 完成 (第十一轮复评 must-fix 全部收口；门禁全绿，待推送与复评, 2026-11-14)
+## 阶段 11：第十二轮复评后的收口（2026-11-14）
+
+对应 `docs/design-scale-out.md` §8.14。三项复评（安全 93 / 产品 89 / 工程 92）的 must-fix 逐条收口：
+
+- 安全：为「每连接自铸 `slotReleaseToken`」补上能变红的断言（并发接管用例收集三次 reserve 的 token 与 slotId，两两不同；把 `crypto.randomUUID()` 换常量必须红）；`applySessionSlotReserve` 命中已存在 slotId 时改为「token 相同才续期、不同一律拒绝」，不再改写归属与 client_key，docblock 同步改真话。
+- 产品：分享终态卡拆成「普通容器 + 只包文字的 alert + 控件行在外」，倒计时通过 `aria-describedby` 关联；回归测试换掉按属性位置切片的假绿写法（原实现里 `\b` 被写坏成 0x08 退格字节，深度恒 0）。
+- 工程：screenshare 用例数 9 → 10（CI 注释、覆盖率守卫理由、ROADMAP 阶段 6 明标当时态）；设计文档历史数字逐处标成快照并指向 §8.14；第 7 观众用例允许一次重开以吸收同出口配额的抖动。
+- 门禁实测：typecheck 0；services 711 / components 46 / scripts 14；`services/signaling` 174/174；两个 scope 覆盖率守卫 OK（services 91.27/83.83/84.69、components 65.30/70.43/42.86，预算 75.44% ≤ 80%）；e2e 9 passed；product-transfer 13 passed；build 716.04 kB。
+
+状态: 完成 (第十二轮复评 must-fix 全部收口；门禁全绿，待推送与复评, 2026-11-14)

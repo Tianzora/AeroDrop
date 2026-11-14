@@ -626,3 +626,26 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 
 仍然存在的已知取舍（与 §8.12 相比仅数字更新，性质未变）：组件白名单仍占 75.49% 行数；冷却归零与采集释放只有 helper 契约测试；
 CI 仍是信号不是闸门（Cloudflare Git 集成不读 GitHub 检查，除非分支保护设为必需）；千行组件与 AGENTS 的张力未解。
+
+### 8.14 第十二轮复评后的收口（2026-11-14，复评基线 安全 93 / 产品 89 / 工程 92）
+
+第十二轮三项只读复评（HEAD `924fc72`）共同的主题是「上一轮写的测试没钉住要钉的东西」。
+三份 must-fix 的修法与验证如下。
+
+| 缺口 | 修法 | 验证 |
+| --- | --- | --- |
+| 安全：每连接自铸的 `slotReleaseToken` 没有任何能变红的测试——把 `src/worker.ts` 的 `crypto.randomUUID()` 换成常量，174 条信令测试仍全绿 | `services/signaling/signalingHub.test.ts` 的「并发接管同一会话」用例收集每一次 `reserve` 的 `slotId` / `releaseToken`，断言三条连接（旧会话 + 两个接管方）的 token 与 slotId 两两不同，且接管方的 token 不等于被顶替会话 attachment 里的值 | 负对照：把 `slotReleaseToken` 换成常量 `'tok-constant'` ⇒ 该用例红；改回后 174 pass |
+| 安全：`applySessionSlotReserve` 命中已存在 slotId 时无条件 `UPDATE ... SET client_key=?, release_token=?` 并 `return true`（跳过 COUNT），docblock 还写着「接管续期、直接改归属」——按注释重新引入复用就会再次打开「改写他人行归属 + 绕过上限」 | `services/signaling/sessionStore.ts` 先 `SELECT slot_id, release_token`，token 不符直接 `return false`，相同才 `UPDATE ... SET expires_at = ? WHERE slot_id = ? AND release_token = ?`（不再改 `client_key`）；docblock 改成「slotId 每条连接现铸，命中已存在只可能是同连接重试，token 不符一律拒绝，改写归属正是落败方删胜出方名额的成因」 | `sessionStore.test.ts` 拆成「同 token ⇒ 续期且不数名额」与「不同 token ⇒ false 且不发 UPDATE」；`sessionStore.sqlite.test.ts` 拆成「同 token 续期、归属不变」与「换 token 返回 false、行原样」；负对照：删掉 token 判定 ⇒ 3 红 |
+| 产品：分享终态卡整体 `role="alert"`，倒计时与按钮都在它子树里 ⇒ 读屏每秒重播整卡；回归测试本身是假绿（`divDepthAt` 的 `from` 落在 alert 属性之后，且文件里 `\b` 被写成一个 0x08 退格字节，深度恒 0） | `components/screen-share/ScreenShareUI.tsx` 重构成「普通容器 + `role="alert"` 只包文字 + 控件行在外」，倒计时 `<span id="share-terminal-cooldown-hint">` 成为按钮的 `aria-describedby`；测试改用 `elementHtmlAt(markup, attrAt)` 按 `<div>` 标签配对切片断言子树内容 | 负对照：把倒计时塞回 alert 子树 ⇒ 1 红；去掉 sr-only 播报的 `role/aria-live` ⇒ 1 红 |
+| 工程：CI 注释、覆盖率守卫理由、ROADMAP 与设计文档里的 screenshare 用例数写着 9 条，实际 10 条；`docs/design-scale-out.md:615` 声称「历史数字都标了快照」但只有一处标了 | `.github/workflows/ci.yml` 两处改 10 条并补充用例清单；`scripts/check-coverage-scope.mjs` 的白名单理由改 10 条；`docs/ROADMAP-next.md` 阶段 6 明标「当时结构」；`docs/design-scale-out.md` §8.7 加「数字说明」横幅，§8.7 / §8.12 的历史数字逐处标成当轮快照并指向 §8.14 | 数字逐条对照本轮实跑（见下）；`git grep` 复核「9 条」只剩历史叙述 |
+| 工程（低）：第 7 观众满员用例在全量 product 套件里偶发「viewer video never produced frames」，单跑必过（同出口 offer 配额与代理网络抖动叠加） | `e2e/screenshare.spec.ts` 该用例 `test.setTimeout(480_000)`，`openViewerWithFrames` 允许最多 2 次重开（先 `context().close()` 再等 2s；命中「连接请求过多」立即抛出，因为那是限流而非抖动） | 全量 product 套件本轮 13 passed |
+
+本轮实测（干净树，2026-11-14）：
+
+- `npm run typecheck` → 0；`npm run test:all` → services **711** / components **46** / scripts **14** 全 pass。
+- `node ./scripts/run-node-tests.mjs services/signaling` → **174 tests / 174 pass**。
+- `--scope=services`：118 个生产源文件 / 报告 116 行 / 2 例外，scope 内 **91.27 / 83.83 / 84.69**，白名单预算 152/17371 行（0.88%，上限 5%）。
+- `--scope=components`：13 文件 / 报告 10 行 / 3 例外，scope 内 **65.30 / 70.43 / 42.86**，白名单预算 7860/10419 行（75.44%，上限 80%）。
+- `--self-test` → 19 个报告 fixture + 5 个预算 fixture + 3 个理由 fixture 全过。
+- 仍然存在的已知取舍：与 §8.13 相同（组件白名单占约 3/4 行数、冷却归零与采集释放只有 helper 契约测试、CI 仍是信号不是闸门、千行组件与 AGENTS 的张力未解）。
+
