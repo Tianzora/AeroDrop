@@ -793,6 +793,92 @@ test('注册途中 socket 关闭：不写会话、名额与槽位一起回滚', 
   assert.equal(fresh.lastMessage()?.type, 'registered');
 });
 
+test('跨 IP 接管时旧 socket 先断开：配额只释放一次，同 IP 的活会话不会被漏算', async () => {
+  // 复现安全评审：ejectExisting 与判定之间隔着一次跨 DO 名额 RPC。旧 socket 可能在 await
+  // 期间自己 close（unregisterSocket 已按它所属的出口 IP release 过一次），旧实现随后又
+  // 无条件 release 一次，把该 IP 上另一条活会话的计数也减掉——每 IP 上限被悄悄放宽。
+  // 只有跨 IP 接管会走到「释放旧 IP」这一步，所以这里用两个出口 IP。
+  const ipOld = '203.0.113.71';
+  const ipNew = '203.0.113.72';
+  const holder: { current: Awaited<ReturnType<typeof createHub>> | null } = { current: null };
+  let pauseNextReserve = false;
+  let resumeReserve: (() => void) | null = null;
+
+  const created = await createHub({
+    maxSessions: '2',
+    shardCount: '2',
+    shardName: 'signaling-shard-1',
+    signalingHub: {
+      respond: async (call) => {
+        const body = call.body as { action?: string; slotId?: string; clientKey?: string; lookups?: unknown[] } | null;
+        const sql = () => createSqlite(holder.current!.db);
+        if (call.url.endsWith('/internal/lookup-share-codes')) {
+          const count = Array.isArray(body?.lookups) ? body.lookups.length : 0;
+          return { status: 200, body: { records: Array.from({ length: count }, () => null) } };
+        }
+        if (call.url.endsWith('/internal/session-binding')) {
+          return { status: 200, body: { allowed: true } };
+        }
+        if (body?.action === 'reserve') {
+          if (pauseNextReserve) {
+            pauseNextReserve = false;
+            await new Promise<void>((resolve) => {
+              resumeReserve = resolve;
+            });
+          }
+          // 这一段专门验证 Do 内存里的每出口 IP 席位计数：全局槽位表一律放行，
+          // 否则公共层的上限会把 limiter 的漂移掩盖掉。
+          return { status: 200, body: { granted: true } };
+        }
+        if (body?.action === 'release') {
+          applySessionSlotRelease(sql(), body.slotId ?? '');
+          return { status: 200, body: { released: true } };
+        }
+        return { status: 200, body: {} };
+      },
+    },
+  });
+  holder.current = created;
+
+  // 旧 IP 上两条活会话（占满该 IP 上限），新 IP 上一条，用于跨 IP 接管。
+  const peerTarget = 'AERO-EJECTX001';
+  const socketTarget = serverOf((await upgrade(created.hub, `peerId=${peerTarget}`, ipOld)).webSocket);
+  serverOf((await upgrade(created.hub, 'peerId=AERO-EJECTX002', ipOld)).webSocket);
+  const mover = serverOf((await upgrade(created.hub, 'peerId=AERO-EJECTX003', ipNew)).webSocket);
+  assert.equal(socketTarget.lastMessage()?.type, 'registered');
+  assert.equal(mover.lastMessage()?.type, 'registered');
+
+  // 从新 IP 接管 target：名额 RPC 挂住，期间旧 socket 断开（它已先释放旧 IP 的一个计数）。
+  pauseNextReserve = true;
+  const takeover = upgrade(created.hub, `peerId=${peerTarget}`, ipNew);
+  for (let waited = 0; resumeReserve === null; waited += 1) {
+    if (waited > 400) throw new Error('reserve RPC 没有被挂住，用例前提不成立');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+  }
+  created.hub.webSocketClose(socketTarget as never);
+  await created.settle();
+  (resumeReserve as unknown as () => void)();
+
+  const accepted = await takeover;
+  assert.equal(accepted.status, 101);
+  assert.equal(serverOf(accepted.webSocket).lastMessage()?.type, 'registered', '接管应当成功');
+  await created.settle();
+
+  // 旧 IP 上仍有一条活会话，所以还能再进 1 个；第 2 个必须被拒。
+  const another = serverOf((await upgrade(created.hub, 'peerId=AERO-EJECTX004', ipOld)).webSocket);
+  assert.equal(
+    another.lastMessage()?.type,
+    'registered',
+    '旧 socket 断开只该释放一次，旧 IP 应还剩 1 个空位'
+  );
+  const overflow = await upgrade(created.hub, 'peerId=AERO-EJECTX005', ipOld);
+  assert.equal(
+    serverOf(overflow.webSocket).lastMessage()?.code,
+    'rate-limited',
+    '若旧 IP 被多减一次，这里会错误地放行第 3 条活会话'
+  );
+});
+
 test('分片模式下 commit 返回 superseded 时记指标，而不是当作成功静默吞掉', async () => {
   // 复现金评审 E：分片 commit 以前只看 response.ok，2xx 就算成功，superseded 既没有
   // 指标也没有补偿，迟到写入的语义在分片路径上完全丢失。

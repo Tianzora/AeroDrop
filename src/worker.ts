@@ -87,6 +87,7 @@ import {
 } from '../services/signaling/sessionStore';
 import { assessNetworkRisk, type NetworkRiskReason } from '../services/signaling/networkRisk';
 import { applyResponsePolicies } from '../services/signaling/httpPolicy';
+import { isAllowedSameOriginRequest } from '../services/signaling/httpOriginPolicy';
 import { readShareCodeBody } from '../services/signaling/shareCodeBody';
 import {
   parsePositiveInt,
@@ -287,36 +288,6 @@ const createIceConfigPayload = (
   relayRecommended,
   relayReason,
 });
-
-/**
- * CSRF-only gate. Browsers send Origin/Referer/Sec-Fetch-Site, but every one of
- * those headers is client-controlled, so a non-browser client can always forge
- * one. This is not authentication and must not be relied on as such.
- */
-const isAllowedSameOriginRequest = (request: Request): boolean => {
-  const requestOrigin = request.headers.get('Origin');
-  const requestReferer = request.headers.get('Referer');
-  const secFetchSite = request.headers.get('Sec-Fetch-Site');
-  const requestUrl = new URL(request.url);
-  const allowedOrigin = requestUrl.origin;
-  let refererOrigin: string | null = null;
-
-  if (requestReferer) {
-    try {
-      refererOrigin = new URL(requestReferer).origin;
-    } catch {
-      refererOrigin = null;
-    }
-  }
-
-  return (
-    requestOrigin === allowedOrigin ||
-    (!requestOrigin && refererOrigin === allowedOrigin) ||
-    (!requestOrigin &&
-      !refererOrigin &&
-      (secFetchSite === 'same-origin' || secFetchSite === 'same-site'))
-  );
-};
 
 const fetchCloudflareTurnIceConfig = async (env: Env): Promise<IceConfigPayload | null> => {
   const turnTokenId = getCloudflareTurnTokenId(env);
@@ -1178,10 +1149,16 @@ export class SignalingHub extends DurableObject<Env> {
         // 无条件 delete 会把刚接管的赢家从表里抹掉（它已经收到 registered，成了幽灵）。
         if (this.sessionsByPeer.get(peerId) === existing) this.sessionsByPeer.delete(peerId);
         if (this.peerBySocket.get(existing) === peerId) this.peerBySocket.delete(existing);
-        if (this.clientBySocket.get(existing) === existingClientKey) {
+        // 归属判断与释放必须绑在一起：await 期间旧 socket 可能已经
+        // unregisterSocket（它会删 clientBySocket 并 release 一次），
+        // 这里若无条件再 release，会把同一 IP 的另一条活会话的计数多减一，
+        // 让每 IP 上限被悄悄放宽。
+        const ownsExistingClient =
+          existingClientKey !== undefined && this.clientBySocket.get(existing) === existingClientKey;
+        if (ownsExistingClient) {
           this.clientBySocket.delete(existing);
         }
-        if (existingClientKey !== undefined && existingClientKey !== clientKey) {
+        if (ownsExistingClient && existingClientKey !== clientKey) {
           this.sessionLimiter.release(existingClientKey);
         }
         try {
