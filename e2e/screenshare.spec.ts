@@ -687,9 +687,10 @@ test.describe('screen share', () => {
     const viewers: Page[] = [];
     // 这条用例验的是「6 个名额占满 + 第 7 个被容量拒绝」，不是「某一台观众的媒体通道
     // 一定建得起来」：真实网络（尤其挂着代理的机器）上单个观众的 ICE 偶发失败，
-    // 会让整条容量用例红在与容量无关的断言上。所以允许有限次重开：每次先关掉失败页面，
-    // 避免它继续占名额或吃 offer 配额；命中「连接请求过多」则立刻失败（那是限流，
-    // 重试只会把窗口拖得更差）。
+    // 会让整条容量用例红在与容量无关的断言上。所以按「还差几个就再开一个」推进，
+    // 失败就关掉那个页面（别让它继续占名额、继续吃 offer 配额）。
+    // 出口限流命中时不能重试（重试只会把窗口拖得更差），必须等一个完整窗口再来：
+    // 生产环境一轮跑下来经常要跨两个窗口，所以这里给它两个窗口的预算。
     const openViewerWithFrames = async (): Promise<Page> => {
       let lastError: unknown;
       for (let attempt = 0; attempt < 2; attempt += 1) {
@@ -715,10 +716,29 @@ test.describe('screen share', () => {
       throw lastError;
     };
 
+    const activeViewerCount = async (): Promise<number> =>
+      page.evaluate(() => {
+        const match = document.body.innerText.match(/(\d+) 人观看/);
+        return match ? Number(match[1]) : 0;
+      });
+
     try {
       // 6 个名额都要真正收到画面，分享端的 activeViewers 才会计入，第 7 个才会被拒。
-      for (let index = 0; index < 6; index += 1) {
-        await openViewerWithFrames();
+      // 每轮最多再补开一个观众；命中限流就等下一个配额窗口（固定窗口，60s 后清零）。
+      const deadline = Date.now() + 210_000;
+      let waitingForWindow = false;
+      while ((await activeViewerCount()) < 6 && Date.now() < deadline) {
+        try {
+          await openViewerWithFrames();
+        } catch (error) {
+          if (!waitingForWindow) {
+            waitingForWindow = true;
+            // 限流命中后整出口会静默一个窗口，等满 63s 再继续。
+            await page.waitForTimeout(63_000);
+            continue;
+          }
+          throw error;
+        }
       }
       await expect(page.getByText('6 人观看')).toBeVisible({ timeout: 30_000 });
 
