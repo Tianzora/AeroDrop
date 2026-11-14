@@ -105,16 +105,35 @@ const openViewer = async (browser: Browser, shareLink: string): Promise<Page> =>
   return viewer;
 };
 
+
+/**
+ * 真正试一次采集，而不是查 WebIDL 方法是否存在：`getDisplayMedia` 在任何 Chromium 里都是
+ * 存在的函数，但「没有可采集的桌面」只会在调用时抛错。只有真抓到一帧才算支持，否则 skip
+ * 并打印原因——缺采集源时 CI 上是一条 skip，而不是 9 条硬红。
+ */
+const ensureDisplayCapture = async (page: Page): Promise<void> => {
+  const supported = await page.evaluate(async () => {
+    try {
+      const stream = await navigator.mediaDevices.getDisplayMedia({ video: true });
+      for (const track of stream.getTracks()) track.stop();
+      return true;
+    } catch {
+      return false;
+    }
+  });
+  test.skip(
+    !supported,
+    'this Chromium cannot capture a display surface (missing fake-capture flags or no display server)'
+  );
+};
+
 test.describe('screen share', () => {
   test('shares frames to a viewer link, counts the viewer, and clears the count on leave', async ({
     browser,
     page,
   }) => {
     await page.goto('/');
-    const supported = await page.evaluate(
-      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
-    );
-    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+    await ensureDisplayCapture(page);
 
     await startSharing(page);
 
@@ -214,10 +233,7 @@ test.describe('screen share', () => {
     });
 
     await page.goto('/');
-    const supported = await page.evaluate(
-      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
-    );
-    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+    await ensureDisplayCapture(page);
 
     await page.getByRole('button', { name: '共享' }).click();
     await page.getByRole('button', { name: '开始共享屏幕' }).click();
@@ -270,10 +286,7 @@ test.describe('screen share', () => {
     });
 
     await page.goto('/');
-    const supported = await page.evaluate(
-      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
-    );
-    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+    await ensureDisplayCapture(page);
 
     await page.getByRole('button', { name: '共享' }).click();
     await page.getByRole('button', { name: '开始共享屏幕' }).click();
@@ -312,10 +325,7 @@ test.describe('screen share', () => {
     });
 
     await page.goto('/');
-    const supported = await page.evaluate(
-      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
-    );
-    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+    await ensureDisplayCapture(page);
 
     await page.getByRole('button', { name: '共享' }).click();
     await page.getByRole('button', { name: '开始共享屏幕' }).click();
@@ -365,10 +375,7 @@ test.describe('screen share', () => {
     });
 
     await page.goto('/');
-    const supported = await page.evaluate(
-      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
-    );
-    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+    await ensureDisplayCapture(page);
 
     await page.getByRole('button', { name: '共享' }).click();
     await page.getByRole('button', { name: '开始共享屏幕' }).click();
@@ -411,7 +418,10 @@ test.describe('screen share', () => {
             const response = await nativeFetch(input as RequestInfo, init);
             if (!response.ok) return response;
             const payload = await response.clone().json();
-            return Response.json({ ...payload, expiresAt: Date.now() + 1_200 });
+            // 生产环境「登记成功 + 建好信令」可能超过 1.2s，TTL 太短会让房号在
+            // 「正在共享」出现之前就过期，断言就变成了在抖动上抛硬币。给 6s：
+            // 足够跨过建链，又短到能用一次 online 事件触发过期分支。
+            return Response.json({ ...payload, expiresAt: Date.now() + 6_000 });
           }
           // 续期一律失败：房号已经过期，服务端不会再续。
           return new Response('', { status: 429, headers: { 'Retry-After': '60' } });
@@ -421,19 +431,16 @@ test.describe('screen share', () => {
     });
 
     await page.goto('/');
-    const supported = await page.evaluate(
-      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
-    );
-    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+    await ensureDisplayCapture(page);
 
     await page.getByRole('button', { name: '共享' }).click();
     await page.getByRole('button', { name: '开始共享屏幕' }).click();
     await expect(page.getByText('正在共享')).toBeVisible({ timeout: 20_000 });
     await expect(page.locator('a[href*="view="]')).toHaveCount(1);
 
-    // 等房号真的过期（mock 里只剩 1.2s），再触发一次续期——回到前台/网络恢复时分享端
+    // 等房号真的过期（mock 里只剩 6s），再触发一次续期——回到前台/网络恢复时分享端
     // 会立即续期，用它代替 60s 的过期看门狗，同时验证「续期失败 + 已过期」这条分支。
-    await page.waitForTimeout(1_500);
+    await page.waitForTimeout(6_500);
     await page.evaluate(() => window.dispatchEvent(new Event('online')));
 
     // 过期之后不能继续宣称「正在共享」，也不能让人复制一条已经无效的链接。
@@ -456,10 +463,7 @@ test.describe('screen share', () => {
     page,
   }) => {
     await page.goto('/');
-    const supported = await page.evaluate(
-      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
-    );
-    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+    await ensureDisplayCapture(page);
 
     const arrivals: number[] = [];
     let firstResolved = false;
@@ -498,10 +502,7 @@ test.describe('screen share', () => {
     page,
   }) => {
     await page.goto('/');
-    const supported = await page.evaluate(
-      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
-    );
-    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+    await ensureDisplayCapture(page);
 
     await startSharing(page);
     const shareLink = await getShareLink(page);
@@ -587,10 +588,7 @@ test.describe('screen share', () => {
   }) => {
     test.setTimeout(300_000);
     await page.goto('/');
-    const supported = await page.evaluate(
-      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
-    );
-    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+    await ensureDisplayCapture(page);
 
     await startSharing(page);
     const shareLink = await getShareLink(page);
@@ -600,6 +598,12 @@ test.describe('screen share', () => {
     // E2E 里所有页面共享 127.0.0.1 这一个 clientKey，所以「坐满 6 个 + 第 7 个被拒」
     // 必须能在一个窗口里跑完：配额若退回每分钟 10 条（低于产品容量），第 6 个观众
     // 会先被出口限流挡住，这里就会在「连接请求过多」断言上红。
+    // 同一 preview 进程里，前面的用例已经把 127.0.0.1 这个 clientKey 的 offer 配额用掉一部分，
+    // 而且出口限流是「固定窗口 + 命中后整出口静默一个窗口」——单独跑这条用例是绿的，
+    // 在文件里全量跑却会第 6 个观众先撞限流。这里主动等一个完整窗口再开始，
+    // 让「6 个名额 + 第 7 个被容量拒绝」发生在同一个干净窗口里。
+    await page.waitForTimeout(63_000);
+
     const viewers: Page[] = [];
     const openViewerWithFrames = async (): Promise<Page> => {
       const viewer = await openViewer(browser, shareLink);
