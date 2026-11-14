@@ -74,10 +74,13 @@ const result = spawnSync(
   {
     cwd: root,
     encoding: 'utf8',
+    // 刻意不传 `--test-coverage-include`：它在 Node 22.12 的 CI 上会让子进程直接退出、
+    // 一行报告都留不下（本地 Node 24 才复现得了差异）。分母的完整性由下面的
+    // git 清单对比保证——只要每个源文件都被加载，普通报告的覆盖率就是真实覆盖率。
     env: {
       ...process.env,
       NODE_TEST_COVERAGE: '1',
-      NODE_TEST_COVERAGE_INCLUDE: 'services/**/*.ts,src/**/*.ts',
+      NODE_TEST_COVERAGE_INCLUDE: '',
       NODE_TEST_COVERAGE_MIN_LINES: minLines,
       NODE_TEST_COVERAGE_MIN_BRANCHES: minBranches,
     },
@@ -116,6 +119,17 @@ if (missing.length > 0) {
 }
 
 const thresholdFailure = result.status !== 0;
+
+// 子进程如果连一行报告都没产出，先说清楚这一点：否则会把「测试没跑起来」误报成
+// 「所有文件都没被加载」，上一版就因此在 CI 上给出过误导性的 108 文件全缺清单。
+if (reportedCount === 0) {
+  console.error('check-coverage-scope: 覆盖率报告里没有任何文件行，测试进程很可能在产出报告前就退出了');
+  console.error(`  子进程退出码: ${result.status ?? 'null'}${result.signal ? `，信号: ${result.signal}` : ''}`);
+  if (result.stdout) process.stdout.write(result.stdout.slice(-6000));
+  if (result.stderr) process.stderr.write(result.stderr.slice(-6000));
+  process.exit(1);
+}
+
 if (thresholdFailure && missing.length === 0) {
   console.error('check-coverage-scope: 覆盖率门槛未通过（详见上面的报告与失败信息）');
   if (result.stdout) process.stdout.write(result.stdout.slice(-4000));
