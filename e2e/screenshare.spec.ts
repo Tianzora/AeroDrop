@@ -634,7 +634,8 @@ test.describe('screen share', () => {
     browser,
     page,
   }) => {
-    test.setTimeout(300_000);
+    // 63s 窗口等待 + 6 个观众（含重试）+ 第 7 个观众的 22s 观察窗口，留足余量。
+    test.setTimeout(480_000);
     await page.goto('/');
     await ensureDisplayCapture(page);
 
@@ -653,15 +654,34 @@ test.describe('screen share', () => {
     await page.waitForTimeout(63_000);
 
     const viewers: Page[] = [];
+    // 这条用例验的是「6 个名额占满 + 第 7 个被容量拒绝」，不是「某一台观众的媒体通道
+    // 一定建得起来」：真实网络（尤其挂着代理的机器）上单个观众的 ICE 偶发失败，
+    // 会让整条容量用例红在与容量无关的断言上。所以允许有限次重开：每次先关掉失败页面，
+    // 避免它继续占名额或吃 offer 配额；命中「连接请求过多」则立刻失败（那是限流，
+    // 重试只会把窗口拖得更差）。
     const openViewerWithFrames = async (): Promise<Page> => {
-      const viewer = await openViewer(browser, shareLink);
-      viewers.push(viewer);
-      await dismissAutoplayOverlay(viewer);
-      const sample = await waitForViewerFrames(viewer);
-      expect(sample.frames).toBeGreaterThan(0);
-      // 出口限流是「等一分钟再试」的问题，不能混进满员或网络故障的判定。
-      await expect(viewer.getByText(/连接请求过多/)).toHaveCount(0);
-      return viewer;
+      let lastError: unknown;
+      for (let attempt = 0; attempt < 2; attempt += 1) {
+        const viewer = await openViewer(browser, shareLink);
+        await dismissAutoplayOverlay(viewer);
+        try {
+          const sample = await waitForViewerFrames(viewer);
+          expect(sample.frames).toBeGreaterThan(0);
+          // 出口限流是「等一分钟再试」的问题，不能混进满员或网络故障的判定。
+          await expect(viewer.getByText(/连接请求过多/)).toHaveCount(0);
+          viewers.push(viewer);
+          return viewer;
+        } catch (error) {
+          lastError = error;
+          const rateLimited = (await viewer.getByText(/连接请求过多/).count()) > 0;
+          await viewer.context().close();
+          if (rateLimited) {
+            throw error;
+          }
+          await page.waitForTimeout(2_000);
+        }
+      }
+      throw lastError;
     };
 
     try {
