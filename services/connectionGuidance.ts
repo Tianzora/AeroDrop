@@ -127,6 +127,28 @@ export const getMediaConnectionErrorMessage = (
 export const getShareFullMessage = (maxViewers: number): string =>
   `分享人数已满（最多 ${maxViewers} 人同时观看），请稍后再试`;
 
+/**
+ * 观众侧没收到 share-full、但连接在建流之前就断了：最可能是名额已满。
+ *
+ * 必须说「可能」并给出人数上限：说成网络问题会让人反复重试网络，说成确定满员又会冤枉
+ * 真正的断链。
+ */
+export const getSuspectedShareFullMessage = (maxViewers: number): string =>
+  `可能人数已满（最多 ${maxViewers} 人），请稍后再试`;
+
+/**
+ * 分享端自己的 peer 错误文案。
+ *
+ * unauthorized / unavailable-id 在分享端不是「口令输错了」：房号由服务端登记，出现这两类
+ * 只能说明本地凭证或房号已经作废。复用观众端文案会让分享者去找一个并不存在的「发送端」。
+ */
+export const getSharerPeerRuntimeErrorMessage = (type: string): string => {
+  if (type === 'unauthorized' || type === 'unavailable-id') {
+    return '分享凭证已过期，请重新开始共享（旧链接会失效）';
+  }
+  return getPeerRuntimeErrorMessage(type);
+};
+
 export const getReceiverPreTransferFailureMessage = (hasTurn: boolean): string => {
   if (hasTurn) {
     return '连接超时，请检查口令是否正确';

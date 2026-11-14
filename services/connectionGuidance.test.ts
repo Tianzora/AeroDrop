@@ -5,6 +5,8 @@ import {
   getMediaConnectionErrorMessage,
   getPeerRuntimeErrorMessage,
   getShareFullMessage,
+  getSharerPeerRuntimeErrorMessage,
+  getSuspectedShareFullMessage,
   ICE_CONNECTION_FAILED_MESSAGE,
   SIGNALING_MESSAGE_TOO_LARGE_MESSAGE,
   SIGNALING_UNREACHABLE_MESSAGE,
@@ -62,4 +64,36 @@ test('人数上限文案是容量拒绝，不暗示网络故障', () => {
   assert.match(message, /6 人/);
   assert.match(message, /稍后再试/);
   assert.doesNotMatch(message, /网络|连接错误/i);
+});
+
+test('没收到 share-full 就断流时给「可能人满」的猜测文案，而不是确定的容量结论', () => {
+  const message = getSuspectedShareFullMessage(6);
+  assert.match(message, /可能人数已满/);
+  assert.match(message, /6 人/);
+  assert.match(message, /稍后再试/);
+  // 只说有可能是人满：真正的断链也会走到这里，不能把话说死。
+  assert.doesNotMatch(message, /已满（最多 6 人同时观看）/);
+});
+
+test('分享端 unauthorized / unavailable-id 用自己的凭证文案，不抄观众端的「找发送端」', () => {
+  const expiredShare = '分享凭证已过期，请重新开始共享（旧链接会失效）';
+  assert.equal(getSharerPeerRuntimeErrorMessage('unauthorized'), expiredShare);
+  assert.equal(getSharerPeerRuntimeErrorMessage('unavailable-id'), expiredShare);
+
+  // 分享端没有「发送端」可找：这两类错误在分享端只能来自作废的房号/凭证。
+  assert.doesNotMatch(getSharerPeerRuntimeErrorMessage('unauthorized'), /发送端|口令/);
+  assert.notEqual(
+    getSharerPeerRuntimeErrorMessage('unauthorized'),
+    getPeerRuntimeErrorMessage('unauthorized'),
+  );
+
+  // 其余错误仍然复用通用文案，避免两套并行的错误词汇表。
+  assert.equal(
+    getSharerPeerRuntimeErrorMessage('session-conflict'),
+    getPeerRuntimeErrorMessage('session-conflict'),
+  );
+  assert.equal(
+    getSharerPeerRuntimeErrorMessage('disconnected'),
+    SIGNALING_UNREACHABLE_MESSAGE,
+  );
 });

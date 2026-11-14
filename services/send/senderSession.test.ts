@@ -642,11 +642,10 @@ test('限流且已有连接在传时不进 error：提示链接失效但保留�
   await Promise.resolve();
 
   assert.deepEqual(log.connectionStatuses, [SHARE_SIGNALING_LOST_MESSAGE]);
+  // 同一句话已经落在状态位和链接下方的常驻提示里。再弹一条 toast 就是第三次复述，
+  // 用户会以为连续出了两个故障；这里钉住「只写状态，不弹 toast」。
+  assert.deepEqual(log.notifications, []);
   assert.notEqual(log.phase(), 'error');
-  assert.deepEqual(
-    log.notifications.map((item) => item.message),
-    [SHARE_SIGNALING_LOST_MESSAGE],
-  );
 });
 
 test('信令恢复（signaling:restored）会清掉降级状态位，不留一条过期提示', async () => {

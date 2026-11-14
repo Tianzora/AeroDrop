@@ -34,6 +34,8 @@ interface ScreenShareUIProps {
   hasBeenReady: boolean;
   sharerFailure: { reason: 'signaling_failed'; message: string } | null;
   dismissSharerFailure: () => void;
+  /** 限流冷却剩余秒数；null = 没有冷却。有值时不能重新登记房号，按钮要禁用并显示倒计时。 */
+  shareRoomRetrySeconds: number | null;
   recommendedViewerCount: number;
   maxViewerCount: number;
   viewerCount: number;
@@ -69,6 +71,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   hasBeenReady,
   sharerFailure,
   dismissSharerFailure,
+  shareRoomRetrySeconds,
   recommendedViewerCount,
   maxViewerCount,
   viewerCount,
@@ -448,10 +451,11 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                     <p className="mt-1 text-xs text-red-600/80 dark:text-red-400/80">
                       此前分享的链接已失效，观众无法再加入。
                     </p>
-                    <div className="mt-3 flex flex-wrap gap-2">
+                    <div className="mt-3 flex flex-wrap items-center gap-2">
                       <button
                         onClick={startScreenShare}
-                        className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-brand-600 px-4 text-sm font-medium text-white transition-colors hover:bg-brand-700"
+                        disabled={shareRoomRetrySeconds !== null}
+                        className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-brand-600 px-4 text-sm font-medium text-white transition-colors hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-40 disabled:hover:bg-brand-600"
                       >
                         <Play size={16} fill="currentColor" />
                         重新开始共享
@@ -463,6 +467,12 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                         <X size={16} />
                         关闭
                       </button>
+                      {/* 服务端已经告诉我们还要等多久：把秒数显示出来，比只留一个灰按钮有用。 */}
+                      {shareRoomRetrySeconds !== null && (
+                        <span className="text-xs text-red-600/80 dark:text-red-400/80 tabular-nums">
+                          {shareRoomRetrySeconds} 秒后可重试
+                        </span>
+                      )}
                     </div>
                   </div>
                 </div>
@@ -526,9 +536,20 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                   </button>
                 </div>
                 {shareRoomExpired && (
-                  <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
-                    分享链接已失效，需要重新开始共享才能让新观众加入
-                  </p>
+                  <div className="mt-2 flex flex-wrap items-center gap-2">
+                    {/* 链接作废后画面还在，但新观众进不来：这里必须有直接重建房号的入口，
+                        不能只剩一行「需要重新开始共享」让用户自己去找。 */}
+                    <button
+                      onClick={startScreenShare}
+                      className="inline-flex h-9 items-center justify-center gap-2 rounded-full bg-brand-600 px-4 text-sm font-medium text-white transition-colors hover:bg-brand-700"
+                    >
+                      <RefreshCw size={16} />
+                      重新开始共享
+                    </button>
+                    <span className="text-xs text-amber-600 dark:text-amber-400">
+                      分享链接已失效，需要重新开始共享才能让新观众加入
+                    </span>
+                  </div>
                 )}
                 {!shareRoomExpired && !isShareLive && (
                   <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">

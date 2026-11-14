@@ -578,5 +578,65 @@ test.describe('screen share', () => {
       await viewer.context().close();
     }
   });
+  // 满员是容量拒绝，不是网络故障。share-full 的告知是 best-effort：送不到时观众只看到
+  // call 被关，旧实现会把它当断链、先显示「正在重连」再在 20s 后报「连接超时」，
+  // 用户于是去查网络/防火墙。这条用例钉住第 7 个观众看到的是「人已满」。
+  test('the seventh viewer is told the room is full instead of seeing a network timeout', async ({
+    browser,
+    page,
+  }) => {
+    test.setTimeout(300_000);
+    await page.goto('/');
+    const supported = await page.evaluate(
+      () => typeof navigator.mediaDevices?.getDisplayMedia === 'function'
+    );
+    test.skip(!supported, 'headless Chromium has no getDisplayMedia; run with fake capture flags');
+
+    await startSharing(page);
+    const shareLink = await getShareLink(page);
+
+    // 每个观众要发两条 offer（数据通道 + 媒体），而 SignalingHub 的 offer 限流是
+    // 每出口 IP 每分钟 10 条（services/signalingRateLimitPolicy.ts）。E2E 里所有页面
+    // 共享 127.0.0.1 这一个 clientKey，所以 6 个名额必须跨两个窗口占：先 4 个，
+    // 等窗口翻篇再补 2 个，否则第 5 个观众就会被限流成「连接请求过多」。
+    const viewers: Page[] = [];
+    const openViewerWithFrames = async (): Promise<Page> => {
+      const viewer = await openViewer(browser, shareLink);
+      viewers.push(viewer);
+      await dismissAutoplayOverlay(viewer);
+      const sample = await waitForViewerFrames(viewer);
+      expect(sample.frames).toBeGreaterThan(0);
+      return viewer;
+    };
+
+    try {
+      // 先把 6 个名额真正占满：每个人都要收到画面，否则它只是「正在连接」，
+      // 分享端的 activeViewers 不会计入，第 7 个就不会被拒。
+      for (let index = 0; index < 4; index += 1) {
+        await openViewerWithFrames();
+      }
+      await page.waitForTimeout(65_000);
+      for (let index = 0; index < 2; index += 1) {
+        await openViewerWithFrames();
+      }
+      await expect(page.getByText('6 人观看')).toBeVisible({ timeout: 30_000 });
+
+      const extra = await openViewer(browser, shareLink);
+      viewers.push(extra);
+
+      // 两种兜底文案都算达标：确定拒绝（分享人数已满…）与 best-effort 没送到时的
+      // 推断（可能人数已满…）。拒绝会同时落一条 info 提示和红色错误条，故取首个匹配。
+      const fullNotice = extra.getByText(/人数已满/).first();
+      await expect(fullNotice).toBeVisible({ timeout: 30_000 });
+
+      // 旧实现要过一个 20s 的连接超时窗口才会给出错误，且给的是网络结论。
+      // 这里多等一个窗口，确认文案没有被「连接超时」覆盖掉。
+      await extra.waitForTimeout(22_000);
+      await expect(fullNotice).toBeVisible();
+      await expect(extra.getByText(/连接超时/)).toHaveCount(0);
+    } finally {
+      await Promise.all(viewers.map((viewer) => viewer.context().close()));
+    }
+  });
 
 })

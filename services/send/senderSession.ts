@@ -445,10 +445,10 @@ export class SenderSession {
       if (this.host.getActiveConnectionCount() > 0) {
         // 有在途传输：setPhase('error') 会把传输列表从界面上撤掉，用户会以为文件也断了。
         // 改成状态位的降级提示——链接不能再发给新设备，已有连接照常传完。
+        // 只落两处：状态位 + 链接下方的常驻提示。再弹一条 toast 就是同一句话出现三次。
         this.host.setConnectionStatus(SHARE_SIGNALING_LOST_MESSAGE);
         // 口令已被注销：降级位要留下，不能只是 30 秒的提示。
         this.host.setShareRevoked(SHARE_SIGNALING_LOST_MESSAGE);
-        this.host.notify(SHARE_SIGNALING_LOST_MESSAGE, 'info');
         return;
       }
       this.host.setPhase('error', getPeerRuntimeErrorMessage(err.type));

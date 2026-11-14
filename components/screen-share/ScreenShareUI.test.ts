@@ -5,6 +5,10 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { ScreenShareUI } from './ScreenShareUI.tsx';
+import {
+  SHARER_RECONNECT_EXHAUSTED_MESSAGE,
+  SIGNALING_UNREACHABLE_MESSAGE,
+} from '../../services/connectionGuidance.ts';
 
 const baseProps: React.ComponentProps<typeof ScreenShareUI> = {
   isSharing: false,
@@ -32,6 +36,7 @@ const baseProps: React.ComponentProps<typeof ScreenShareUI> = {
   hasBeenReady: false,
   sharerFailure: null,
   dismissSharerFailure: () => {},
+  shareRoomRetrySeconds: null,
   recommendedViewerCount: 4,
   maxViewerCount: 6,
   viewerCount: 0,
@@ -204,6 +209,60 @@ test('房号过期：徽标与链接一起失效，不能继续显示绿色正�
   assert.doesNotMatch(markup, /正在共享/);
   assert.match(markup, /aria-disabled="true"/);
   assert.match(markup, /tabindex="-1"/);
+});
+
+test('房号过期：链接卡里直接给一颗重建房号的按钮，而不是只留一行说明', () => {
+  const markup = render({
+    isSharing: true,
+    isShareLive: true,
+    shareRoomExpired: true,
+    shareLink: 'https://example.com/#/screen-share?view=AERO-abc',
+  });
+
+  // 链接作废后画面还在，但新观众进不来：用户得能在这里一键重建房号。
+  assert.match(markup, /重新开始共享/);
+  assert.match(markup, /分享链接已失效，需要重新开始共享才能让新观众加入/);
+  // 已经在共享中，不要再冒出「开始共享屏幕」这颗重复入口。
+  assert.doesNotMatch(markup, /开始共享屏幕/);
+});
+
+test('重建耗尽 / 首连看门狗超时：终态卡用的是真实文案，且都带「重新开始共享」', () => {
+  // 这两条路径以前没有任何自动化覆盖：分享端只会永久停在「正在连接服务器」。
+  const exhausted = render({
+    sharerFailure: { reason: 'signaling_failed', message: SHARER_RECONNECT_EXHAUSTED_MESSAGE },
+  });
+  assert.match(exhausted, /信令连接持续失败，请刷新页面后重新开始共享/);
+  assert.match(exhausted, /共享已中断/);
+  assert.match(exhausted, /重新开始共享/);
+  assert.match(exhausted, /此前分享的链接已失效/);
+
+  const watchdog = render({
+    sharerFailure: { reason: 'signaling_failed', message: SIGNALING_UNREACHABLE_MESSAGE },
+  });
+  assert.match(watchdog, /无法连接信令服务器，请检查网络后重试/);
+  assert.match(watchdog, /重新开始共享/);
+});
+
+test('限流冷却期内：显示服务端给的剩余秒数，并禁用「重新开始共享」', () => {
+  const markup = render({
+    sharerFailure: { reason: 'signaling_failed', message: '创建共享房间过于频繁，请稍后再试' },
+    shareRoomRetrySeconds: 27,
+  });
+
+  assert.match(markup, /27 秒后可重试/);
+  // 还能点的话用户只会再吃一次 429，把冷却期越拖越长。
+  assert.match(markup, /disabled=""/);
+});
+
+test('冷却结束后「重新开始共享」恢复可点，倒计时也从界面上消失', () => {
+  const markup = render({
+    sharerFailure: { reason: 'signaling_failed', message: '无法连接信令服务器，请检查网络后重试' },
+    shareRoomRetrySeconds: null,
+  });
+
+  assert.doesNotMatch(markup, /秒后可重试/);
+  assert.doesNotMatch(markup, /disabled=""/);
+  assert.match(markup, /重新开始共享/);
 });
 
 test('首次连接不说「信令中断」：还没连上过和掉线是两回事', () => {

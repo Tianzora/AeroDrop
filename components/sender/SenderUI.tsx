@@ -329,7 +329,11 @@ export const SenderUI: React.FC<SenderUIProps> = ({
             <div className="flex items-center gap-3 py-2">
               <span className="w-16 shrink-0 text-xs font-medium text-slate-500 dark:text-night-400">状态</span>
               <span className="text-sm font-medium text-brand-600 dark:text-brand-400">
-                {connectionStatus || (state === TransferState.TRANSFERRING ? '传输中' : '等待连接')}
+                {/* 降级原因已经在上面的琥珀色提示里说完了：同一句话在状态位再复述一遍
+                    只会让用户以为出了两个问题。 */}
+                {connectionStatus === shareRevokedMessage && shareRevokedMessage
+                  ? '链接已失效'
+                  : connectionStatus || (state === TransferState.TRANSFERRING ? '传输中' : '等待连接')}
               </span>
             </div>
           </div>

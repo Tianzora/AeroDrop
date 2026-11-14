@@ -39,8 +39,11 @@ export const CONNECTION_TIMINGS = {
    * 说明链接真的要到期了，必须给 amber 提示，但不要因此停掉直播。
    */
   SHARE_ROOM_RENEWAL_MAX_FAILURES: 3,
-  /** 检查房号是否已经过期的间隔：过期必须让分享端看见，不能只靠 30 分钟一次的续期。 */
-  SHARE_ROOM_EXPIRY_CHECK_INTERVAL_MS: 60_000,
+  /**
+   * 限流冷却提示的刷新节拍。Retry-After 给的是秒数，界面每秒重算一次剩余时间就够；
+   * 这不是重试间隔——能不能点由 services/screenShare/shareRoomRetryCooldown.ts 判定。
+   */
+  SHARE_ROOM_RETRY_COUNTDOWN_TICK_MS: 1_000,
   /**
    * 连续多少次登记超时才落终态。单次超时可能只是 Worker 冷启动或链路抖动，值得重试；
    * 连续两次（约 17s 无响应）就不再退避——否则界面会永久停在「正在连接服务器」。
