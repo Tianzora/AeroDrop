@@ -1,4 +1,4 @@
-import { expect, test, type Browser, type Page } from '@playwright/test';
+import { expect, test, type Browser, type BrowserContext, type Page } from '@playwright/test';
 
 /**
  * 屏幕共享端到端用例：真实 Worker 信令 + 真实 WebRTC，只有「屏幕源」用 Chromium 的
@@ -100,8 +100,36 @@ const startSharing = async (page: Page) => {
   await expect(page.getByText('正在共享')).toBeVisible({ timeout: 20_000 });
 };
 
-const openViewer = async (browser: Browser, shareLink: string): Promise<Page> => {
+/**
+ * 记录页面上同一段文案出现过的**最大**次数（25ms 采样）。
+ *
+ * `toHaveCount(1)` 只保证「最终只剩一份」：重复的 toast 在 4 秒后自己消失，所以窗口内
+ * 短暂出现两份也照样绿——那正是「红条 + 同义 toast」双播回退时的假绿形态。断言最大值
+ * 才真正对应「同一时刻只有一个播报」。
+ */
+const trackMaxOccurrences = async (context: BrowserContext, source: string): Promise<void> => {
+  await context.addInitScript((pattern: string) => {
+    const state = window as typeof window & { __maxSeen?: number };
+    state.__maxSeen = 0;
+    const count = () => {
+      const text = document.body?.innerText ?? '';
+      const matches = text.match(new RegExp(pattern, 'g'));
+      const n = matches ? matches.length : 0;
+      if (n > (state.__maxSeen ?? 0)) state.__maxSeen = n;
+    };
+    document.addEventListener('DOMContentLoaded', () => {
+      count();
+      setInterval(count, 25);
+    });
+  }, source);
+};
+
+const readMaxSeen = async (page: Page): Promise<number> =>
+  page.evaluate(() => (window as typeof window & { __maxSeen?: number }).__maxSeen ?? 0);
+
+const openViewer = async (browser: Browser, shareLink: string, track?: string): Promise<Page> => {
   const viewerContext = await browser.newContext();
+  if (track) await trackMaxOccurrences(viewerContext, track);
   const viewer = await viewerContext.newPage();
   await viewer.goto(shareLink);
   return viewer;
@@ -903,7 +931,7 @@ test.describe('screen share', () => {
       }
       await expect(page.getByText('6 人观看')).toBeVisible({ timeout: 30_000 });
 
-      const extra = await openViewer(browser, shareLink);
+      const extra = await openViewer(browser, shareLink, '人数已满');
       viewers.push(extra);
 
       // 同一件事只准说一次：满员只有红色错误条承载，代码里已经没有对应的 toast，
@@ -916,6 +944,9 @@ test.describe('screen share', () => {
       await extra.waitForTimeout(22_000);
       await expect(fullNotice).toHaveCount(1);
       await expect(extra.getByText(/连接超时/)).toHaveCount(0);
+      // 与「共享结束」同理：满员文案曾经同时落进红条与 toast，4 秒后 toast 消失，
+      // 事后 count 仍是 1。这里断言 25ms 采样下的最大出现次数。
+      expect(await readMaxSeen(extra)).toBe(1);
     } finally {
       await Promise.all(viewers.map((viewer) => viewer.context().close()));
     }
@@ -929,8 +960,28 @@ test.describe('screen share', () => {
 
     await startSharing(page);
     const shareLink = await getShareLink(page);
-    const viewer = await openViewer(browser, shareLink);
+
+    // `toHaveCount(1)` 只保证「最终只剩一份」：重复的 toast 4 秒后自己消失，
+    // 4 秒窗口内出现两份也照样绿（这正是回退到「红条 + toast」时的假绿）。
+    // 所以按 25ms 采样页面文本，记录同一文案出现过的**最大**次数。
+    const viewerContext = await browser.newContext();
+    await viewerContext.addInitScript((source: string) => {
+      const state = window as typeof window & { __maxSeen?: number };
+      state.__maxSeen = 0;
+      const count = () => {
+        const text = document.body?.innerText ?? '';
+        const matches = text.match(new RegExp(source, 'g'));
+        const n = matches ? matches.length : 0;
+        if (n > (state.__maxSeen ?? 0)) state.__maxSeen = n;
+      };
+      document.addEventListener('DOMContentLoaded', () => {
+        count();
+        setInterval(count, 25);
+      });
+    }, '共享方已(停止共享|结束共享)');
+    const viewer = await viewerContext.newPage();
     try {
+      await viewer.goto(shareLink);
       await dismissAutoplayOverlay(viewer);
       const first = await waitForViewerFrames(viewer);
       expect(first.width).toBeGreaterThan(0);
@@ -942,11 +993,11 @@ test.describe('screen share', () => {
       // 所以不变量是「同一时刻只有一个共享已结束的播报」，而不是某一条具体文案。
       const endedNotice = viewer.getByText(/共享方已(停止共享|结束共享)/);
       await expect(endedNotice).toHaveCount(1, { timeout: 30_000 });
-      // 同事件不许另有同义提示（toast/红条重复）。
-      await viewer.waitForTimeout(3_000);
-      await expect(endedNotice).toHaveCount(1);
+      // 4 秒（sonner 的 duration）再加 1 秒，覆盖瞬时重复出现的整个窗口。
+      await viewer.waitForTimeout(5_000);
+      expect(await viewer.evaluate(() => (window as typeof window & { __maxSeen?: number }).__maxSeen)).toBe(1);
     } finally {
-      await viewer.context().close();
+      await viewerContext.close();
     }
   });
 
