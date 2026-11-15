@@ -311,6 +311,9 @@ test.describe('screen share', () => {
     // 登记就失败了，从没生成过链接：标题必须是「未能开始共享」，不能声称旧链接失效。
     await expect(terminalCard.getByText('未能开始共享')).toBeVisible({ timeout: 25_000 });
     await expect(terminalCard.getByText('创建共享房间过于频繁，请稍后再试')).toBeVisible();
+    // 同一句终态文案全页只能出现一次：终态卡本身是常驻的 assertive live region，
+    // 再补一条同文本 toast 会让读屏念两遍、视觉上同屏出现两次（第十七轮产品复评 M-1）。
+    await expect(page.getByText('创建共享房间过于频繁，请稍后再试')).toHaveCount(1);
     await expect(page.getByText('正在共享')).toHaveCount(0);
     await expect(page.locator('a[href*="view="]')).toHaveCount(0);
     await expect(terminalCard.getByText('此前分享的链接已失效，观众无法再加入。')).toHaveCount(0);
@@ -782,21 +785,18 @@ test.describe('screen share', () => {
     try {
       await viewer.goto(`/?view=${peerId}`);
       // 一次 3s 重试之后必须落到终态，而不是永远转圈。
-      // 同一句文案会同时出现在终态卡与提示条里，所以取第一个匹配即可。
+      // 终态文案由常驻红条承担；再补一条同文本 toast 会重复播报（第十七轮产品复评 M-1），
+      // 所以这里断言「全页恰好一次」，而不是 first() 的宽松写法。
       await expect(
-        viewer
-          .getByText('分享暂时不可用（可能已结束，或分享者正在重连），请稍后重新打开此链接')
-          .first()
-      ).toBeVisible({ timeout: 45_000 });
+        viewer.getByText('分享暂时不可用（可能已结束，或分享者正在重连），请稍后重新打开此链接')
+      ).toHaveCount(1, { timeout: 45_000 });
       // 终态之后不许再有新的「正在重试」提示把状态盖回去。
       await viewer.waitForTimeout(8_000);
       await expect(viewer.getByText('分享者暂时不在线，正在重试...')).toHaveCount(0);
       // 终态是稳定的：既不能被「正在重试」盖回去，也不该退化成通用的网络超时文案。
       await expect(
-        viewer
-          .getByText('分享暂时不可用（可能已结束，或分享者正在重连），请稍后重新打开此链接')
-          .first()
-      ).toBeVisible();
+        viewer.getByText('分享暂时不可用（可能已结束，或分享者正在重连），请稍后重新打开此链接')
+      ).toHaveCount(1);
       // 这些串都在 `services/connectionGuidance.ts` 里真实存在：用它们做「没有退化成通用
       // 网络故障」的非空断言（此前写死的「连接超时，请检查网络」全仓不存在，永远为真）。
       await expect(viewer.getByText(/连接超时|请检查网络|网络连接中断/)).toHaveCount(0);

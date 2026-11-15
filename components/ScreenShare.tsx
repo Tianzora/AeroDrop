@@ -1408,7 +1408,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     setCopied(false);
     setError(null);
     setSharerFailure({ reason: 'signaling_failed', message, hadShareLink: linkPublishedRef.current });
-    onNotification(message, 'error');
+    // 终态卡是常驻的 assertive live region：同一句话再弹一条 toast 会让读屏念两遍，
+    // 视觉上也是同一句文案同屏出现两次。toast 只用于没有内联载体的瞬时反馈。
   }, [broadcastShareEnded, onNotification, stopBandwidthMonitoring]);
 
   // 首连看门狗：登记成功但信令一直没 open 时，不能永远停在「正在连接服务器」。
@@ -1747,7 +1748,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     clearPersistedViewerSession();
     stopViewing(false);
     setError(reason);
-    onNotification(reason, 'info');
   }, [clearPersistedViewerSession, onNotification, stopViewing]);
 
 
@@ -1848,7 +1848,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         remoteShareFullRef.current = true;
         setError(getShareFullMessage(SCREEN_SHARE_LIMITS.MAX_VIEWERS));
         setIsConnecting(false);
-        onNotification('分享人数已满，请稍后再试', 'info');
         stopViewing(false);
       }
     };
@@ -1873,7 +1872,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       setIsConnecting(false);
       setError(getSuspectedShareFullMessage(SCREEN_SHARE_LIMITS.MAX_VIEWERS));
       // 这条是推断出来的（告知丢包），不能像确定拒绝那样用肯定语气。
-      onNotification('可能人数已满，请稍后再试', 'info');
+      // 文案已落在常驻红条上，不再重复一条 toast。
     };
 
     const reportViewerRateLimited = (retryAfterMs: number) => {
@@ -2322,7 +2321,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         // 旧链接恢复后还能用，所以不让用户去索取新链接。
         stopViewing(true);
         setError(VIEWER_SHARE_UNAVAILABLE_MESSAGE);
-        onNotification(VIEWER_SHARE_UNAVAILABLE_MESSAGE, 'info');
         return;
       }
 
