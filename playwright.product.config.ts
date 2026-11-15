@@ -10,6 +10,8 @@ export default defineConfig({
   // 产品级用例依赖真实 ICE 建连（没有 TURN）。CI runner 偶尔在 loopback 上建不起
   // peer connection（截图里发送端停在「等待连接」、接收端报「中继不可用」），那是
   // 环境抖动而不是产品回归：允许重试一次，断言强度不变（真回归两次都会红）。
+  // 不给它配 TURN：本套件在 product-transfer.spec.ts:122-124 明确断言路由不是 relay，
+  // 中继兜底会把那三条断言变成假绿——确定性只能靠下面的候选发现开关来保证。
   retries: process.env.CI ? 1 : 0,
   reporter: 'list',
   use: {
@@ -34,6 +36,9 @@ export default defineConfig({
             // 于是同一台机器上的两个页面也可能 ICE 失败。这两个开关只影响测试浏览器。
             '--disable-features=WebRtcHideLocalIpsWithMdns',
             '--allow-loopback-in-peer-connection',
+            // 默认 ip-handling-policy 在容器里可能只保留 public 接口，把 127.0.0.1 候选
+            // 一并丢掉；显式放开才能让两个页面在 loopback 上稳定建连。
+            '--force-webrtc-ip-handling-policy=default',
           ],
         },
       },
