@@ -18,21 +18,35 @@ test('--self-test 校验解析、判定、白名单预算与理由规则', () =>
 
   assert.equal(result.status, 0, `self-test 失败：\n${result.stdout}\n${result.stderr}`);
   assert.match(result.stdout, /self-test passed/);
-  assert.match(result.stdout, /fixture/);
-  // fixture 里必须真的验证过「缺失文件 / 0% 行 / 行数不足 / 同名遮蔽 / 范围外文件污染 /
-  // 门槛口径」这六条失败路径，否则自测只是在证明「能解析一段我自己写的文本」。同名遮蔽
-  // 与门槛口径是后加的两条：裸文件名会互相顶替，而 all files 汇总行会把范围外文件的
-  // 覆盖率算进组件门槛。
-  assert.match(result.stdout, /缺失文件、0% 行、行数不足、同名遮蔽、范围外文件污染、门槛口径六条失败路径/);
-  // 白名单预算与理由引用是后加的两组 fixture：前者拦「白名单把文件整块挪出分母」，
-  // 后者拦「理由里写了一个不存在的测试文件」这种假理由（只查 git ls-files 的源码清单
-  // 会漏掉全部 *.test.*，那条检查原本永远为真）。
-  assert.match(result.stdout, /\d+ 个白名单预算 fixture/);
-  assert.match(result.stdout, /\d+ 个理由 fixture/);
-  // 阈值政策 fixture（门槛数字 + 白名单预算）是后加的一组：没有它，把 85 改成 50、
-  // maxEntries 2 改成 5 之后自检依然全绿，规则没坏但门槛被静默放宽。
-  assert.match(result.stdout, /\d+ 个阈值政策 fixture/);
-  assert.match(result.stdout, /白名单预算上限、理由引用测试文件的存在性检查/);
+  // 数量写死：成功文案由 fixture 名字拼出来（不是另一句人写的总结），所以删掉任意一条
+  // fixture 都会同时改变数量与名字。只断言「fixture 这个词出现过」等于允许自测被删空。
+  assert.match(result.stdout, /19 个报告 fixture/);
+  assert.match(result.stdout, /5 个白名单预算 fixture/);
+  assert.match(result.stdout, /3 个理由 fixture/);
+  assert.match(result.stdout, /10 个阈值政策 fixture/);
+  // 逐条点名：这些失败路径必须各有一条 fixture 在证明它，删掉就该变红。
+  for (const name of [
+    '缺失文件会被点名',
+    'line 覆盖率 0% 判失败',
+    '报告行数不足判解析失效',
+    '同名文件遮蔽（两个目录同名、报告只给裸名）必须失败',
+    '范围外文件混进报告（exclude 失效）必须失败',
+    'scope 内掉点会红（门槛只看 all files 汇总行）',
+    '分组缩进的裸文件名必须按目录栈还原（同名文件在另一目录也存在）',
+    '白名单条目属于别的 scope 必须失败',
+  ]) {
+    assert.ok(
+      result.stdout.includes(name),
+      `self-test 输出里没有「${name}」：对应的 fixture 被删了或被改名了，这条失败路径不再有人证`
+    );
+  }
+  // 白名单预算与阈值政策也必须逐条出现在输出里：预算被放宽、门槛被改松都属于政策变更。
+  for (const name of ['白名单在预算内可以通过', '被排除行数占比超上限，必须失败', '总行数算成 0 时占比预算必须失败']) {
+    assert.ok(result.stdout.includes(name), `self-test 输出里没有「${name}」`);
+  }
+  for (const name of ['services 行门槛 85', 'components 白名单条目上限 3', 'components 白名单行占比上限 80%']) {
+    assert.ok(result.stdout.includes(name), `self-test 输出里没有「${name}」：阈值政策 fixture 被改动了`);
+  }
 });
 
 // 守卫本身没有价值这件事很隐蔽：脚本写得再好，CI 里不跑（或者只跑一半）就等于没有

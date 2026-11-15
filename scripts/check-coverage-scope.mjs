@@ -656,16 +656,16 @@ const BUDGET_CASES = [
 // 50、把 maxEntries 2 改成 5 之后，所有解析/判定 fixture 依然全绿 —— 规则没坏，门槛却被
 // 静默放宽了。放宽门槛是政策变更，必须同时改这里（并在评审里解释），改一个数字过不了自检。
 const POLICY_CASES = [
-  { scope: 'services', path: ['defaults', 'minLines'], expected: 85 },
-  { scope: 'services', path: ['defaults', 'minBranches'], expected: 78 },
-  { scope: 'services', path: ['defaults', 'minFunctions'], expected: 75 },
-  { scope: 'services', path: ['allowlistBudget', 'maxEntries'], expected: 2 },
-  { scope: 'services', path: ['allowlistBudget', 'maxExcludedLineShare'], expected: 0.05 },
-  { scope: 'components', path: ['defaults', 'minLines'], expected: 60 },
-  { scope: 'components', path: ['defaults', 'minBranches'], expected: 58 },
-  { scope: 'components', path: ['defaults', 'minFunctions'], expected: 40 },
-  { scope: 'components', path: ['allowlistBudget', 'maxEntries'], expected: 3 },
-  { scope: 'components', path: ['allowlistBudget', 'maxExcludedLineShare'], expected: 0.8 },
+  { name: 'services 行门槛 85', scope: 'services', path: ['defaults', 'minLines'], expected: 85 },
+  { name: 'services 分支门槛 78', scope: 'services', path: ['defaults', 'minBranches'], expected: 78 },
+  { name: 'services 函数门槛 75', scope: 'services', path: ['defaults', 'minFunctions'], expected: 75 },
+  { name: 'services 白名单条目上限 2', scope: 'services', path: ['allowlistBudget', 'maxEntries'], expected: 2 },
+  { name: 'services 白名单行占比上限 5%', scope: 'services', path: ['allowlistBudget', 'maxExcludedLineShare'], expected: 0.05 },
+  { name: 'components 行门槛 60', scope: 'components', path: ['defaults', 'minLines'], expected: 60 },
+  { name: 'components 分支门槛 58', scope: 'components', path: ['defaults', 'minBranches'], expected: 58 },
+  { name: 'components 函数门槛 40', scope: 'components', path: ['defaults', 'minFunctions'], expected: 40 },
+  { name: 'components 白名单条目上限 3', scope: 'components', path: ['allowlistBudget', 'maxEntries'], expected: 3 },
+  { name: 'components 白名单行占比上限 80%', scope: 'components', path: ['allowlistBudget', 'maxExcludedLineShare'], expected: 0.8 },
 ];
 
 const readPolicyValue = (scope, keys) => keys.reduce((node, key) => node?.[key], scope);
@@ -858,8 +858,18 @@ const runSelfTest = () => {
     for (const failure of failures) console.error(failure);
     process.exit(1);
   }
+  // 成功文案由 fixture 名字生成，而不是另写一句「六条失败路径」：后者在删掉某条 fixture 后
+  // 依然原样打印，等于用假话证明门禁完好（scripts/check-coverage-scope.test.ts 会逐条比对
+  // 数量与名字，删一条立刻红）。
+  const describeCases = (label, cases) =>
+    `${cases.length} 个${label} fixture（${cases.map((item) => item.name).join('；')}）`;
   console.log(
-    `check-coverage-scope: self-test passed —— ${SELF_TEST_CASES.length} 个报告 fixture + ${BUDGET_CASES.length} 个白名单预算 fixture + ${REASON_CASES.length} 个理由 fixture + ${POLICY_CASES.length} 个阈值政策 fixture 全部符合预期（含缺失文件、0% 行、行数不足、同名遮蔽、范围外文件污染、门槛口径六条失败路径，以及白名单预算上限、理由引用测试文件的存在性检查、阈值政策未被放宽）`
+    `check-coverage-scope: self-test passed —— ${[
+      describeCases('报告', SELF_TEST_CASES),
+      describeCases('白名单预算', BUDGET_CASES),
+      describeCases('理由', REASON_CASES),
+      describeCases('阈值政策', POLICY_CASES),
+    ].join(' + ')} 全部符合预期`
   );
 };
 
@@ -902,6 +912,27 @@ const allowlistBudgetReport = evaluateAllowlistBudget({
   totalLines: expected.reduce((sum, file) => sum + countSourceLines(file), 0),
   budget: scope.allowlistBudget,
 });
+
+// 文档与 CI 注释里的「文件数 / 行数 / 白名单预算」必须能被机械比对，否则每轮都要靠人重算，
+// 而人重算的结果已经漂移过三次。`--metrics` 只做静态统计（不跑测试套件），供
+// scripts/docs-metrics.test.ts 把数字钉到 git 清单与源码行数上。
+if (process.argv.includes('--metrics')) {
+  const entries = expected.filter((file) => scope.allowedUncovered.has(file));
+  const totalLines = expected.reduce((sum, file) => sum + countSourceLines(file), 0);
+  const excludedLines = entries.reduce((sum, file) => sum + countSourceLines(file), 0);
+  console.log(
+    JSON.stringify({
+      scope: scopeName,
+      files: expected.length,
+      exceptions: entries.length,
+      reportedRows: expected.length - entries.length,
+      excludedLines,
+      totalLines,
+      sharePercent: Number(((excludedLines / totalLines) * 100).toFixed(2)),
+    })
+  );
+  process.exit(0);
+}
 
 /**
  * 跑一次覆盖率。`coverageExclude` 决定哪些范围外文件不进报告——这同时决定了
