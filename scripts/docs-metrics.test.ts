@@ -128,7 +128,7 @@ test('最新章节里不得残留上一轮的旧数字', () => {
   assert.ok(headings.length > 0, 'docs/design-scale-out.md 里找不到任何 ### 8.N 小节');
   const latest = headings[headings.length - 1];
   const body = docs.slice(latest.index);
-  for (const stale of ['152/17528', '7893/10459', 'ScreenShare 2856 行', '当前 89.22 / 75.37 / 79.61']) {
+  for (const stale of ['152/17528', '7898/10464', 'ScreenShare 2861 行', '当前 89.22 / 75.37 / 79.61']) {
     assert.ok(!body.includes(stale), `最新章节 ${latest.label} 里仍残留旧数字「${stale}」：数字漂移就是这么开始的`);
   }
 });

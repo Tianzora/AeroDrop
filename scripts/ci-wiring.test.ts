@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { existsSync, readFileSync } from 'node:fs';
 import { join } from 'node:path';
 import test from 'node:test';
+import { collectTestFiles } from './node-test-args.mjs';
 
 // 门禁的价值全在「它会不会红」。这里把几处「一次编辑就能悄悄关掉整条门禁」的接线钉住：
 //   - `test:all` 少了某个 suite、被加上 `|| true`、或某个 suite 脚本退化成只跑一个文件；
@@ -328,9 +329,28 @@ test('test:all 与三个 suite 脚本必须精确指向完整套件，且不允�
   }
 });
 
-test('覆盖率守卫的自检与用例清单测试必须在仓库里', () => {
-  for (const file of ['scripts/e2e-suite-inventory.test.ts', 'scripts/check-coverage-scope.test.ts']) {
+// 门禁的「门禁」测试文件本身也必须有清单：第十七轮工程复评 MF-B 证明，把
+// `debt-budget.test.ts` 改名成 `.spec.ts` 后 collectTestFiles 收不到它，scripts 套件从
+// 33 掉到 29 却仍然 exit 0 —— 四条结构债断言就这样静默消失。所以这里既钉文件存在，
+// 也钉它们真的被测试入口收集到（存在但没被收集 = 一样没用）。
+const GATE_TEST_FILES = [
+  'scripts/check-coverage-scope.test.ts',
+  'scripts/ci-wiring.test.ts',
+  'scripts/e2e-suite-inventory.test.ts',
+  'scripts/docs-metrics.test.ts',
+  'scripts/docs-current-pointer.test.ts',
+  'scripts/debt-budget.test.ts',
+  'scripts/run-node-tests.test.ts',
+];
+
+test('覆盖率守卫与门禁自身的测试文件必须在仓库里，并且真的会被收集运行', () => {
+  const collected = new Set(collectTestFiles(['scripts']).map((file: string) => file.replace(/\\/g, '/')));
+  for (const file of GATE_TEST_FILES) {
     assert.ok(existsSync(join(ROOT, file)), `${file} 不存在：门禁失去了自我校验`);
+    assert.ok(
+      collected.has(`${ROOT.replace(/\\/g, '/')}/${file}`),
+      `${file} 存在但没有被 collectTestFiles(['scripts']) 收集：改名成 .spec.ts 之类的后缀会让它静默不跑`
+    );
   }
 });
 

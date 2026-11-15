@@ -73,9 +73,14 @@ test('所有「当前」指针都必须指向最新章节，不得指向历史�
     if (heading) enclosing = Number(heading[1]);
     if (!line.includes('当前')) return;
     // 引号里的字符串是「引用别人的话」，不是本行的指针（例如缺陷描述里引用了一句错的
-    // 横幅文案「当前以 §8.13 为准」）。先剥掉成对引号再找指针。
-    const scanned = line.replace(/「[^」]*」|『[^』]*』|“[^”]*”|`[^`]*`/g, '');
-    for (const match of scanned.matchAll(/(?:见|以|指向)\s*§8\.(\d+)/g)) {
+    // 横幅文案「当前以 §8.13 为准」）。但「见「§8.15」」这种只包了一个章节号的引号仍是指针，
+    // 所以先把「整段引号内容就是一个 8.N」的写法拆出来，再剥掉其余引号。
+    const unquotedSection = line.replace(/[「『“‘"`]\s*(§?\s*8\.\d+)\s*[」』”’"`]/g, ' $1 ');
+    const scanned = unquotedSection.replace(/「[^」]*」|『[^』]*』|“[^”]*”|`[^`]*`/g, '');
+    // 不能只认「见/以/指向 §8.N」：第十七轮工程复评 MF-A 证明「参考 §8.15」「见 8.15」
+    // 「见「§8.15」」都能绕过。这里放宽动词（含参见/参考/参照）并允许缺 §，但只在真正
+    // 出现「指向」语义时才判定 —— 否则「§8.4–§8.12 数字均为当轮快照」这类正常叙述会被误判。
+    for (const match of scanned.matchAll(/(?:见|以|指向|参见|参考|参照)\s*§?\s*8\.(\d+)/g)) {
       const section = Number(match[1]);
       if (section === current) continue;
       if (enclosing !== null && section === enclosing) continue;
