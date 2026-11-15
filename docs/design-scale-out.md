@@ -405,7 +405,7 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 
 ### 8.7 第五轮复评后的补齐（2026-11-14，复评基线 93 / 88 / 89）
 
-> 数字说明：§8.4–§8.12 里的覆盖率、文件数、行数与用例数都是各轮**当时的快照**；`src/worker.ts` 的覆盖率、组件/服务文件数等会随后续提交变化，当前实测一律以 §8.18 末尾为准。
+> 数字说明：§8.4–§8.12 里的覆盖率、文件数、行数与用例数都是各轮**当时的快照**；`src/worker.ts` 的覆盖率、组件/服务文件数等会随后续提交变化，当前实测一律以 §8.19 末尾为准。
 
 第五轮的三份复评（安全 93、产品 88、工程 89）都只差「最后一公里」的证明，因此这一轮几乎没有新抽象，主要是把已有模块接进测试与 CI：
 
@@ -416,9 +416,9 @@ P1/P2/P3 与 P4/P5 是两条互不依赖的线，可以并行，但不要在同�
 | 屏幕共享重建时的 proof 组装/落盘/清理散在组件里，调用点无测试 | 抽 `services/screenShare/screenShareSessionProof.ts`（room + storage 注入）：`resolveScreenSharePeerCredentials` / `rememberScreenShareSessionProof` / `forgetScreenShareSessionProof` | `screenShareSessionProof.test.ts`（有 proof 时凭证不带 `sessionSecretHash`、storage 损坏不抛、终态清理后为空） |
 | 第 7 个观众被拒时发 `{type:'share-full'}` 的分支无测试；data conn 未登记时观众只看到「连接超时…检查网络」而不是「人数已满」 | 抽 `planViewerAdmission`（`admit` / `reject-share-full` + `reserveSeat` + `delivery`）与 `deliverShareFull`（已登记连接直发，未登记反向连一条） | `viewerAdmission.test.ts` +151 行（pending 占位、已满、dc 未登记仍能投放）；E2E 见下行 |
 | 三条失败路径只有单测、没有真实浏览器证据 | `e2e/screenshare.spec.ts` 新增：房号过期（琥珀「链接已失效」+ 复制禁用）、停止→立刻重开（30s 内重新出现链接）、观众媒体失败（重试提示 → 「重试连接」终态） | 新增 3 条 + 2 条既有终态用例，product 套件 **11 passed (1.2m)** |
-| `src/worker.ts` 默认导出 `fetch` 从未执行：同源门/鉴权/分派被改坏仍全绿 | 把 `isAllowedSameOriginRequest` 逐字抽到 `services/signaling/httpOriginPolicy.ts`；`services/signaling/workerEntry.test.ts` 直接驱动入口 fetch | `httpOriginPolicy.test.ts`（10 例）+ `workerEntry.test.ts`（9 例：ASSETS/426/403/400/101 + share-code HMAC/429）；worker.ts 行覆盖 71.53% → **81.75%**、函数 53.33% → **68.13%**（第八轮快照；当前 89.11 / 75.21 / 80.58，见 §8.18）；负对照 16/19、3、1 条变红 |
-| `--test-coverage-include` 只是报告过滤器：未被测试加载的文件按 0 计入分母的说法不成立（实测组件套件只报出 4 个文件），任何新模块只要没人 import 就完全逃过门槛 | `scripts/check-coverage-scope.mjs` 按 scope 运行（`--scope=services|components`）：期望清单来自 `git ls-files`，报告行数 < 期望 − 白名单即失败；报告里 line 覆盖率为 `0%` 且不在白名单的文件同样失败（「进了分母但一行没跑」不算回归证据）；解析先剥 ANSI、行首标记可选（本地 `ℹ`、CI runner 上观察到 `#`），避免把「格式变了」误报成「所有文件都没加载」；`--self-test` 用内联 fixture 固定解析与判定规则；**不传 include**，分母完整性由 git 对比保证 | 负对照：去掉白名单过滤 ⇒ exit 1 并点名；`--scope=services` ⇒ 118 个生产源文件 / 报告 116 行 / 例外 2；`--scope=components` ⇒ 13 个生产文件 / 报告 10 行 / 例外 3（第八轮快照；当前数字见 §8.18）；CI run `43557683645` 复现「报告完整但解析 0 行」，`43558142248` 转绿；全仓行覆盖 89.78% |
-| 组件覆盖率门禁是假的：`components/Receiver.tsx`（3367 行）、`components/ScreenShare.tsx`（2863 行）、`components/Sender.tsx`（1670 行）在组件套件里一行都没进报告，而 CI 注释宣称「未加载组件按 0 计入」 | 把同一个守卫扩到 components scope：期望清单 = `git ls-files components` 的 `.ts/.tsx` 去掉测试文件；白名单只收「Node 宿主里确实无法 import」的三个组件（`Receiver.tsx` 顶层访问 document，`ScreenShare.tsx` / `Sender.tsx` 顶层访问 window，交互分别由 Playwright e2e 与 `test:e2e:product-transfer` 覆盖）；能加载却没人测的组件（`ErrorBoundary.tsx`、`PWAInstallPrompt.tsx`）用 `scripts/component-import-smoke.test.ts` 拉进分母，不允许进白名单；因此 components scope 的测试目标是 `['components', 'scripts/component-import-smoke.test.ts']` | 真实分母 13 个生产文件、10 个必须出现且全部在册；门槛只按 scope 内行判定（当轮快照 63.35 行 / 68.42 分支 / 42.86 函数；当前 65.43 / 71.43 / 42.86，见 §8.18）；负对照：把白名单扩到可加载组件 ⇒ 该文件立刻被判缺测试 |
+| `src/worker.ts` 默认导出 `fetch` 从未执行：同源门/鉴权/分派被改坏仍全绿 | 把 `isAllowedSameOriginRequest` 逐字抽到 `services/signaling/httpOriginPolicy.ts`；`services/signaling/workerEntry.test.ts` 直接驱动入口 fetch | `httpOriginPolicy.test.ts`（10 例）+ `workerEntry.test.ts`（9 例：ASSETS/426/403/400/101 + share-code HMAC/429）；worker.ts 行覆盖 71.53% → **81.75%**、函数 53.33% → **68.13%**（第八轮快照；当前 89.11 / 75.21 / 80.58，见 §8.19）；负对照 16/19、3、1 条变红 |
+| `--test-coverage-include` 只是报告过滤器：未被测试加载的文件按 0 计入分母的说法不成立（实测组件套件只报出 4 个文件），任何新模块只要没人 import 就完全逃过门槛 | `scripts/check-coverage-scope.mjs` 按 scope 运行（`--scope=services|components`）：期望清单来自 `git ls-files`，报告行数 < 期望 − 白名单即失败；报告里 line 覆盖率为 `0%` 且不在白名单的文件同样失败（「进了分母但一行没跑」不算回归证据）；解析先剥 ANSI、行首标记可选（本地 `ℹ`、CI runner 上观察到 `#`），避免把「格式变了」误报成「所有文件都没加载」；`--self-test` 用内联 fixture 固定解析与判定规则；**不传 include**，分母完整性由 git 对比保证 | 负对照：去掉白名单过滤 ⇒ exit 1 并点名；`--scope=services` ⇒ 118 个生产源文件 / 报告 116 行 / 例外 2；`--scope=components` ⇒ 13 个生产文件 / 报告 10 行 / 例外 3（第八轮快照；当前数字见 §8.19）；CI run `43557683645` 复现「报告完整但解析 0 行」，`43558142248` 转绿；全仓行覆盖 89.78% |
+| 组件覆盖率门禁是假的：`components/Receiver.tsx`（3367 行）、`components/ScreenShare.tsx`（2863 行）、`components/Sender.tsx`（1670 行）在组件套件里一行都没进报告，而 CI 注释宣称「未加载组件按 0 计入」 | 把同一个守卫扩到 components scope：期望清单 = `git ls-files components` 的 `.ts/.tsx` 去掉测试文件；白名单只收「Node 宿主里确实无法 import」的三个组件（`Receiver.tsx` 顶层访问 document，`ScreenShare.tsx` / `Sender.tsx` 顶层访问 window，交互分别由 Playwright e2e 与 `test:e2e:product-transfer` 覆盖）；能加载却没人测的组件（`ErrorBoundary.tsx`、`PWAInstallPrompt.tsx`）用 `scripts/component-import-smoke.test.ts` 拉进分母，不允许进白名单；因此 components scope 的测试目标是 `['components', 'scripts/component-import-smoke.test.ts']` | 真实分母 13 个生产文件、10 个必须出现且全部在册；门槛只按 scope 内行判定（当轮快照 63.35 行 / 68.42 分支 / 42.86 函数；当前 65.43 / 71.43 / 42.86，见 §8.19）；负对照：把白名单扩到可加载组件 ⇒ 该文件立刻被判缺测试 |
 | 覆盖率过滤器探测失败会静默退化（Node 22.12 没有 `--test-coverage-include`） | `buildNodeTestArgs` 在 `NODE_TEST_COVERAGE=1` 但过滤器不可用时直接 throw，不再只统计已加载文件 | `run-node-tests.test.ts` +3 例（throw、两旗标判定、include/exclude 参数） |
 | 补测 6 个从未被 import 的模块（`fileUtils`、`routeProbeLog`、`logicalReceiverSessions`、`committedReconnectResume`、`receiverRouteSessionId`、`sessionTransferState`） | 逐模块补真值表/边界用例，而不是只「import 一次」凑覆盖率 | `services` 552 → **606 tests**；`services/signaling` 137 pass |
 
@@ -752,16 +752,37 @@ CI 仍是信号不是闸门（Cloudflare Git 集成不读 GitHub 检查，除非
 | 缺口 | 修法 | 验证 |
 | --- | --- | --- |
 | 工程（MF1）：跳过开关只挡字面量。给 Typecheck 加 `if: ${{ 1 == 2 }}` 或给 Unit tests 加 `continue-on-error: ${{ true }}`，CI 全绿而门禁已死 | `ci-wiring.test.ts` 的判定抽成 `findWiringProblems()` 纯函数：任意 `continue-on-error:` 一律禁止（不判取值）、step 级 `if:` 只允许清理/上传步骤使用 `always()`、任何字段里出现 `${{` 即失败、`timeout-minutes` 必须声明且不超过上限；并在真实 workflow 上做 9 处变异自证（表达式跳过、表达式 continue-on-error、job 级同名开关、job 改名、删门禁 step、`run` 塞表达式、`run` 加 `|| true`、`needs` 改挂、上传改 `success()`） | 9 条变异各被点名一条；真实 `ci.yml` 返回空列表；负对照：把真实文件改回旧写法 ⇒ 对应变异红 |
-| 工程（MF2）：文档与 CI 注释里的「本轮实测」数字与工作树不符（services 的文件数/行数/预算、ci.yml 的白名单行数/占比/余量与组件行数全部停留在上一轮的值） | 守卫新增 `--metrics`（只做静态统计，不跑测试套件），新增 `scripts/docs-metrics.test.ts` 把文档**最新章节的正文**与 ci.yml 的文件数、例外数、白名单行数/占比、余量、三个组件行数全部绑到它上面 | `--metrics` 输出 `119/117/2、152/17567、0.87%` 与 `13/10/3、7898/10464、75.48%`；负对照：只把 §8.18 的 `119` 改成 `118` ⇒ 红 |
+| 工程（MF2）：文档与 CI 注释里的「本轮实测」数字与工作树不符（services 的文件数/行数/预算、ci.yml 的白名单行数/占比/余量与组件行数全部停留在上一轮的值） | 守卫新增 `--metrics`（只做静态统计，不跑测试套件），新增 `scripts/docs-metrics.test.ts` 把文档**最新章节的正文**与 ci.yml 的文件数、例外数、白名单行数/占比、余量、三个组件行数全部绑到它上面 | `--metrics` 输出 `119/117/2、152/17567、0.87%` 与 `13/10/3、7893/10459、75.47%`；负对照：只把 §8.18 的 `119` 改成 `118` ⇒ 红 |
 | 工程（复评 MF1）：`docs-metrics.test.ts` 起初用「整份文档 `includes()`」，而 §8.17 是内容几乎相同的上一轮快照 —— 把**最新节**写错一个数字，旧节照样命中，测试静默全绿 | 断言改在「最新章节正文」内（`latestSectionBody` 按标题切段，与 `docs-current-pointer.test.ts` 的 `sectionBody` 同一语义），并加注释说明为什么不能对整份文档断言 | 负对照：只改 §8.18 的「119 文件」→「118 文件」，旧实现绿、新实现红（实跑 `pass 3 / fail 1`） |
-| 工程（复评 MF2）：`docs-current-pointer.test.ts` 用「整行含『快照/历史/当时』就跳过」做豁免 —— 一行只要能带上这些词就能把「当前…见 §8.18」改回历史章节而不红 | 豁免改为**按所属章节判定**：指针要么指向最新章节，要么指向自己所在的 §8.K；同时先剥掉成对引号再找指针（缺陷描述里引用「当前以 §8.13 为准」不算指针） | 负对照：把「当前 89.11 / 75.21 / 80.58，见 §8.18」改回 `§8.15` ⇒ 红（实跑 `pass 3 / fail 1`） |
+| 工程（复评 MF2）：`docs-current-pointer.test.ts` 用「整行含『快照/历史/当时』就跳过」做豁免 —— 一行只要能带上这些词就能把「当前…见 §8.18」改回历史章节而不红 | 豁免改为**按所属章节判定**：指针要么指向最新章节，要么指向自己所在的 §8.K；同时先剥掉成对引号再找指针（缺陷描述里引用「当前以 §8.13 为准」不算指针） | 负对照：把「当前 89.11 / 75.21 / 80.58，见 §8.19」改回 `§8.15` ⇒ 红（实跑 `pass 3 / fail 1`） |
 | 产品（M-1）：同一个终态事件同时落「常驻内联 alert」和「同文本 toast」——视觉上同屏两遍，读屏「assertive + polite」各念一遍 | 删掉 5 处与内联文案重复的 toast（`failSharerSession`、`handleRemoteShareEnded`、观众 `share-full`、`suspected-share-full`、`share-unavailable`）；toast 只保留给没有内联载体的瞬时反馈 | e2e 加「同一句终态文案全页只出现一次」：429 终态断言 `创建共享房间过于频繁…` 的 `toHaveCount(1)`、死链终态断言「分享暂时不可用…」`toHaveCount(1)`（原来分别是 2 与 `first()`） |
 | 工程（MF3）：`--self-test` 的成功文案是另一句人写的话（「六条失败路径」），删掉任意一条 fixture 后自测依旧全绿、且继续宣称六条路径都被证明 | 成功文案由 fixture 名字拼出（逐条列出），`check-coverage-scope.test.ts` 断言精确数量（19/5/3/10）并逐条点名关键 fixture；`POLICY_CASES` 补 `name` 字段 | 负对照：改掉任一条 fixture 的名字 ⇒ 守卫自身测试红；去掉数量断言即失去作用 |
 
 本轮实测（干净树，2026-11-15）：
 
 - `npm run typecheck` → 0；`npm run test:all` → services **726** / components **47** / scripts **33** 全 pass。
-- `--scope=services` 119 文件 / 117 行 / 2 例外，预算 152/17567（0.87%）；`--scope=components` 13 文件 / 10 行 / 3 例外，预算 7898/10464（75.48%，上限 80%）。
+- `--scope=services` 119 文件 / 117 行 / 2 例外，预算 152/17567（0.87%）；`--scope=components` 13 文件 / 10 行 / 3 例外，预算 7893/10459（75.47%，上限 80%）。
 - `--self-test` → 19 报告 + 5 预算 + 3 理由 + 10 阈值政策 fixture 全过；`npm run test:e2e` 9 passed；`npm run test:e2e:product-transfer` **15 passed**。
-- 三个千行组件：`components/Receiver.tsx`（3367 行）、`components/ScreenShare.tsx`（2861 行）、`components/Sender.tsx`（1670 行）。
+- 三个千行组件：`components/Receiver.tsx`（3367 行）、`components/ScreenShare.tsx`（2856 行）、`components/Sender.tsx`（1670 行）。
 - `npm run build` → `dist/assets/index-DBvu-mmP.js` 716.89 kB / gzip 225.95 kB（本轮含 `components/ScreenShare.tsx` 的 toast 去重，客户端 bundle 因此变化）。
+
+### 8.19 第十七轮复评后的收口（2026-11-15，复评基线 安全 96 / 产品 93 / 工程 90）
+
+第十七轮的安全复评已经达标（96、must_fix 为空），但产品与工程各剩一组「同一类问题的残余样本」：
+产品的「同一事件双播报」上一轮只删了 5 处、还剩 3 处，而且删掉的那些没有 e2e 能变红；
+工程的「门禁防篡改」上一轮只钉了两类指针写法、且门禁测试文件本身没有完整性清单。
+
+| 缺口 | 修法 | 验证 |
+| --- | --- | --- |
+| 产品（M-2）：同一终态事件仍有 3 处「红条 + toast」双播——观众重连耗尽（`ScreenShare.tsx:1956`）、浏览器不支持共享（`:2643`）、`getDisplayMedia` 非取消失败（`:2695`） | 删掉这 3 条 `onNotification`，由常驻红条唯一承载（红条是 `role="alert" aria-live="assertive"`，且带「重试连接」入口） | e2e「连接断开，已达到最大重试次数，请手动重试」`toHaveCount(1)`、同页「屏幕共享连接断开」`toHaveCount(0)` |
+| 产品（R4）：`handleRemoteShareEnded` / `share-full` / `suspected-share-full` 三处删了 toast 但没有任何断言能在回退时变红（本地单测与 typecheck 把 toast 加回来也全绿） | 把「同文案只出现一次」的断言补到 e2e，而不是指望组件单测：`e2e/screenshare.spec.ts` 的 429 终态与死链终态分别断言 `toHaveCount(1)`（原来一处是 2、一处只 `first()`） | 变异（把 toast 加回来）在本地 `test:components` 全绿、在 `test:e2e:product-transfer` 红 |
+| 工程（MF-A）：`docs-current-pointer.test.ts` 的指针正则只认「见/以/指向 §8.N」，`参考 §8.15`、`见 8.15`、`见「§8.15」` 三种写法都能绕过 | 放宽动词（`见/以/指向/参见/参考/参照`）并允许缺 `§`；引号里「整段就是一个 8.N」的先拆出来当指针（`见「§8.15」`），其余引号（缺陷描述里引用「当前以 §8.13 为准」）仍豁免 | 负对照：`参考 8.15` 与 `见「§8.15」` 各 1 红（`L421 → §8.15`）；正常叙述「§8.4–§8.12 数字均为当轮快照」不误报 |
+| 工程（MF-B）：门禁测试文件没有完整性清单——把 `scripts/debt-budget.test.ts` 改名成 `.spec.ts` 后 `collectTestFiles` 收不到它，scripts 套件 33→29 却仍 exit 0，四条结构债断言静默消失 | `ci-wiring.test.ts` 增加 `GATE_TEST_FILES` 清单（守卫、接线、用例清单、文档数字、文档指针、结构债、runner 七个文件），同时断言「文件存在」且「被 `collectTestFiles(['scripts'])` 真的收集到」 | 负对照：`debt-budget.test.ts` → `.spec.ts` ⇒ 「不存在：门禁失去了自我校验」红；还原后 33 pass |
+
+本轮实测（干净树，2026-11-15）：
+
+- `npm run typecheck` → 0；`npm run test:all` → services **726** / components **47** / scripts **33** 全 pass。
+- `--scope=services` 119 文件 / 117 行 / 2 例外，预算 152/17567（0.87%）；`--scope=components` 13 文件 / 10 行 / 3 例外，预算 7893/10459（75.47%，上限 80%）。
+- `--self-test` → 19 报告 + 5 预算 + 3 理由 + 10 阈值政策 fixture 全过；`npm run test:e2e` 9 passed；`npm run test:e2e:product-transfer` **15 passed**。
+- 三个千行组件：`components/Receiver.tsx`（3367 行）、`components/ScreenShare.tsx`（2856 行）、`components/Sender.tsx`（1670 行）。
+- `npm run build` → `dist/assets/index-Al669yHw.js` 716.77 kB / gzip 225.92 kB。

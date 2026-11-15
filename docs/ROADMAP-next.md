@@ -222,4 +222,13 @@ WS 凭证移出 URL query（`Sec-WebSocket-Protocol`）、读路径不再写库�
 - 数字不再靠人重算：守卫新增 `--metrics`（静态统计），`scripts/docs-metrics.test.ts` 把文档最新章节与 `ci.yml` 的文件数、例外数、白名单行数/占比、余量、三个组件行数全部绑定，最新章节残留旧数字直接失败。
 - 自测不再自称：「`--self-test` 成功文案」由 fixture 名字拼出，守卫自身测试断言精确数量（19/5/3/10）并逐条点名关键 fixture。
 
-状态: 进行中（第十六轮工程 must-fix 已收口，待全量门禁、推送与安全/产品复评, 2026-11-15）
+状态: 完成 (第十六轮 must-fix 全部收口；门禁全绿，已推送并部署, 2026-11-15)
+
+## 阶段 16：第十七轮复评后的收口（2026-11-15）
+
+对应 `docs/design-scale-out.md` §8.19。安全复评已达 96（must_fix 为空），产品（93）与工程（90）各剩一组同族残余：
+
+- 产品：同一终态事件的「红条 + toast」双播还剩 3 处（观众重连耗尽、浏览器不支持共享、`getDisplayMedia` 非取消失败），全部删掉 toast，由常驻 assertive 红条唯一承载；并给「同文案只出现一次」补 e2e 断言（本地单测与 typecheck 抓不到重复 toast）。
+- 工程：`docs-current-pointer.test.ts` 的指针正则放宽到 `见/以/指向/参见/参考/参照` + 允许缺 `§` + 支持「整段引号就是一个 8.N」；`ci-wiring.test.ts` 增加 `GATE_TEST_FILES` 完整性清单，断言七个门禁测试文件既存在、又真的被 `collectTestFiles(['scripts'])` 收集（改名成 `.spec.ts` 会立刻红）。
+
+状态: 进行中（第十七轮 must-fix 已收口，待全量门禁、推送与产品/工程复评, 2026-11-15）
