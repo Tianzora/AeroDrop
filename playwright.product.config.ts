@@ -7,7 +7,10 @@ export default defineConfig({
   timeout: 60_000,
   fullyParallel: false,
   workers: 1,
-  retries: 0,
+  // 产品级用例依赖真实 ICE 建连（没有 TURN）。CI runner 偶尔在 loopback 上建不起
+  // peer connection（截图里发送端停在「等待连接」、接收端报「中继不可用」），那是
+  // 环境抖动而不是产品回归：允许重试一次，断言强度不变（真回归两次都会红）。
+  retries: process.env.CI ? 1 : 0,
   reporter: 'list',
   use: {
     baseURL: process.env.AERODROP_BASE_URL ?? 'http://127.0.0.1:8787',
@@ -27,6 +30,10 @@ export default defineConfig({
             '--use-fake-ui-for-media-stream',
             '--use-fake-device-for-media-stream',
             '--auto-select-desktop-capture-source=Entire screen',
+            // 无头容器里 mDNS(.local) 候选解析不到，loopback 候选又默认被过滤，
+            // 于是同一台机器上的两个页面也可能 ICE 失败。这两个开关只影响测试浏览器。
+            '--disable-features=WebRtcHideLocalIpsWithMdns',
+            '--allow-loopback-in-peer-connection',
           ],
         },
       },
