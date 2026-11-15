@@ -341,6 +341,7 @@ const GATE_TEST_FILES = [
   'scripts/docs-current-pointer.test.ts',
   'scripts/debt-budget.test.ts',
   'scripts/run-node-tests.test.ts',
+  'scripts/component-import-smoke.test.ts',
 ];
 
 test('覆盖率守卫与门禁自身的测试文件必须在仓库里，并且真的会被收集运行', () => {
