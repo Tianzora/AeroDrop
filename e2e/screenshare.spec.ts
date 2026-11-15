@@ -113,7 +113,7 @@ const openViewer = async (browser: Browser, shareLink: string): Promise<Page> =>
  * 存在的函数，但「没有可采集的桌面」只会在调用时抛错。只有真抓到一帧才算支持。
  *
  * 本机开发者没有显示服务时允许 skip（否则本地/无头环境寸步难行）；但 CI 里
- * fake-capture flag（playwright.product.config.ts）一旦回归，11 条走 ensureDisplayCapture 的用例会整组 skip
+ * fake-capture flag（playwright.product.config.ts）一旦回归，12 条走 ensureDisplayCapture 的用例会整组 skip
  * 而 job 依旧全绿——所以 CI 下把探测结果当断言，必须为 true。
  */
 const ensureDisplayCapture = async (page: Page): Promise<void> => {
@@ -825,7 +825,7 @@ test.describe('screen share', () => {
     page,
   }) => {
     // 63s 窗口等待 + 6 个观众（含重试）+ 第 7 个观众的 22s 观察窗口，留足余量。
-    test.setTimeout(480_000);
+    test.setTimeout(600_000);
     await page.goto('/');
     await ensureDisplayCapture(page);
 
@@ -852,7 +852,7 @@ test.describe('screen share', () => {
     // 生产环境一轮跑下来经常要跨两个窗口，所以这里给它两个窗口的预算。
     const openViewerWithFrames = async (): Promise<Page> => {
       let lastError: unknown;
-      for (let attempt = 0; attempt < 2; attempt += 1) {
+      for (let attempt = 0; attempt < 3; attempt += 1) {
         const viewer = await openViewer(browser, shareLink);
         await dismissAutoplayOverlay(viewer);
         try {
@@ -884,7 +884,9 @@ test.describe('screen share', () => {
     try {
       // 6 个名额都要真正收到画面，分享端的 activeViewers 才会计入，第 7 个才会被拒。
       // 每轮最多再补开一个观众；命中限流就等下一个配额窗口（固定窗口，60s 后清零）。
-      const deadline = Date.now() + 210_000;
+      // 挂着代理的本机上单个观众的 ICE 会偶发失败（失败页面会被关掉再补一个），
+      // 因此这里给足补位预算：容量断言本身与网络无关，别让网络抖动把它拖红。
+      const deadline = Date.now() + 330_000;
       let waitingForWindow = false;
       while ((await activeViewerCount()) < 6 && Date.now() < deadline) {
         try {
@@ -904,19 +906,94 @@ test.describe('screen share', () => {
       const extra = await openViewer(browser, shareLink);
       viewers.push(extra);
 
-      // 两种兜底文案都算达标：确定拒绝（分享人数已满…）与 best-effort 没送到时的
-      // 推断（可能人数已满…）。拒绝会同时落一条 info 提示和红色错误条，故取首个匹配。
-      const fullNotice = extra.getByText(/人数已满/).first();
-      await expect(fullNotice).toBeVisible({ timeout: 30_000 });
+      // 同一件事只准说一次：满员只有红色错误条承载，代码里已经没有对应的 toast，
+      // 所以这里必须恰好一条（以前取 .first()，把「多播一条」也当成通过）。
+      const fullNotice = extra.getByText(/人数已满/);
+      await expect(fullNotice).toHaveCount(1, { timeout: 30_000 });
 
       // 旧实现要过一个 20s 的连接超时窗口才会给出错误，且给的是网络结论。
-      // 这里多等一个窗口，确认文案没有被「连接超时」覆盖掉。
+      // 这里多等一个窗口，确认文案没有被「连接超时」覆盖掉，也没有多出第二份。
       await extra.waitForTimeout(22_000);
-      await expect(fullNotice).toBeVisible();
+      await expect(fullNotice).toHaveCount(1);
       await expect(extra.getByText(/连接超时/)).toHaveCount(0);
     } finally {
       await Promise.all(viewers.map((viewer) => viewer.context().close()));
     }
+  });
+
+  // 分享端主动停止时，观众侧必须收到一次、且只有一次的「共享方已结束共享」终态。
+  // 这条终态以前删掉了重复 toast 却没有任何断言兜底：把 toast 加回来也全绿。
+  test('a viewer hears the share ended exactly once when the sharer stops', async ({ browser, page }) => {
+    await page.goto('/');
+    await ensureDisplayCapture(page);
+
+    await startSharing(page);
+    const shareLink = await getShareLink(page);
+    const viewer = await openViewer(browser, shareLink);
+    try {
+      await dismissAutoplayOverlay(viewer);
+      const first = await waitForViewerFrames(viewer);
+      expect(first.width).toBeGreaterThan(0);
+
+      await page.getByRole('button', { name: '停止共享' }).click();
+
+      // 停止共享会先广播 share-ended（观众据此得到「共享方已停止共享」），随后 call
+      // 关闭还会再走一次终态（「共享方已结束共享」）。两条路径复用同一个错误位，
+      // 所以不变量是「同一时刻只有一个共享已结束的播报」，而不是某一条具体文案。
+      const endedNotice = viewer.getByText(/共享方已(停止共享|结束共享)/);
+      await expect(endedNotice).toHaveCount(1, { timeout: 30_000 });
+      // 同事件不许另有同义提示（toast/红条重复）。
+      await viewer.waitForTimeout(3_000);
+      await expect(endedNotice).toHaveCount(1);
+    } finally {
+      await viewer.context().close();
+    }
+  });
+
+  // 分享端的能力/权限失败必须只由常驻红条承载：删掉重复 toast 之后，这两条路径
+  // 分别用「不支持」与「非取消失败」把红条文案钉住（回归时多一条 toast 就会落 count 2）。
+  test('an unsupported browser explains itself once instead of stacking a toast', async ({ page }) => {
+    await page.addInitScript(() => {
+      // 模拟没有 getDisplayMedia 的浏览器（比删整个 mediaDevices 更贴近真实）。
+      Object.defineProperty(navigator.mediaDevices, 'getDisplayMedia', {
+        configurable: true,
+        value: undefined,
+      });
+    });
+    await page.goto('/');
+
+    await page.getByRole('button', { name: '共享' }).click();
+    await page.getByRole('button', { name: '开始共享屏幕' }).click();
+
+    const message = page.getByText('您的浏览器不支持屏幕共享，请使用桌面端浏览器:Chrome、Edge 或 Firefox');
+    await expect(message).toHaveCount(1, { timeout: 15_000 });
+    // toast 是异步渲染的且 sonner 的标题节点不一定能被 getByText(exact) 命中，
+    // 直接用页面文本核对：这条路径只该有一条常驻红条，不该再弹 toast。
+    await page.waitForTimeout(1_500);
+    await expect(message).toHaveCount(1);
+    expect(await page.locator('body').innerText()).not.toContain('屏幕共享不可用');
+  });
+
+  test('a capture failure that is not a cancel explains itself once instead of stacking a toast', async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      // NotReadableError = 被安全软件/录屏软件占用，不是用户取消，必须给出可执行的说明。
+      navigator.mediaDevices.getDisplayMedia = () =>
+        Promise.reject(new DOMException('Device in use', 'NotReadableError'));
+    });
+    await page.goto('/');
+
+    await page.getByRole('button', { name: '共享' }).click();
+    await page.getByRole('button', { name: '开始共享屏幕' }).click();
+
+    const message = page.getByText(
+      '系统拒绝了屏幕录制（可能被安全软件、录屏或会议软件占用），请关闭后重试'
+    );
+    await expect(message).toHaveCount(1, { timeout: 15_000 });
+    await page.waitForTimeout(1_500);
+    await expect(message).toHaveCount(1);
+    expect(await page.locator('body').innerText()).not.toContain('屏幕共享启动失败');
   });
 
 })
