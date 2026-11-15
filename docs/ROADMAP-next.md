@@ -212,4 +212,14 @@ WS 凭证移出 URL query（`Sec-WebSocket-Protocol`）、读路径不再写库�
 - 产品：首帧前的媒体建连失败有独立结论（`'media-failed'`），不再先报「人数已满」；链接是否真的发布过用 `linkPublishedRef` 判定，不再靠 `room !== null`；`call.on('close')` 消费 `'sharer-unavailable'`（删掉只在测试里被引用的死函数）；429 冷却的入口守卫补 e2e。
 - 工程：`ci-wiring.test.ts` 改为 job/step 感知解析，钉住四个 job 的必需 step 与「不得加 `if: false` / `continue-on-error`」；覆盖率政策用 `POLICY_CASES` 钉住真实阈值；`playwright.product.config.ts` 与两个上传 step、8787 空闲断言都被 inventory 测试绑定；新增 `scripts/debt-budget.test.ts`（结构债上限）与 `scripts/docs-current-pointer.test.ts`（「当前」指针不得悬空、历史快照不得被追溯覆盖）；文档补「结构债的解除路径」四阶段表。
 
-状态: 进行中（第十五轮复评 must-fix 已收口，待全量门禁与推送, 2026-11-14）
+状态: 完成 (第十五轮复评 must-fix 全部收口；门禁全绿，已推送并部署，2026-11-14)
+
+## 阶段 15：第十六轮复评后的收口（2026-11-15）
+
+对应 `docs/design-scale-out.md` §8.18。第十六轮工程复评（86）的三条 must-fix 全部收口：
+
+- 跳过开关不再只挡字面量：`findWiringProblems()` 把「任意 `continue-on-error`、非清理/上传步骤的 `if:`、字段里的 `{{ }}` 表达式、未声明或超大的 `timeout-minutes`」都判为接线问题，并在真实 workflow 上做 9 处变异自证。
+- 数字不再靠人重算：守卫新增 `--metrics`（静态统计），`scripts/docs-metrics.test.ts` 把文档最新章节与 `ci.yml` 的文件数、例外数、白名单行数/占比、余量、三个组件行数全部绑定，最新章节残留旧数字直接失败。
+- 自测不再自称：「`--self-test` 成功文案」由 fixture 名字拼出，守卫自身测试断言精确数量（19/5/3/10）并逐条点名关键 fixture。
+
+状态: 进行中（第十六轮工程 must-fix 已收口，待全量门禁、推送与安全/产品复评, 2026-11-15）
