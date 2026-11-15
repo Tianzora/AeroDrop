@@ -232,3 +232,12 @@ WS 凭证移出 URL query（`Sec-WebSocket-Protocol`）、读路径不再写库�
 - 工程：`docs-current-pointer.test.ts` 的指针正则放宽到 `见/以/指向/参见/参考/参照` + 允许缺 `§` + 支持「整段引号就是一个 8.N」；`ci-wiring.test.ts` 增加 `GATE_TEST_FILES` 完整性清单，断言七个门禁测试文件既存在、又真的被 `collectTestFiles(['scripts'])` 收集（改名成 `.spec.ts` 会立刻红）。
 
 状态: 进行中（第十七轮 must-fix 已收口，待全量门禁、推送与产品/工程复评, 2026-11-15）
+## 阶段 17：第十七轮补评后的收口（2026-11-15）
+
+对应 `docs/design-scale-out.md` §8.20。补评把「回退就会红」补到了产品与工程各自最后一处：
+
+- 产品：分享端两条失败路径（浏览器不支持、`getDisplayMedia` 非取消）原先没有任何自动化会因回退变红；现在 `e2e/screenshare.spec.ts` 各有一条用例断言红条 1 条、页面文本不含对应 toast 标题（先等 1.5s 再取 `body.innerText`，否则异步 toast 还没出现就通过）。另补「分享方停止后观众只收到一次共享结束」用例（正则 `共享方已(停止共享|结束共享)` 恰好 1 条），第七观众用例的 `first()` 换成 `toHaveCount(1)`。
+- 工程：`ci-wiring.test.ts` 的 `GATE_TEST_FILES` 从七个文件扩到八个，补上 `scripts/component-import-smoke.test.ts`（改名 `.spec.ts` 会立刻红）。
+- 顺手把容量用例（第七观众）在本机代理网络下的偶发抖动吸收掉：`setTimeout(600_000)`、补位尝试 3 次、补位 deadline 330s，用例语义不变。
+
+状态: 完成（2026-11-15）
