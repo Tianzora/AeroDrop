@@ -42,16 +42,47 @@ const workflow = read('.github/workflows/ci.yml');
 const allowlistMargin = (metrics: ScopeMetrics, maxShare: number): number =>
   Math.floor(metrics.totalLines * maxShare) - metrics.excludedLines;
 
+/**
+ * 只取最新章节（§8.N 最大值）的正文。
+ *
+ * 「本轮实测」数字必须落在**最新**那一节里才算数：§8.17 之类是上一轮的快照，正文里
+ * 至今仍写着同一个 119/117/2，所以在整份文档上 `includes()` 会被旧节救活——把最新节
+ * 写错一个数字，测试照样全绿（第十七轮工程复评 MF1 就是这条）。因此这里按标题切段，
+ * 与 `docs-current-pointer.test.ts` 的 `sectionBody` 保持同一套语义。
+ */
+const latestSectionBody = (markdown: string): { label: string; body: string } => {
+  const headings = [...markdown.matchAll(/^#{2,4} 8\.(\d+) /gm)].map((match) => ({
+    label: `8.${match[1]}`,
+    level: (/^#+/.exec(match[0])?.[0] ?? '###').length,
+    index: match.index ?? 0,
+  }));
+  assert.ok(headings.length > 0, 'docs/design-scale-out.md 里找不到任何 §8.N 小节');
+  const latest = headings.reduce((left, right) => (Number(right.label.slice(2)) > Number(left.label.slice(2)) ? right : left));
+  const lines = markdown.slice(latest.index).split('\n');
+  const body: string[] = [];
+  for (const line of lines) {
+    if (body.length > 0 && new RegExp(`^#{1,${latest.level}} `).test(line)) break;
+    body.push(line);
+  }
+  return { label: latest.label, body: body.join('\n') };
+};
+
+const latestDocs = latestSectionBody(docs);
+
 test('设计文档的「本轮实测」数字必须等于守卫算出来的数字', () => {
   for (const metrics of [serviceMetrics, componentMetrics]) {
     const denominator = `${metrics.files} 文件 / ${metrics.reportedRows} 行 / ${metrics.exceptions} 例外`;
     assert.ok(
-      docs.includes(denominator),
-      `docs/design-scale-out.md 里没有「${denominator}」：${metrics.scope} scope 的文件数/例外数变了，\n` +
-        '「本轮实测」必须跟着 --metrics 的输出走（手算已经错过三次）'
+      latestDocs.body.includes(denominator),
+      `docs/design-scale-out.md 的 §${latestDocs.label}（最新节）里没有「${denominator}」：${metrics.scope} scope 的\n` +
+        '文件数/例外数变了，「本轮实测」必须跟着 --metrics 的输出走（手算已经错过三次）。\n' +
+        '注意：只认最新一节——把旧的快照节改成正确值不算修好，因为下一轮它又会变成错的'
     );
     const budget = `预算 ${metrics.excludedLines}/${metrics.totalLines}（${metrics.sharePercent.toFixed(2)}%`;
-    assert.ok(docs.includes(budget), `docs/design-scale-out.md 里没有「${budget}）：白名单预算数字与实际不符`);
+    assert.ok(
+      latestDocs.body.includes(budget),
+      `docs/design-scale-out.md 的 §${latestDocs.label}（最新节）里没有「${budget}）：白名单预算数字与实际不符`
+    );
   }
 });
 
@@ -77,8 +108,8 @@ test('组件行数与文档/CI 里的数字一致', () => {
   };
   for (const [file, lines] of Object.entries(sizes)) {
     assert.ok(
-      docs.includes(`\`${file}\`（${lines} 行）`),
-      `docs/design-scale-out.md 里的「${file}（${lines} 行）」与文件实际行数不符：行数是结构债规模的唯一口径`
+      latestDocs.body.includes(`\`${file}\`（${lines} 行）`),
+      `docs/design-scale-out.md 的 §${latestDocs.label}（最新节）里的「${file}（${lines} 行）」与文件实际行数不符：行数是结构债规模的唯一口径`
     );
   }
   assert.ok(

@@ -59,21 +59,34 @@ test('横幅里的「当前」章节必须是最新章节', () => {
 test('所有「当前」指针都必须指向最新章节，不得指向历史快照', () => {
   const markdown = designDoc();
   const current = latestSection(markdown);
-  const dangling = markdown
-    .split('\n')
-    .map((line, index) => ({ line, lineNumber: index + 1 }))
-    .filter(({ line }) => line.includes('当前'))
-    .filter(({ line }) => !/快照|历史|当时/.test(line))
-    .flatMap(({ line, lineNumber }) =>
-      [...line.matchAll(/(?:见|以|指向)\s*§8\.(\d+)/g)]
-        .map((match) => ({ section: Number(match[1]), lineNumber }))
-        .filter(({ section }) => section !== current)
-    );
+
+  // 逐行记录「这一行属于哪一节」：只有两种指针是合法的——
+  //   1. 指向最新章节（任何地方都可以这样写）；
+  //   2. 在 §8.K 内部指向 §8.K 自己（那是在说「本节这次实测」）。
+  // 早先的实现用「整行含『快照/历史/当时』就跳过」做豁免，第十七轮工程复评 MF2 证明它
+  // 能被一行合法规避：「当前 89.11 / …，见 §8.15」所在行本来就带『第八轮快照』，于是
+  // 把指针改回历史章节也不会红。现在改成按所属章节判定，豁免不再依赖字样。
+  const dangling: string[] = [];
+  let enclosing: number | null = null;
+  markdown.split('\n').forEach((line, index) => {
+    const heading = /^#{2,4} 8\.(\d+)\b/.exec(line);
+    if (heading) enclosing = Number(heading[1]);
+    if (!line.includes('当前')) return;
+    // 引号里的字符串是「引用别人的话」，不是本行的指针（例如缺陷描述里引用了一句错的
+    // 横幅文案「当前以 §8.13 为准」）。先剥掉成对引号再找指针。
+    const scanned = line.replace(/「[^」]*」|『[^』]*』|“[^”]*”|`[^`]*`/g, '');
+    for (const match of scanned.matchAll(/(?:见|以|指向)\s*§8\.(\d+)/g)) {
+      const section = Number(match[1]);
+      if (section === current) continue;
+      if (enclosing !== null && section === enclosing) continue;
+      dangling.push(`L${index + 1} → §8.${section}`);
+    }
+  });
 
   assert.deepEqual(
-    dangling.map(({ section, lineNumber }) => `L${lineNumber} → §8.${section}`),
+    dangling,
     [],
-    `以下「当前」指针指向了非最新章节（最新是 §8.${current}）`
+    `以下「当前」指针指向了非最新章节（最新是 §8.${current}）；只有指向本节自身的历史快照可以豁免`
   );
 });
 

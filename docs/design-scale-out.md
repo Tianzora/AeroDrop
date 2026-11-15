@@ -752,12 +752,16 @@ CI 仍是信号不是闸门（Cloudflare Git 集成不读 GitHub 检查，除非
 | 缺口 | 修法 | 验证 |
 | --- | --- | --- |
 | 工程（MF1）：跳过开关只挡字面量。给 Typecheck 加 `if: ${{ 1 == 2 }}` 或给 Unit tests 加 `continue-on-error: ${{ true }}`，CI 全绿而门禁已死 | `ci-wiring.test.ts` 的判定抽成 `findWiringProblems()` 纯函数：任意 `continue-on-error:` 一律禁止（不判取值）、step 级 `if:` 只允许清理/上传步骤使用 `always()`、任何字段里出现 `${{` 即失败、`timeout-minutes` 必须声明且不超过上限；并在真实 workflow 上做 9 处变异自证（表达式跳过、表达式 continue-on-error、job 级同名开关、job 改名、删门禁 step、`run` 塞表达式、`run` 加 `|| true`、`needs` 改挂、上传改 `success()`） | 9 条变异各被点名一条；真实 `ci.yml` 返回空列表；负对照：把真实文件改回旧写法 ⇒ 对应变异红 |
-| 工程（MF2）：文档与 CI 注释里的「本轮实测」数字与工作树不符（services 的文件数/行数/预算、ci.yml 的白名单行数/占比/余量与组件行数全部停留在上一轮的值） | 守卫新增 `--metrics`（只做静态统计，不跑测试套件），新增 `scripts/docs-metrics.test.ts` 把文档 §8 最新章节与 ci.yml 的文件数、例外数、白名单行数/占比、余量、三个组件行数全部绑到它上面；最新章节里出现旧数字直接失败（历史小节允许保留快照） | `--metrics` 输出 `119/117/2、152/17567、0.87%` 与 `13/10/3、7900/10466、75.48%`；负对照：把文档 119 改成 118 ⇒ 红 |
+| 工程（MF2）：文档与 CI 注释里的「本轮实测」数字与工作树不符（services 的文件数/行数/预算、ci.yml 的白名单行数/占比/余量与组件行数全部停留在上一轮的值） | 守卫新增 `--metrics`（只做静态统计，不跑测试套件），新增 `scripts/docs-metrics.test.ts` 把文档**最新章节的正文**与 ci.yml 的文件数、例外数、白名单行数/占比、余量、三个组件行数全部绑到它上面 | `--metrics` 输出 `119/117/2、152/17567、0.87%` 与 `13/10/3、7898/10464、75.48%`；负对照：只把 §8.18 的 `119` 改成 `118` ⇒ 红 |
+| 工程（复评 MF1）：`docs-metrics.test.ts` 起初用「整份文档 `includes()`」，而 §8.17 是内容几乎相同的上一轮快照 —— 把**最新节**写错一个数字，旧节照样命中，测试静默全绿 | 断言改在「最新章节正文」内（`latestSectionBody` 按标题切段，与 `docs-current-pointer.test.ts` 的 `sectionBody` 同一语义），并加注释说明为什么不能对整份文档断言 | 负对照：只改 §8.18 的「119 文件」→「118 文件」，旧实现绿、新实现红（实跑 `pass 3 / fail 1`） |
+| 工程（复评 MF2）：`docs-current-pointer.test.ts` 用「整行含『快照/历史/当时』就跳过」做豁免 —— 一行只要能带上这些词就能把「当前…见 §8.18」改回历史章节而不红 | 豁免改为**按所属章节判定**：指针要么指向最新章节，要么指向自己所在的 §8.K；同时先剥掉成对引号再找指针（缺陷描述里引用「当前以 §8.13 为准」不算指针） | 负对照：把「当前 89.11 / 75.21 / 80.58，见 §8.18」改回 `§8.15` ⇒ 红（实跑 `pass 3 / fail 1`） |
+| 产品（M-1）：同一个终态事件同时落「常驻内联 alert」和「同文本 toast」——视觉上同屏两遍，读屏「assertive + polite」各念一遍 | 删掉 5 处与内联文案重复的 toast（`failSharerSession`、`handleRemoteShareEnded`、观众 `share-full`、`suspected-share-full`、`share-unavailable`）；toast 只保留给没有内联载体的瞬时反馈 | e2e 加「同一句终态文案全页只出现一次」：429 终态断言 `创建共享房间过于频繁…` 的 `toHaveCount(1)`、死链终态断言「分享暂时不可用…」`toHaveCount(1)`（原来分别是 2 与 `first()`） |
 | 工程（MF3）：`--self-test` 的成功文案是另一句人写的话（「六条失败路径」），删掉任意一条 fixture 后自测依旧全绿、且继续宣称六条路径都被证明 | 成功文案由 fixture 名字拼出（逐条列出），`check-coverage-scope.test.ts` 断言精确数量（19/5/3/10）并逐条点名关键 fixture；`POLICY_CASES` 补 `name` 字段 | 负对照：改掉任一条 fixture 的名字 ⇒ 守卫自身测试红；去掉数量断言即失去作用 |
 
 本轮实测（干净树，2026-11-15）：
 
 - `npm run typecheck` → 0；`npm run test:all` → services **726** / components **47** / scripts **33** 全 pass。
-- `--scope=services` 119 文件 / 117 行 / 2 例外，预算 152/17567（0.87%）；`--scope=components` 13 文件 / 10 行 / 3 例外，预算 7900/10466（75.48%，上限 80%）。
+- `--scope=services` 119 文件 / 117 行 / 2 例外，预算 152/17567（0.87%）；`--scope=components` 13 文件 / 10 行 / 3 例外，预算 7898/10464（75.48%，上限 80%）。
 - `--self-test` → 19 报告 + 5 预算 + 3 理由 + 10 阈值政策 fixture 全过；`npm run test:e2e` 9 passed；`npm run test:e2e:product-transfer` **15 passed**。
-- `npm run build` → `dist/assets/index-BfdI-lri.js`（客户端代码未变，本轮只动门禁脚本、测试与文档）。
+- 三个千行组件：`components/Receiver.tsx`（3367 行）、`components/ScreenShare.tsx`（2861 行）、`components/Sender.tsx`（1670 行）。
+- `npm run build` → `dist/assets/index-DBvu-mmP.js` 716.89 kB / gzip 225.95 kB（本轮含 `components/ScreenShare.tsx` 的 toast 去重，客户端 bundle 因此变化）。
