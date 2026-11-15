@@ -1954,7 +1954,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         if (plan.kind === 'exhausted') {
           // 预算用尽：必须给出终态和手动重试入口，不能永远停在「正在重试」。
           setError(VIEWER_RECONNECT_EXHAUSTED_MESSAGE);
-          onNotification('屏幕共享连接断开', 'error');
           return;
         }
 
@@ -2641,7 +2640,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
       setError('您的浏览器不支持屏幕共享，请使用桌面端浏览器:Chrome、Edge 或 Firefox');
-      onNotification('屏幕共享不可用', 'error');
       return;
     }
 
@@ -2693,9 +2691,6 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         embeddedFrame: isEmbeddedFrame(),
       });
       setError(failure.description);
-      if (!failure.isCancel) {
-        onNotification('屏幕共享启动失败', 'error');
-      }
     }
   };
 

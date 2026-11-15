@@ -659,9 +659,12 @@ test.describe('screen share', () => {
 
 
       // 重连预算用尽后必须给出终态和手动重试入口。
-      await expect(viewer.getByText('连接断开，已达到最大重试次数，请手动重试')).toBeVisible({
+      // 同一个事件只准出现一份：红条已经承载了完整原因，绝不能再补一条同义 toast——
+      // 读屏会 assertive 念一遍红条、polite 再念一遍 toast。
+      await expect(viewer.getByText('连接断开，已达到最大重试次数，请手动重试')).toHaveCount(1, {
         timeout: 55_000,
       });
+      await expect(viewer.getByText('屏幕共享连接断开')).toHaveCount(0);
       await expect(viewer.getByRole('button', { name: '重试连接' })).toBeVisible();
     } finally {
       await viewer.context().close();
