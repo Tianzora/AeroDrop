@@ -22,7 +22,8 @@ npm run deploy                        # 手动发布（能生效，但绕过 Git
 
 - 部署走 Cloudflare 的 Git 集成：推送到 `main` 即自动构建并发布到 https://drop.tianzora.uno/ ，这是常规路径。
 - 产品级 E2E 走 `npm run test:e2e:product-transfer`，默认打 `AERODROP_BASE_URL`，未设置时用 `http://127.0.0.1:8787`。
-- CI（`.github/workflows/ci.yml`）在 push/PR 上跑 `typecheck` → `test:all` → `build`。它**不拦部署**：Cloudflare Git 集成是推 `main` 即构建发布，所以本地五条门禁仍是唯一硬闸门。
+- CI（`.github/workflows/ci.yml`）在 push/PR 上跑四个 job：`typecheck + tests + build`、`coverage gate (components, allowlist budget)`、`e2e (chromium)`、`e2e (product: transfer + screenshare, real Worker)`。
+- `main` 已开分支保护（2026-11-15）：**必须走 PR**，四个 job 全绿才能合并；直接 `git push origin main` 会被拒（含管理员）。prefer `gh pr create` → 等 checks → `gh pr merge --squash --delete-branch`。Cloudflare 的 Git 集成只对 `main` 生效，所以合并之后才部署。
 - 屏幕共享 E2E（`e2e/screenshare.spec.ts`）需要真实 Worker 信令，挂在 `test:e2e:product-transfer` 里一起跑；Chromium 用 fake display capture（三个 flag 在 `playwright.product.config.ts`），单跑某个用例：`npm run preview` 起 8787 后执行 `npx playwright test --config=playwright.product.config.ts -g "shares frames"`。
 - `test:e2e`/`test:e2e:rtc` 的构建固定为 `vite build --mode e2e`：只有该模式会启用 E2E 测试钩子，生产构建里 `__AERODROP_E2E__` 不生效。
 - 改完代码的顺序：`typecheck` → `test:all` → 相关 E2E。
