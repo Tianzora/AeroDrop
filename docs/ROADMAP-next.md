@@ -246,4 +246,4 @@ WS 凭证移出 URL query（`Sec-WebSocket-Protocol`）、读路径不再写库�
 
 状态: 完成（已提交推送并部署，2026-11-15）
 
-对应 `docs/design-scale-out.md` §8.21：把「同文案恰好一次」的 e2e 断言从 `toHaveCount(1)` 改成 25ms 采样最大出现次数（对 4 秒内瞬时重复敏感），并把 `suspected-share-full` 无正向 e2e 的原因（e2e 不可构造）记为 residual。
+对应 `docs/design-scale-out.md` §8.21：把「同文案恰好一次」的 e2e 断言从 `toHaveCount(1)` 改成 25ms 采样最大出现次数（对 4 秒内瞬时重复敏感），并把 `suspected-share-full` 无正向 e2e 的原因（e2e 难以确定性构造，逻辑与文案已由单测钉住）记为 residual。
