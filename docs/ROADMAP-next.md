@@ -231,7 +231,8 @@ WS 凭证移出 URL query（`Sec-WebSocket-Protocol`）、读路径不再写库�
 - 产品：同一终态事件的「红条 + toast」双播还剩 3 处（观众重连耗尽、浏览器不支持共享、`getDisplayMedia` 非取消失败），全部删掉 toast，由常驻 assertive 红条唯一承载；并给「同文案只出现一次」补 e2e 断言（本地单测与 typecheck 抓不到重复 toast）。
 - 工程：`docs-current-pointer.test.ts` 的指针正则放宽到 `见/以/指向/参见/参考/参照` + 允许缺 `§` + 支持「整段引号就是一个 8.N」；`ci-wiring.test.ts` 增加 `GATE_TEST_FILES` 完整性清单，断言七个门禁测试文件既存在、又真的被 `collectTestFiles(['scripts'])` 收集（改名成 `.spec.ts` 会立刻红）。
 
-状态: 进行中（第十七轮 must-fix 已收口，待全量门禁、推送与产品/工程复评, 2026-11-15）
+状态: 完成 (第十七轮 must-fix 全部收口；门禁全绿，已推送并部署 72a4ad2/b6891ab/3f79c91, 2026-11-15)
+
 ## 阶段 17：第十七轮补评后的收口（2026-11-15）
 
 对应 `docs/design-scale-out.md` §8.20。补评把「回退就会红」补到了产品与工程各自最后一处：
@@ -240,7 +241,7 @@ WS 凭证移出 URL query（`Sec-WebSocket-Protocol`）、读路径不再写库�
 - 工程：`ci-wiring.test.ts` 的 `GATE_TEST_FILES` 从七个文件扩到八个，补上 `scripts/component-import-smoke.test.ts`（改名 `.spec.ts` 会立刻红）。
 - 顺手把容量用例（第七观众）在本机代理网络下的偶发抖动吸收掉：`setTimeout(600_000)`、补位尝试 3 次、补位 deadline 330s，用例语义不变。
 
-状态: 完成（2026-11-15）
+状态: 完成 (补评 must-fix 全部收口；门禁全绿，已推送并部署 d9f114d/565fdb8/1cbca63, 2026-11-15)
 
 ## 阶段 18：第十八轮补评后的收口（2026-11-15）
 
