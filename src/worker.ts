@@ -183,7 +183,7 @@ type SignalingEnvelope =
       message?: string;
       connectionId?: string;
       targetPeerId?: string;
-      kind?: 'data' | 'media';
+      kind?: 'data' | 'media' | 'room';
       /** 可重试的拒绝（如 offer 限流）带上建议等待时长，客户端据此显示倒计时。 */
       retryAfterMs?: number;
       /**
@@ -195,7 +195,7 @@ type SignalingEnvelope =
   | {
       type: 'offer' | 'answer';
       connectionId: string;
-      kind: 'data' | 'media';
+      kind: 'data' | 'media' | 'room';
       sourcePeerId: string;
       targetPeerId: string;
       description: RTCSessionDescriptionInit;
@@ -203,7 +203,7 @@ type SignalingEnvelope =
   | {
       type: 'ice-candidate';
       connectionId: string;
-      kind: 'data' | 'media';
+      kind: 'data' | 'media' | 'room';
       sourcePeerId: string;
       targetPeerId: string;
       candidate: RTCIceCandidateInit;
@@ -1532,7 +1532,7 @@ export class SignalingHub extends DurableObject<Env> {
 
     // 跨片投递要 await 一次 RPC，同一 socket 的后续帧会在这里插队（ICE 候选先于
     // offer 投到对端就白丢了）。按 socket 串行化，保证「发送顺序 = 投递顺序」。
-    const deliveryError = payload as { connectionId?: string; kind?: 'data' | 'media' };
+    const deliveryError = payload as { connectionId?: string; kind?: 'data' | 'media' | 'room' };
     this.enqueueSignalingDelivery(
       ws,
       payload.targetPeerId,
@@ -2045,7 +2045,7 @@ export class SignalingHub extends DurableObject<Env> {
     ws: WebSocket,
     targetPeerId: string,
     message: string,
-    errorContext: { connectionId?: string; kind?: 'data' | 'media' }
+    errorContext: { connectionId?: string; kind?: 'data' | 'media' | 'room' }
   ): void {
     const previous = this.deliveryChains.get(ws) ?? Promise.resolve();
     const next = previous
@@ -2518,7 +2518,7 @@ export class SignalingHub extends DurableObject<Env> {
     message: string,
     connectionId?: string,
     targetPeerId?: string,
-    kind?: 'data' | 'media',
+    kind?: 'data' | 'media' | 'room',
     retryAfterMs?: number,
     limit?: 'session' | 'offer'
   ): void {

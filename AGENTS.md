@@ -32,7 +32,7 @@ npm run deploy                        # 手动发布（能生效，但绕过 Git
 
 - 信令、连接策略、TURN 凭证、超时参数只在 `services/` 与 `constants/` 里改，不在组件中硬编码。
 - 身份与口令：分享口令由 `/api/share-code` 签发并与随机 `peerId` 绑定（HMAC 校验在 `SignalingHub`），发送方 WS 必须带 `code` + `token`；**不要恢复“口令即 peerId”**（4 位旧口令已被拒绝，口令一律 6 位，自定义口令也必须走登记接口）。
-  屏幕共享房号同样走这个登记接口（24h TTL、每 30 分钟续期、停止分享即 revoke），**不要**让客户端自造 `AERO-` 房号。
+  屏幕共享房号同样走这个登记接口（24h TTL、每 30 分钟续期；停止共享保留房间、不 revoke，房号继续续期；仅「结束并离开」closeRoom / 页面卸载时 revoke），**不要**让客户端自造 `AERO-` 房号。
 - `services/connectionPolicy.ts`、`services/receive/committedReconnectPolicy.ts` 是连接降级与续传的唯一判定点，改行为改这里，不要在各调用方分叉。
 - Vite 8 用 Oxc/Rolldown：`build.minify` 保持 `oxc`，不要恢复 `esbuild` minifier。
 - `package.json` 的 `overrides.esbuild` 是为覆盖 Wrangler 依赖链上被钉住的旧 esbuild；升级 Wrangler 后先跑 `npm audit` 再决定能否移除。
@@ -79,7 +79,7 @@ python D:/ovo/Documents/workspace/scripts/agents-md/render.py --root D:/ovo/Docu
 - 运行时：Node 22.12.0（`.nvmrc`）、包管理器 npm@10.8.2
 - 脚本入口：`build` `deploy` `deploy:worker` `dev` `dev:worker` `preview` `preview:e2e` `test:all` `test:components` `test:e2e` `test:e2e:product-transfer` `test:e2e:product-transfer:raw` `test:e2e:raw` `test:e2e:rtc` `test:e2e:rtc:raw` `test:receive` `test:scripts` `test:send` `test:services` `typecheck`
 - 锁文件：`package-lock.json`
-- 顶层目录：`components/` `constants/` `docs/` `e2e/` `miniflare-email-store/` `public/` `scripts/` `services/` `skills/` `src/` `types/`
+- 顶层目录：`.github/` `components/` `constants/` `docs/` `e2e/` `miniflare-email-store/` `public/` `scripts/` `services/` `skills/` `src/` `types/`
 <!-- agents:auto:end -->
 
 ## 深入文档

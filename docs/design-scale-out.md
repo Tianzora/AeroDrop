@@ -813,7 +813,5 @@ CI 仍是信号不是闸门（Cloudflare Git 集成不读 GitHub 检查，除非
 | 产品（M2）：`suspected-share-full`（`ScreenShare.tsx` 的 `reportSuspectedShareFull`）没有任何正向 e2e，把它的 toast 加回来也不会红 | **判定为「e2e 难以确定性构造」，记入 residual**：判定条件是 `services/screenShare/viewerShareFullFallback.ts` 的 `!receivedStream && !dataChannelOpened`，真实触发靠「满员 share-full 是 best-effort 丢包」这种竞态；逻辑与文案已有单测钉住（`viewerShareFullFallback.test.ts`、`viewerCallEndAction.test.ts`、`connectionGuidance.test.ts`）。注入伪 `RTCPeerConnection`（吞 `ontrack`/`ondatachannel`、反复推 `connectionState='closed'`）的尝试始终等不到终态，已删除该用例，计数回到 15 条屏幕共享 / 18 条产品级 | 该结论本身有可复现证据：上述注入后 `toHaveCount(1)` 收到 0；放开 track 则 `hasReceivedStream` 为真、落到 `reconnect` |
 | 用例计数与引用文案随之上调 | `scripts/e2e-suite-inventory.test.ts`、`.github/workflows/ci.yml`、`scripts/check-coverage-scope.mjs`、`e2e/screenshare.spec.ts` 头注释统一为 screenshare 15 / 产品级 18 / `ensureDisplayCapture` 12 | `node ./scripts/run-node-tests.mjs scripts` → 33 pass / 0 fail |
 
-本轮实测（干净树，2026-11-15）：`npm run typecheck` → 0；`npm run test:all` → services **726** / components **47** / scripts **33**；
-`--scope=services` 119 文件 / 117 行 / 2 例外、预算 152/17567（0.87%）；`--scope=components` 13 文件 / 10 行 / 3 例外、预算 7893/10459（75.47%）；
-`--self-test` 19+5+3+10；`npm run test:e2e` 9 passed；`npm run test:e2e:product-transfer` **18 passed**（product-transfer 3 + screenshare 15，其中 12 条走 `ensureDisplayCapture`）。
-三个千行组件：`components/Receiver.tsx`（3367 行）、`components/ScreenShare.tsx`（2856 行）、`components/Sender.tsx`（1670 行）。
+本轮实测（M1 聊天垂直切片，2026-11-18）：`npm run typecheck` → 0；`--scope=services` 121 文件 / 119 行 / 2 例外、预算 152/18052（0.84%）；`--scope=components` 14 文件 / 11 行 / 3 例外、预算 7992/10809（73.94%）；
+三个千行组件：`components/Receiver.tsx`（3367 行）、`components/ScreenShare.tsx`（2955 行）、`components/Sender.tsx`（1670 行）。

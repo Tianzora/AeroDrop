@@ -1,6 +1,7 @@
 import { logDebug } from './diagnostics';
 import { getAeroDropE2EHooks, type AeroDropPeerRuntimeModuleLike } from './e2eHooks';
 import { CONNECTION_TIMINGS } from '../constants/transfer';
+import { CHAT_CONFIG } from '../constants/chat';
 import { shouldResetReconnectBudget } from './connectionPolicy';
 import { encodeWsCredentials } from './signaling/wsCredentialTransport';
 
@@ -20,7 +21,7 @@ type PeerRuntimeErrorType =
   | 'message-too-large'
   | 'webrtc-error';
 
-type ChannelKind = 'data' | 'media';
+type ChannelKind = 'data' | 'media' | 'room';
 
 type PeerOptions = {
   debug?: number;
@@ -62,6 +63,8 @@ type PeerEvents = {
    */
   'session-proof': (proof: string) => void;
   connection: (connection: DataConnection) => void;
+  /** 房间聊天连接：入站 kind:'room' 的 DataConnection，与分享控制用的 'connection'（kind:'data'）分开投递。 */
+  room: (connection: DataConnection) => void;
   call: (call: MediaConnection) => void;
   error: (error: PeerRuntimeError) => void;
   disconnected: () => void;
@@ -610,15 +613,19 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
 
 export class DataConnection extends BaseConnection<DataConnectionEvents> {
   public dataChannel: RTCDataChannel | null = null;
+  /** 这条 DataConnection 承载哪类通道：'data' 是分享控制（心跳/画质/share-ended），'room' 是房间聊天。 */
+  public readonly channelKind: 'data' | 'room';
 
   constructor(
     provider: WorkerSignaledPeer,
     peerId: string,
     connectionId: string,
     peerConnection: RTCPeerConnection,
-    isInitiator = false
+    isInitiator = false,
+    channelKind: 'data' | 'room' = 'data'
   ) {
     super(provider, peerId, connectionId, peerConnection, isInitiator);
+    this.channelKind = channelKind;
   }
 
   bindDataChannel(channel: RTCDataChannel): void {
@@ -882,7 +889,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
   logConnectionEvent(connection: BaseConnection<any>, event: string, data?: Record<string, unknown>): void {
     this.log('info', event, {
       connectionId: connection.connectionId,
-      kind: connection instanceof DataConnection ? 'data' : 'media',
+      kind: connection instanceof DataConnection ? connection.channelKind : 'media',
       targetPeerId: connection.peer,
       ...data,
     });
@@ -1254,14 +1261,24 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       });
       return;
     }
-    if (payload.kind === 'data') {
+    if (payload.kind === 'data' || payload.kind === 'room') {
+      const channelKind = payload.kind === 'room' ? 'room' : 'data';
       const peerConnection = new RTCPeerConnection(this.config);
-      const connection = new DataConnection(this, payload.sourcePeerId, payload.connectionId, peerConnection);
+      const connection = new DataConnection(
+        this,
+        payload.sourcePeerId,
+        payload.connectionId,
+        peerConnection,
+        false,
+        channelKind
+      );
       peerConnection.ondatachannel = (event) => {
         connection.bindDataChannel(event.channel);
       };
       this.addConnection(connection);
-      this.emit('connection', connection);
+      // room 聊天连接与分享控制连接分开投递：上层用不同事件监听，互不干扰。
+      if (channelKind === 'room') this.emit('room', connection);
+      else this.emit('connection', connection);
       try {
         await connection.applyRemoteDescription(payload.description);
         const answer = await peerConnection.createAnswer();
@@ -1394,7 +1411,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     this.sendSignaling({
       type: 'offer',
       connectionId: connection.connectionId,
-      kind: connection instanceof DataConnection ? 'data' : 'media',
+      kind: connection instanceof DataConnection ? connection.channelKind : 'media',
       sourcePeerId: this.id,
       targetPeerId: connection.peer,
       description,
@@ -1405,7 +1422,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     this.sendSignaling({
       type: 'answer',
       connectionId: connection.connectionId,
-      kind: connection instanceof DataConnection ? 'data' : 'media',
+      kind: connection instanceof DataConnection ? connection.channelKind : 'media',
       sourcePeerId: this.id,
       targetPeerId: connection.peer,
       description,
@@ -1416,7 +1433,7 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     this.sendSignaling({
       type: 'ice-candidate',
       connectionId: connection.connectionId,
-      kind: connection instanceof DataConnection ? 'data' : 'media',
+      kind: connection instanceof DataConnection ? connection.channelKind : 'media',
       sourcePeerId: this.id,
       targetPeerId: connection.peer,
       candidate,
@@ -1430,6 +1447,21 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
     connection.bindDataChannel(channel);
     this.addConnection(connection);
     void this.startOutgoingOffer(connection, 'data');
+    return connection;
+  }
+
+  /**
+   * 新建一条房间聊天通道：与分享控制用的 connect()/kind:'data' 完全独立。
+   * DataChannel 标签固定为 CHAT_CONFIG.CHANNEL_LABEL（'aero-room'）、ordered 可靠；
+   * 单条消息大小上限由 CHAT_CONFIG 约束，不混用 data 通道。
+   */
+  connectRoom(targetPeerId: string): DataConnection {
+    const peerConnection = new RTCPeerConnection(this.config);
+    const connection = new DataConnection(this, targetPeerId, createId('room'), peerConnection, true, 'room');
+    const channel = peerConnection.createDataChannel(CHAT_CONFIG.CHANNEL_LABEL, { ordered: true });
+    connection.bindDataChannel(channel);
+    this.addConnection(connection);
+    void this.startOutgoingOffer(connection, 'room');
     return connection;
   }
 

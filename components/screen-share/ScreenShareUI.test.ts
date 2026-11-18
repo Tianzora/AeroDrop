@@ -25,6 +25,17 @@ const baseProps: React.ComponentProps<typeof ScreenShareUI> = {
   needsPlayClick: false,
   onViewerPlayClick: () => {},
   stopViewing: () => {},
+  onViewerStopWatching: () => {},
+  chat: {
+    role: 'viewer' as const,
+    open: false,
+    connected: false,
+    messages: [],
+    onToggle: () => {},
+    onClose: () => {},
+    onSend: () => {},
+    onExport: () => {},
+  },
   qualityLabels: { high: '高清', medium: '标清', low: '流畅' },
   remoteQuality: 'high' as const,
   shareLink: null,
@@ -47,6 +58,7 @@ const baseProps: React.ComponentProps<typeof ScreenShareUI> = {
   changeScreenSource: () => {},
   startScreenShare: () => {},
   stopScreenShare: () => {},
+  onEndRoom: () => {},
 };
 
 const render = (overrides: Partial<React.ComponentProps<typeof ScreenShareUI>> = {}) =>
@@ -190,6 +202,13 @@ test('未开始时保留引导头部与开始按钮', () => {
   assert.match(markup, /开始共享屏幕/);
   assert.match(markup, /与其他设备实时共享您的屏幕内容/);
   assert.doesNotMatch(markup, /停止共享/);
+});
+
+test('共享中同时提供停止共享（保留房间）与结束并离开（closeRoom）', () => {
+  const markup = render({ isSharing: true });
+
+  assert.match(markup, /停止共享/);
+  assert.match(markup, /结束并离开/);
 });
 
 test('信令终态只留终态卡里的「重新开始共享」，不再重复一颗主按钮', () => {

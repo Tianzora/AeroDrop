@@ -1,6 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
-import { Monitor, StopCircle, Play, Pause, AlertCircle, Copy, Check, Share2, Eye, Loader2, RefreshCw, X, MonitorUp, Maximize, Minimize, Volume2, VolumeX, PictureInPicture, AlertTriangle } from 'lucide-react';
+import { Monitor, StopCircle, Play, Pause, AlertCircle, Copy, Check, Share2, Eye, Loader2, RefreshCw, X, MonitorUp, Maximize, Minimize, Volume2, VolumeX, PictureInPicture, AlertTriangle, LogOut } from 'lucide-react';
 import { shouldWarnViewerCapacity } from '../../services/screenShare/viewerCapacity';
+import { ChatPanel, type ChatPanelMessage } from './ChatPanel';
 
 export type ScreenShareViewerConnectingStage = 'fetching_ice' | 'connecting_signaling' | 'connecting_media' | 'waiting_stream' | '';
 
@@ -20,6 +21,20 @@ interface ScreenShareUIProps {
   needsPlayClick: boolean;
   onViewerPlayClick: () => void;
   stopViewing: () => void;
+  /** 观看端「停止观看」（琥珀）：本地停收画面但保留房间与聊天；与 stopViewing（结束并离开）语义分开。 */
+  onViewerStopWatching: () => void;
+
+  /** 房间聊天浮层的展示状态与回调，由 ScreenShare 提供。 */
+  chat: {
+    role: 'sender' | 'viewer';
+    open: boolean;
+    connected: boolean;
+    messages: ChatPanelMessage[];
+    onToggle: () => void;
+    onClose: () => void;
+    onSend: (text: string) => void;
+    onExport: () => void;
+  };
   qualityLabels: Record<'high' | 'medium' | 'low', string>;
   remoteQuality: 'high' | 'medium' | 'low';
   shareLink: string | null;
@@ -49,6 +64,8 @@ interface ScreenShareUIProps {
   changeScreenSource: () => void;
   startScreenShare: () => void;
   stopScreenShare: () => void;
+  /** 主持端「结束并离开」：closeRoom 全断（销毁 peer、撤销房号、清聊天），与停止共享（保留房间）语义分开。 */
+  onEndRoom: () => void;
 }
 
 export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
@@ -66,6 +83,8 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   needsPlayClick,
   onViewerPlayClick,
   stopViewing,
+  onViewerStopWatching,
+  chat,
   qualityLabels,
   remoteQuality,
   shareLink,
@@ -87,6 +106,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   changeScreenSource,
   startScreenShare,
   stopScreenShare,
+  onEndRoom,
 }) => {
   // 链接可用 = 信令就绪 且 房号没过期。任一不成立，这个链接就指向一个连不上的分享。
   const linkUsable = isShareLive && !shareRoomExpired;
@@ -100,6 +120,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   const [controlsVisible, setControlsVisible] = useState(true);
   const [pipSupported, setPipSupported] = useState(false);
   const [viewerPip, setViewerPip] = useState(false);
+  const [showEndConfirm, setShowEndConfirm] = useState(false);
 
   const attachViewerVideo = useCallback(
     (element: HTMLVideoElement | null) => {
@@ -483,11 +504,18 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
 
             <div className="flex items-center gap-2">
               <button
+                onClick={onViewerStopWatching}
+                className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full bg-amber-500 px-5 text-sm font-bold text-white shadow-card transition-ui motion-fast hover:bg-amber-600 active:scale-[0.99]"
+              >
+                <Pause size={18} />
+                停止观看
+              </button>
+              <button
                 onClick={stopViewing}
                 className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full bg-red-600 px-5 text-sm font-bold text-white shadow-card transition-ui motion-fast hover:bg-red-700 active:scale-[0.99]"
               >
                 <StopCircle size={18} />
-                停止观看
+                结束并离开
               </button>
             </div>
           </>
@@ -495,6 +523,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
 
         {!isViewing && !isConnecting && (
           <>
+
 
             {sharerFailure && !isSharing && (
               /* 信令终态：不能只弹 toast。绿色 LIVE 消失、预览停止、链接作废，
@@ -727,22 +756,30 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
             )}
 
             {isSharing && (
-              /* 共享中的操作改成工具条：切换窗口从画面上的悬停按钮变成常驻次要按钮，
-                 停止共享保持红色主操作但不再独占整行，省下一大块纵向空间。 */
+              /* 共享中的操作改成工具条：切换窗口从画面上的悬停按钮变成常驻次要按钮。
+                 「停止共享」只停画面、保留房间与聊天；「结束并离开」才是 closeRoom 全断，
+                 两者颜色/文案必须分开，避免误触把房间和观众一起关掉。 */
               <div className="flex items-center gap-2">
                 <button
                   onClick={changeScreenSource}
-                  className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-full border border-slate-300 px-4 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 dark:border-night-700 dark:text-night-300 dark:hover:bg-night-750"
+                  className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-full border border-slate-300 px-3 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 dark:border-night-700 dark:text-night-300 dark:hover:bg-night-750 sm:px-4"
                 >
                   <MonitorUp size={18} />
                   切换窗口
                 </button>
                 <button
                   onClick={stopScreenShare}
-                  className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full bg-red-600 px-5 text-sm font-bold text-white shadow-card transition-ui motion-fast hover:bg-red-700 active:scale-[0.99]"
+                  className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full border border-red-200 bg-white px-4 text-sm font-bold text-red-600 shadow-card transition-ui motion-fast hover:bg-red-50 active:scale-[0.99] dark:border-red-500/30 dark:bg-transparent dark:text-red-300 dark:hover:bg-red-500/10"
                 >
                   <StopCircle size={18} />
                   停止共享
+                </button>
+                <button
+                  onClick={() => setShowEndConfirm(true)}
+                  className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-full bg-red-600 px-4 text-sm font-bold text-white shadow-card transition-ui motion-fast hover:bg-red-700 active:scale-[0.99]"
+                >
+                  <LogOut size={18} />
+                  结束并离开
                 </button>
               </div>
             )}
@@ -750,6 +787,48 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
           </>
         )}
       </div>
+      {showEndConfirm && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          role="dialog"
+          aria-modal="true"
+          aria-labelledby="end-room-confirm-title"
+        >
+          <div className="w-full max-w-sm rounded-card bg-white p-6 shadow-card dark:bg-night-800">
+            <h3 id="end-room-confirm-title" className="text-lg font-bold text-slate-900 dark:text-white">
+              结束并离开？
+            </h3>
+            <p className="mt-2 text-sm leading-relaxed text-slate-600 dark:text-night-300">
+              所有观看者会立即断开，房号作废，当前聊天记录也会清空。只想停画面请用「停止共享」，房间与聊天会保留。
+            </p>
+            <div className="mt-5 flex justify-end gap-2">
+              <button
+                onClick={() => setShowEndConfirm(false)}
+                className="inline-flex h-10 items-center justify-center rounded-full px-4 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 dark:text-night-300 dark:hover:bg-night-750"
+              >
+                取消
+              </button>
+              <button
+                onClick={() => { setShowEndConfirm(false); onEndRoom(); }}
+                className="inline-flex h-10 items-center justify-center rounded-full bg-red-600 px-4 text-sm font-bold text-white transition-colors hover:bg-red-700"
+              >
+                结束并离开
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+      <ChatPanel
+        role={chat.role}
+        open={chat.open}
+        connected={chat.connected}
+        messages={chat.messages}
+        onToggle={chat.onToggle}
+        onClose={chat.onClose}
+        onSend={chat.onSend}
+        onExport={chat.onExport}
+        connectingHint={chat.role === 'viewer' ? '共享已结束，聊天连接建立中' : '等待观众加入聊天'}
+      />
     </div>
   );
 };
