@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
-import { Monitor, StopCircle, Play, Pause, AlertCircle, Copy, Check, Share2, Eye, Loader2, RefreshCw, X, MonitorUp, Maximize, Minimize, Volume2, VolumeX, PictureInPicture, AlertTriangle, LogOut } from 'lucide-react';
+import { Monitor, StopCircle, Play, Pause, AlertCircle, Copy, Check, Share2, Eye, Loader2, RefreshCw, X, MonitorUp, Maximize, Minimize, Volume2, VolumeX, PictureInPicture, AlertTriangle, LogOut, MessageCircle } from 'lucide-react';
 import { ChatPanel, type ChatPanelMessage } from './ChatPanel';
 
 export type ScreenShareViewerConnectingStage = 'fetching_ice' | 'connecting_signaling' | 'connecting_media' | 'waiting_stream' | '';
@@ -253,18 +253,36 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
     copyShareLink();
   }, [shareLink, copyShareLink]);
 
-  // 聊天改为页面内嵌：只要房间还在（连接中/共享中/观看中，或聊天通道仍连着），就占一列。
-  // “停止共享”只停画面、不断房间，所以不能因为 isSharing 变 false 就把聊天收掉。
-  // 全屏观看时画面要占满视口，聊天列让位，退出全屏后自动回来。
-  const showChat =
-    (isSharing || isViewing || isConnecting || chat.connected || chat.messages.length > 0) &&
+  // 右侧「互动」卡默认收起：主卡里先给一个「加入聊天房间」按钮，点击才展开。
+  // 停止共享只停画面、不断房间，所以聊天入口仍要保留；全屏观看时让位给画面。
+  const chatEntryVisible =
+    (isSharing || isViewing || chat.connected || chat.messages.length > 0) &&
     !viewerFullscreen;
+  const showChat = chatEntryVisible && chat.open;
+
+  const chatEntryButton = chatEntryVisible ? (
+    <button
+      type="button"
+      onClick={chat.onToggle}
+      aria-expanded={chat.open}
+      aria-controls="room-chat-panel"
+      className="inline-flex h-9 shrink-0 items-center gap-2 rounded-full border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 shadow-sm transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 dark:border-night-700 dark:bg-transparent dark:text-night-300 dark:hover:bg-night-750"
+    >
+      <MessageCircle size={15} />
+      {chat.open ? '收起聊天' : '加入聊天房间'}
+      {chat.messages.length > 0 && (
+        <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-brand-600 px-1.5 py-0.5 text-[10px] leading-none text-white">
+          {chat.messages.length}
+        </span>
+      )}
+    </button>
+  ) : null;
 
   return (
     <div className="w-full mx-auto">
       <div
-        className={`grid items-stretch gap-4 ${
-          showChat ? 'lg:grid-cols-[minmax(0,1fr)_22rem]' : ''
+        className={`grid items-stretch gap-4 mx-auto ${
+          showChat ? 'max-w-5xl lg:grid-cols-[minmax(0,1fr)_22rem]' : 'max-w-xl'
         }`}
       >
         <div className="min-w-0 bg-white dark:bg-night-850 rounded-card shadow-card border border-slate-100 dark:border-night-750 p-6 md:p-8 transition-colors motion-base">
@@ -288,13 +306,17 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                 {isViewing ? '观看屏幕' : '屏幕共享'}
               </h2>
             </div>
-            {isViewing && (
-              <p className="ml-auto min-w-0 truncate text-xs text-slate-500 dark:text-night-400">
-                实时观看对方共享的屏幕内容
-              </p>
-            )}
+            <div className="ml-auto flex shrink-0 items-center gap-2">
+              {isViewing && (
+                <p className="hidden min-w-0 truncate text-xs text-slate-500 dark:text-night-400 xl:block">
+                  实时观看对方共享的屏幕内容
+                </p>
+              )}
+              {chatEntryButton}
+            </div>
           </div>
         ) : (
+          <>
           <div className="text-center mb-8">
             <div className="inline-flex items-center justify-center w-16 h-16 bg-brand-100 dark:bg-brand-500/12 rounded-card mb-4 ring-1 ring-brand-200/70 dark:ring-brand-500/20">
               {isConnecting ? (
@@ -312,6 +334,8 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               </p>
             )}
           </div>
+          {chatEntryButton && <div className="mb-6 flex justify-end">{chatEntryButton}</div>}
+          </>
         )}
 
         {error && !(targetSharerId && !isConnecting && !isViewing && !isSharing) && (
@@ -813,6 +837,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
             messages={chat.messages}
             onSend={chat.onSend}
             onExport={chat.onExport}
+            onClose={chat.onClose}
             connectingHint={chat.role === 'viewer' ? '共享已结束，聊天连接建立中' : '等待观众加入聊天'}
           />
         )}

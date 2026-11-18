@@ -81,6 +81,26 @@ test('观看态：状态与画质叠进播放器，使用自绘控件条', () =>
   assert.doesNotMatch(markup, /画中画/);
 });
 
+test('聊天默认收起，点主卡「加入聊天房间」后才展开互动卡', () => {
+  const closed = render({ isSharing: true });
+  assert.doesNotMatch(closed, /aria-label="房间聊天"/);
+  assert.match(closed, /加入聊天房间/);
+
+  const open = render({
+    isSharing: true,
+    chat: {
+      ...baseProps.chat,
+      open: true,
+      connected: true,
+      messages: [{ id: 'm1', fromPeerId: 'me', ts: Date.now(), text: '你好' }],
+    },
+  });
+  assert.match(open, /aria-label="房间聊天"/);
+  assert.match(open, /收起聊天/);
+  assert.match(open, /互动/);
+  assert.match(open, /语音/);
+});
+
 test('共享态：保留分享链接卡片与共享操作条', () => {
   const markup = render({
     isSharing: true,

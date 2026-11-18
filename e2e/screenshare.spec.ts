@@ -197,8 +197,12 @@ const blockRoomChatSignaling = async (page: Page): Promise<void> => {
 };
 
 const openChatPanel = async (page: Page): Promise<void> => {
-  // 聊天已改为页面内嵌面板，不再有“打开聊天/收起聊天”的悬浮入口。
-  await expect(page.locator('aside[aria-label="房间聊天"]')).toBeVisible({ timeout: 10_000 });
+  // 右侧「互动」卡默认收起，必须先点主卡里的「加入聊天房间」。
+  const panel = page.locator('aside[aria-label="房间聊天"]');
+  if (!(await panel.isVisible().catch(() => false))) {
+    await page.getByRole('button', { name: '加入聊天房间' }).click();
+  }
+  await expect(panel).toBeVisible({ timeout: 10_000 });
 };
 
 const waitForChatConnected = async (page: Page): Promise<void> => {

@@ -148,6 +148,8 @@ export function useRoomChat({ onNotify }: UseRoomChatOptions = {}): RoomChatApi 
     setConnected(false);
     setRoleState(nextRole);
     setMessages([]);
+    // 新房间默认收起互动卡，等用户在主卡里点「加入聊天房间」再展开。
+    setOpen(false);
   }, []);
 
   const send = useCallback(
