@@ -285,7 +285,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
           showChat ? 'max-w-5xl lg:grid-cols-[minmax(0,1fr)_22rem]' : 'max-w-xl'
         }`}
       >
-        <div className="min-w-0 bg-white dark:bg-night-850 rounded-card shadow-card border border-slate-100 dark:border-night-750 p-6 md:p-8 transition-colors motion-base">
+        <div className="min-w-0 bg-white dark:bg-night-850 rounded-card shadow-card border border-slate-100 dark:border-night-750 p-6 md:p-8 transition-colors motion-base animate-slide-up">
         {/* 共享 / 观看中把装饰性大头部压成工具条式紧凑头部：Meet / Zoom 进入「正在
             共享」态后都会收起介绍性大标题，把纵向空间让给画面和操作；未开始时保
             留图标 + 标题的引导性头部。 */}

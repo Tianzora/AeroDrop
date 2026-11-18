@@ -131,7 +131,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
     (codeStatus === 'success' && state !== TransferState.ERROR && state !== TransferState.COMPLETED);
 
   return (
-    <div className="max-w-xl mx-auto p-4 sm:p-6 bg-white dark:bg-night-850 rounded-card shadow-card border border-slate-100 dark:border-night-750 transition-colors">
+    <div className="max-w-xl mx-auto p-4 sm:p-6 bg-white dark:bg-night-850 rounded-card shadow-card border border-slate-100 dark:border-night-750 transition-colors animate-slide-up">
       <div className="text-center mb-6">
         <h2 className="text-xl font-bold text-slate-800 dark:text-night-100">接收文件</h2>
         {showCodeEntry && (

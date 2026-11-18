@@ -3,7 +3,7 @@ import { flushSync } from 'react-dom';
 import { Sender } from './components/Sender';
 import { Receiver } from './components/Receiver';
 import { ErrorBoundary } from './components/ErrorBoundary';
-import { Send, Inbox, Monitor, Package, ShieldAlert, X } from 'lucide-react';
+import { Send, Inbox, Monitor, Package, ShieldAlert, X, ChevronDown } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
 import { ScreenShare } from './components/ScreenShare';
 import { AppNotification } from './types';
@@ -540,7 +540,7 @@ const App: React.FC = () => {
             {showRiskBanner && (
               <>
                 {/* Desktop Badge */}
-                <div className="hidden sm:flex items-center gap-2 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-full px-3 py-1.5 animate-slide-up">
+                <div className="hidden md:flex items-center gap-2 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-full px-3 py-1.5 animate-slide-up">
                   <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400" />
                   <span className="text-xs font-medium text-amber-700 dark:text-amber-300">
                     检测到代理网络，点对点传输和屏幕共享可能失效，建议关闭代理
@@ -554,20 +554,26 @@ const App: React.FC = () => {
                   </button>
                 </div>
 
-                {/* Mobile Icon Button */}
+                {/* Mobile Compact Pill：保留可读的「网络受限」文字，而不是只有一个告警图标 */}
                 <button
-                  className={`sm:hidden inline-flex min-w-11 min-h-11 items-center justify-center rounded-full transition-colors relative ${
+                  id="network-risk-toggle"
+                  className={`md:hidden inline-flex min-h-11 items-center gap-1.5 rounded-full border px-3 text-xs font-bold transition-colors ${
                     isRiskBannerExpanded
-                      ? 'bg-amber-100 dark:bg-amber-500/15 text-amber-600 dark:text-amber-400'
-                      : 'text-amber-500 dark:text-amber-400 hover:bg-amber-50 dark:hover:bg-amber-900/30'
+                      ? 'border-amber-300 bg-amber-100 text-amber-700 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-300'
+                      : 'border-amber-200/80 bg-amber-50/80 text-amber-700 hover:bg-amber-100 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-300 dark:hover:bg-amber-500/15'
                   }`}
                   onClick={() => setIsRiskBannerExpanded(!isRiskBannerExpanded)}
-                  aria-label="查看网络警告"
+                  aria-expanded={isRiskBannerExpanded}
+                  aria-controls="network-risk-banner"
+                  aria-label={isRiskBannerExpanded ? '收起网络警告' : '查看网络警告'}
                 >
-                  <ShieldAlert className="w-5 h-5" />
-                  {!isRiskBannerExpanded && (
-                    <span className="absolute top-1.5 right-1.5 w-2 h-2 bg-red-500 rounded-full ring-2 ring-white dark:ring-night-900"></span>
-                  )}
+                  <ShieldAlert className="w-4 h-4 shrink-0" />
+                  网络受限
+                  <ChevronDown
+                    className={`w-3.5 h-3.5 shrink-0 transition-transform motion-fast ${
+                      isRiskBannerExpanded ? 'rotate-180' : ''
+                    }`}
+                  />
                 </button>
               </>
             )}
@@ -575,24 +581,29 @@ const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Mobile only banner - Expandable */}
+      {/* Mobile only banner - Expandable。文案与桌面端保持一致，避免同一风险两种说法。 */}
       {showRiskBanner && isRiskBannerExpanded && (
-        <div className="sm:hidden bg-amber-50 dark:bg-amber-500/10 border-b border-amber-200 dark:border-amber-500/30 px-4 py-3 flex items-start gap-3 animate-slide-down relative z-10 shadow-sm">
+        <div
+          id="network-risk-banner"
+          role="status"
+          aria-live="polite"
+          className="md:hidden bg-amber-50 dark:bg-amber-500/10 border-b border-amber-200 dark:border-amber-500/30 px-4 py-3 flex items-start gap-3 animate-slide-down relative z-10 shadow-sm"
+        >
           <ShieldAlert className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
           <div className="flex-1">
-             <p className="text-xs font-medium text-amber-800 dark:text-amber-200 mb-1">
-                网络环境受限
-             </p>
-              <p className="text-xs text-amber-700/80 dark:text-amber-300/80 leading-relaxed">
-                 检测到当前网络可能限制 P2P 打洞，将优先尝试更稳的连接方式
-              </p>
-           </div>
+            <p className="text-xs font-semibold text-amber-800 dark:text-amber-200 mb-1">
+              网络环境受限
+            </p>
+            <p className="text-xs leading-relaxed text-amber-700/90 dark:text-amber-300/90">
+              检测到代理网络，点对点传输和屏幕共享可能失效，建议关闭代理
+            </p>
+          </div>
           <button
             onClick={() => {
               dismissRiskBanner();
             }}
             className="inline-flex min-w-11 min-h-11 items-center justify-center -mr-2 -my-2 rounded-full hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400"
-            aria-label="关闭警告"
+            aria-label="关闭网络警告"
           >
             <X size={16} />
           </button>

@@ -57,6 +57,14 @@ const baseProps = {
   avgSpeedBytes: 0,
 };
 
+test('idle sender card explains the share-code flow at a glance', () => {
+  const html = renderToStaticMarkup(
+    React.createElement(SenderUI, { ...baseProps, state: TransferState.IDLE })
+  );
+
+  assert.match(html, /选择文件或文件夹，生成 6 位口令/);
+});
+
 test('shows the selected single file summary with icon, name, and size', () => {
   const singleFileMetadata: FileMetadata = {
     files: [{ name: 'report.pdf', size: 1024, type: 'application/pdf', lastModified: 0 }],
