@@ -228,7 +228,7 @@ const collectPageErrors = (page: Page): string[] => {
  * 存在的函数，但「没有可采集的桌面」只会在调用时抛错。只有真抓到一帧才算支持。
  *
  * 本机开发者没有显示服务时允许 skip（否则本地/无头环境寸步难行）；但 CI 里
- * fake-capture flag（playwright.product.config.ts）一旦回归，17 条走 ensureDisplayCapture 的用例会整组 skip
+ * fake-capture flag（playwright.product.config.ts）一旦回归，16 条走 ensureDisplayCapture 的用例会整组 skip
  * 而 job 依旧全绿——所以 CI 下把探测结果当断言，必须为 true。
  */
 const ensureDisplayCapture = async (page: Page): Promise<void> => {
@@ -691,7 +691,7 @@ test.describe('screen share', () => {
     await expect.poll(() => arrivals.length, { timeout: 20_000 }).toBe(1);
 
     await page.getByRole('button', { name: '停止共享' }).click();
-    await page.getByRole('button', { name: '开始共享屏幕' }).click();
+    await page.getByRole('button', { name: '开始共享' }).click();
 
     await expect.poll(() => arrivals.length, { timeout: 30_000 }).toBeGreaterThanOrEqual(2);
     expect(secondBeforeFirst).toBe(true);
@@ -1159,7 +1159,8 @@ test.describe('screen share', () => {
       await expect(viewer.getByText('hello-from-viewer', { exact: true })).toBeVisible();
 
       await page.getByRole('button', { name: '停止共享' }).click();
-      await expect(page.getByRole('button', { name: '开始共享屏幕' })).toBeVisible({
+      await expect(page.getByText('共享已暂停', { exact: true })).toBeVisible({ timeout: 20_000 });
+      await expect(page.getByRole('button', { name: '开始共享' })).toBeVisible({
         timeout: 20_000,
       });
       // share_stopped 之后聊天面板不能被一起收掉。
@@ -1169,9 +1170,9 @@ test.describe('screen share', () => {
         timeout: 15_000,
       });
 
-      await page.getByRole('button', { name: '开始共享屏幕' }).click();
+      await page.getByRole('button', { name: '开始共享' }).click();
       await expect(page.getByText('正在共享')).toBeVisible({ timeout: 20_000 });
-      // 观看端没有「重新观看」按钮：共享方重新开始共享后，画面应自动恢复。
+      // 共享方重新开始共享后，观看端画面自动恢复；此时不需要点「重新观看」。
       await dismissAutoplayOverlay(viewer);
       const resumed = await waitForViewerFrames(viewer);
       // 画面必须继续增长，不能只靠旧帧残留混过去。
@@ -1184,42 +1185,6 @@ test.describe('screen share', () => {
       await expect(viewer.getByText('still-chatting-while-stopped', { exact: true })).toBeVisible();
       await sendChatMessage(viewer, 'after-rewatch');
       await expect(page.getByText('after-rewatch', { exact: true })).toBeVisible({
-        timeout: 15_000,
-      });
-    } finally {
-      await viewer.context().close();
-    }
-  });
-
-  // 观看端只保留「结束并离开」：没有「暂停/停止观看」这种只停画面不离开的入口，
-  // 避免用户以为可以一边离开画面一边留在房间。
-  test('viewer has no pause-watching button and end-and-leave clears the room chat', async ({
-    browser,
-    page,
-  }) => {
-    test.slow();
-    await page.goto('/');
-    await ensureDisplayCapture(page);
-    await startSharing(page);
-    const shareLink = await getShareLink(page);
-    const viewer = await openChatViewerWithFrames(() => openViewer(browser, shareLink));
-    try {
-      await openChatPanel(page);
-      await openChatPanel(viewer);
-      await waitForChatConnected(page);
-      await waitForChatConnected(viewer);
-      await sendChatMessage(page, 'before-leave');
-      await expect(viewer.getByText('before-leave', { exact: true })).toBeVisible({
-        timeout: 15_000,
-      });
-
-      await expect(viewer.getByRole('button', { name: '停止观看' })).toHaveCount(0);
-      await expect(viewer.getByRole('button', { name: '重新观看' })).toHaveCount(0);
-
-      await viewer.getByRole('button', { name: '结束并离开' }).click();
-      await expect(viewer.getByText('结束并离开？', { exact: true })).toBeVisible();
-      await viewer.getByRole('button', { name: '结束并离开' }).last().click();
-      await expect(viewer.getByText('before-leave', { exact: true })).toHaveCount(0, {
         timeout: 15_000,
       });
     } finally {
@@ -1258,12 +1223,10 @@ test.describe('screen share', () => {
         timeout: 15_000,
       });
 
-      await page.getByRole('button', { name: '停止共享' }).click();
-      await expect(viewer.getByText('正在等待屏幕画面...', { exact: true })).toBeVisible({
-        timeout: 20_000,
-      });
-      // 硬关分享端：不再有 window_closed，也不会重新开始共享。
+      // 硬关分享端：不再有 window_closed，也不会重新开始共享。观看端先落到「共享已停止」占位，
+      // 20 秒兜底到终态（这条路径不经过分享端的显式停共享帧）。
       await page.close({ runBeforeUnload: false });
+      await expect(viewer.getByText('共享已停止', { exact: true })).toBeVisible({ timeout: 20_000 });
 
       await expect(viewer.getByText('共享方长时间未恢复，屏幕共享已结束', { exact: true })).toBeVisible({
         timeout: 35_000,
@@ -1298,7 +1261,7 @@ test.describe('screen share', () => {
       await expect(viewer.getByText('未连接', { exact: true })).toBeVisible({ timeout: 30_000 });
       // 原共享/停止共享照旧可用。
       await page.getByRole('button', { name: '停止共享' }).click();
-      await expect(page.getByRole('button', { name: '开始共享屏幕' })).toBeVisible({
+      await expect(page.getByRole('button', { name: '开始共享' })).toBeVisible({
         timeout: 20_000,
       });
       expect(sharerErrors).toEqual([]);

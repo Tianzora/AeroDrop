@@ -1,5 +1,8 @@
 @import "tailwindcss";
 
+/* 固定浅色：dark 变体改为 class 驱动且不启用 .dark，系统深色不再影响页面 */
+@custom-variant dark (&:where(.dark, .dark *));
+
 @theme {
   /* ---- Brand colors — 视觉世界不变 ---- */
   --color-brand-50: #eff6ff;
@@ -67,6 +70,7 @@
 
 @layer base {
   html {
+    color-scheme: light;
     -webkit-font-smoothing: antialiased;
     text-rendering: optimizeLegibility;
   }
@@ -79,21 +83,11 @@
   body {
     caret-color: var(--color-brand-600);
   }
-  @media (prefers-color-scheme: dark) {
-    body {
-      caret-color: var(--color-brand-400);
-    }
-  }
 
   /* 统一焦点环：2px + 2px offset，深浅两套都可见 */
   :focus-visible {
     outline: 2px solid var(--color-brand-600);
     outline-offset: 2px;
-  }
-  @media (prefers-color-scheme: dark) {
-    :focus-visible {
-      outline-color: var(--color-brand-400);
-    }
   }
 
   a,
@@ -146,12 +140,19 @@
   }
   /* 屏内位移（模式指示器）用 ease-move */
   .motion-move {
+    transition-property: transform;
     transition-duration: var(--dur-base);
     transition-timing-function: var(--ease-move);
   }
   /* 过渡属性白名单：颜色/描边/阴影 + 只动 transform/opacity，替代 transition-all */
   .transition-ui {
     transition-property: color, background-color, border-color, fill, stroke, box-shadow, opacity, transform;
+  }
+  .transition-width {
+    transition-property: width;
+  }
+  .max-w-chat-bubble {
+    max-width: 85%;
   }
 }
 

@@ -23,7 +23,7 @@ const referencedCounts = (source: string, pattern: RegExp): number[] =>
 
 test('screenshare 用例数与被引用处一致', () => {
   const actual = countTests('e2e/screenshare.spec.ts');
-  assert.equal(actual, 20, '改了 e2e/screenshare.spec.ts 的用例数，就要同步 CI 注释与白名单理由');
+  assert.equal(actual, 19, '改了 e2e/screenshare.spec.ts 的用例数，就要同步 CI 注释与白名单理由');
 
   const ci = readRepoFile('.github/workflows/ci.yml');
   assert.deepEqual(
@@ -88,7 +88,7 @@ const listProductTests = (): { total: number; files: number } | null => {
   return match ? { total: Number(match[1]), files: Number(match[2]) } : null;
 };
 
-test('product 配置的 testMatch 同时选中两个 spec，并能列出 23 条用例', () => {
+test('product 配置的 testMatch 同时选中两个 spec，并能列出 22 条用例', () => {
   const config = readRepoFile('playwright.product.config.ts');
   const testMatch = config.match(/testMatch:\s*\[([^\]]*)\]/);
   assert.ok(testMatch, 'playwright.product.config.ts 里找不到 testMatch 数组');
@@ -105,8 +105,8 @@ test('product 配置的 testMatch 同时选中两个 spec，并能列出 23 条�
   if (listed) {
     assert.equal(
       listed.total,
-      23,
-      `--list 解析出 ${listed.total} 条产品级用例，期望 23 条（product-transfer 3 + screenshare 20）`
+      22,
+      `--list 解析出 ${listed.total} 条产品级用例，期望 22 条（product-transfer 3 + screenshare 19）`
     );
     assert.equal(listed.files, 2, 'testMatch 必须恰好覆盖两个 spec 文件');
     return;
@@ -120,6 +120,6 @@ test('product 配置的 testMatch 同时选中两个 spec，并能列出 23 条�
   for (const file of specs) {
     assert.ok(countTests(file) > 0, `${file} 里解析不到任何 test(，用例清单可能已被改坏`);
   }
-  assert.equal(total, 23, `降级计数得到 ${total} 条产品级用例，期望 23 条`);
+  assert.equal(total, 22, `降级计数得到 ${total} 条产品级用例，期望 22 条`);
   assert.equal(specs.length, 2, '产品级套件必须恰好由两个 spec 文件组成');
 });

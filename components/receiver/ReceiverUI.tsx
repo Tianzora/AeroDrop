@@ -53,19 +53,6 @@ interface ReceiverUIProps {
   onRetry: () => void;
 }
 
-function usePrefersDark(): boolean {
-  const [dark, setDark] = React.useState(
-    () => typeof window !== 'undefined' && window.matchMedia('(prefers-color-scheme: dark)').matches
-  );
-  React.useEffect(() => {
-    const mq = window.matchMedia('(prefers-color-scheme: dark)');
-    const onChange = (e: MediaQueryListEvent) => setDark(e.matches);
-    mq.addEventListener('change', onChange);
-    return () => mq.removeEventListener('change', onChange);
-  }, []);
-  return dark;
-}
-
 function useCodeSlotSize(): number {
   const compute = () => (typeof window === 'undefined' ? 44 : window.innerWidth < 360 ? 38 : 44);
   const [size, setSize] = React.useState(compute);
@@ -116,13 +103,9 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
     stage: connectingStage,
     reconnectAttempt,
   });
-  const prefersDark = usePrefersDark();
   const codeSlotSize = useCodeSlotSize();
-  // 官方 CodeSlots 的五个颜色语义：accent = 落入的填充 / 成功扫光，ink = 光标与活跃格，
-  // slot = 空格底色，digit = 填充上的数字，danger = 错误态。深浅色各一套，参数沿用用户调好的那版。
-  const slotTone = prefersDark
-    ? { accent: '#3b82f6', ink: '#e8edf3', slot: '#26313e', digit: '#ffffff', danger: '#f87171' }
-    : { accent: '#3b82f6', ink: '#1e293b', slot: '#f8fafc', digit: '#ffffff', danger: '#dc2626' };
+  // 全局浅色（DESIGN v2）：CodeSlots 五个颜色语义只保留浅色一套。
+  const slotTone = { accent: 'var(--color-brand-600)', ink: 'var(--color-slate-800)', slot: 'var(--color-slate-50)', digit: 'var(--color-white)', danger: 'var(--color-red-600)' };
   // 打勾扫光期间（codeStatus==='success'）连接层可能已跑到 PEER_CONNECTED 并带来元数据，
   // 但成功动画必须播完再换页：这里纯渲染层压住确认/进度面板，直到 Receiver 把 codeStatus
   // 复位 idle。ERROR/COMPLETED 例外，故障/完成立即呈现。不延迟任何连接/仲裁逻辑。
@@ -131,11 +114,11 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
     (codeStatus === 'success' && state !== TransferState.ERROR && state !== TransferState.COMPLETED);
 
   return (
-    <div className="max-w-xl mx-auto p-4 sm:p-6 bg-white dark:bg-night-850 rounded-card shadow-card border border-slate-100 dark:border-night-750 transition-colors animate-slide-up">
+    <div className="max-w-xl mx-auto p-4 sm:p-6 bg-white rounded-card shadow-card border border-slate-100 transition-colors animate-slide-up">
       <div className="text-center mb-6">
-        <h2 className="text-xl font-bold text-slate-800 dark:text-night-100">接收文件</h2>
+        <h2 className="text-xl font-bold text-slate-800">接收文件</h2>
         {showCodeEntry && (
-          <p className="text-slate-500 dark:text-night-400">输入 6 位口令</p>
+          <p className="text-slate-500">输入 6 位口令</p>
         )}
       </div>
 
@@ -151,7 +134,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
               inputRef={inputRef}
               ariaLabel="6 位口令"
               slotSize={codeSlotSize}
-              gap={9}
+              gap={8}
               radius={12}
               bounce={0.2}
               settle={0.35}
@@ -167,25 +150,25 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
           {/* 输错口令的行内提示：占位高度固定，出现/消失都不推动键盘 */}
           <div className="mb-5 h-5 text-center" aria-live="polite">
             {errorMsg && (
-              <span className="inline-flex items-center gap-1 text-sm font-medium text-red-600 dark:text-red-400">
+              <span className="inline-flex items-center gap-1 text-sm font-medium text-red-600">
                 <AlertCircle size={16} />
                 {errorMsg}
               </span>
             )}
           </div>
-          <div className="grid grid-cols-3 gap-3 w-full max-w-[280px] mb-8">
+          <div className="grid grid-cols-3 gap-3 w-full max-w-xs mb-8">
             {[1, 2, 3, 4, 5, 6, 7, 8, 9].map((num) => (
-              <button key={num} onClick={() => onDigitClick(num.toString())} className="h-14 sm:h-16 rounded-control bg-slate-50 dark:bg-night-800 text-slate-700 dark:text-night-200 text-xl font-semibold tabular-nums hover:bg-slate-100 dark:hover:bg-night-750 transition-colors shadow-sm border border-slate-100 dark:border-night-700">
+              <button key={num} onClick={() => onDigitClick(num.toString())} className="h-14 sm:h-16 rounded-control bg-slate-50 text-slate-700 text-xl font-semibold tabular-nums hover:bg-slate-100 transition-colors border border-slate-100">
                 {num}
               </button>
             ))}
-            <button onClick={onPasteFromClipboard} aria-label="粘贴 6 位口令" title="粘贴 6 位口令" className="h-14 sm:h-16 rounded-control bg-brand-50 dark:bg-brand-500/10 text-brand-600 dark:text-brand-400 flex items-center justify-center hover:bg-brand-100 dark:hover:bg-brand-900/30 transition-colors shadow-sm border border-brand-100 dark:border-brand-500/30">
+            <button onClick={onPasteFromClipboard} aria-label="粘贴 6 位口令" title="粘贴 6 位口令" className="h-14 sm:h-16 rounded-control bg-brand-50 text-brand-600 flex items-center justify-center hover:bg-brand-100 transition-colors border border-brand-100">
               <ClipboardPaste size={20} />
             </button>
-            <button onClick={() => onDigitClick('0')} className="h-14 sm:h-16 rounded-control bg-slate-50 dark:bg-night-800 text-slate-700 dark:text-night-200 text-xl font-semibold tabular-nums hover:bg-slate-100 dark:hover:bg-night-750 transition-colors shadow-sm border border-slate-100 dark:border-night-700">
+            <button onClick={() => onDigitClick('0')} className="h-14 sm:h-16 rounded-control bg-slate-50 text-slate-700 text-xl font-semibold tabular-nums hover:bg-slate-100 transition-colors border border-slate-100">
               0
             </button>
-            <button onClick={onBackspace} onContextMenu={(e) => { e.preventDefault(); onClear(); }} aria-label="删除" title="删除（长按清空）" className="h-14 sm:h-16 rounded-control bg-slate-50 dark:bg-night-800 text-slate-600 dark:text-night-400 flex items-center justify-center hover:bg-slate-100 dark:hover:bg-night-750 transition-colors shadow-sm border border-slate-100 dark:border-night-700">
+            <button onClick={onBackspace} onContextMenu={(e) => { e.preventDefault(); onClear(); }} aria-label="删除" title="删除（长按清空）" className="h-14 sm:h-16 rounded-control bg-slate-50 text-slate-600 flex items-center justify-center hover:bg-slate-100 transition-colors border border-slate-100">
               <Delete size={20} />
             </button>
           </div>
@@ -195,11 +178,11 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
       {state === TransferState.WAITING_FOR_PEER && codeStatus !== 'success' && (
         <div className="flex flex-col items-center py-10 animate-pop-in">
           <Loader2 size={32} className="animate-spin text-brand-500 mb-4" />
-          <p className="text-slate-600 dark:text-night-300 font-medium">{waitingStatus.title}</p>
+          <p className="text-slate-600 font-medium">{waitingStatus.title}</p>
           {waitingStatus.detail && (
-            <p className="text-xs text-slate-500 dark:text-night-400 mt-1">{waitingStatus.detail}</p>
+            <p className="text-xs text-slate-500 mt-1">{waitingStatus.detail}</p>
           )}
-          <button onClick={onReset} className="mt-8 px-6 py-2 bg-white dark:bg-night-800 border border-slate-200 dark:border-night-700 text-slate-600 dark:text-night-300 rounded-full text-sm hover:bg-slate-50 dark:hover:bg-night-750 hover:text-red-500 dark:hover:text-red-400 transition-colors shadow-sm active:scale-95">
+          <button onClick={onReset} className="mt-8 px-6 py-2 bg-white border border-slate-200 text-slate-600 rounded-full text-sm hover:bg-slate-50 hover:text-red-500 transition-colors active:scale-95">
             {waitingStatus.cancelLabel}
           </button>
         </div>
@@ -210,13 +193,13 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
           <div className="space-y-3 text-sm">
             {senderDeviceName && (
               <div className="flex items-baseline gap-4">
-                <span className="w-16 shrink-0 text-slate-500 dark:text-night-400">发送方</span>
-                <span className="min-w-0 truncate font-semibold text-slate-800 dark:text-night-100">{senderDeviceName}</span>
+                <span className="w-16 shrink-0 text-slate-500">发送方</span>
+                <span className="min-w-0 truncate font-semibold text-slate-800">{senderDeviceName}</span>
               </div>
             )}
             <div className="flex items-baseline gap-4">
-              <span className="w-16 shrink-0 text-slate-500 dark:text-night-400">{isMultiFile ? '文件' : '文件名'}</span>
-              <span className="flex min-w-0 flex-1 items-center gap-2 font-semibold text-slate-800 dark:text-night-100">
+              <span className="w-16 shrink-0 text-slate-500">{isMultiFile ? '文件' : '文件名'}</span>
+              <span className="flex min-w-0 flex-1 items-center gap-2 font-semibold text-slate-800">
                 {isMultiFile ? (
                   <>
                     <Layers size={16} className="shrink-0 text-brand-500" />
@@ -227,7 +210,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
                     <FileTypeIcon
                       type={primaryFileType ?? 'unknown'}
                       size={16}
-                      className="shrink-0 text-slate-500 dark:text-night-300"
+                      className="shrink-0 text-slate-500"
                     />
                     <span className="truncate">{primaryFileName}</span>
                   </>
@@ -235,8 +218,8 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
               </span>
             </div>
             <div className="flex items-baseline gap-4">
-              <span className="w-16 shrink-0 text-slate-500 dark:text-night-400">大小</span>
-              <span className="text-slate-700 dark:text-night-200">{formatFileSize(metadata.totalSize)}</span>
+              <span className="w-16 shrink-0 text-slate-500">大小</span>
+              <span className="text-slate-700">{formatFileSize(metadata.totalSize)}</span>
             </div>
           </div>
 
@@ -244,7 +227,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
             <div className="mt-3">
               <button
                 onClick={onToggleFileList}
-                className="flex w-full items-center justify-between gap-2 py-2 text-sm text-slate-600 transition-colors hover:text-slate-900 dark:text-night-300 dark:hover:text-night-100"
+                className="flex w-full items-center justify-between gap-2 py-2 text-sm text-slate-600 transition-colors hover:text-slate-900"
               >
                 <span>文件列表 ({selectedFiles.length})</span>
                 {showFileList ? <ChevronUp size={16} /> : <ChevronDown size={16} />}
@@ -257,11 +240,11 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
                         <FileTypeIcon
                           type={file.fileType}
                           size={16}
-                          className="shrink-0 text-slate-400 dark:text-night-300"
+                          className="shrink-0 text-slate-400"
                         />
-                        <span className="truncate text-slate-600 dark:text-night-300">{file.name}</span>
+                        <span className="truncate text-slate-600">{file.name}</span>
                       </div>
-                      <span className="font-mono text-slate-500 dark:text-night-400">{formatFileSize(file.size)}</span>
+                      <span className="font-mono text-slate-500">{formatFileSize(file.size)}</span>
                     </div>
                   ))}
                 </div>
@@ -276,7 +259,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
                   <PlayCircle size={18} /> {isStreaming ? '重新开始' : '继续下载'}
                 </button>
               )}
-              <button onClick={onAcceptTransfer} className={`w-full font-bold py-3 rounded-full transition-ui motion-fast flex items-center justify-center gap-2 ${canResume ? 'bg-slate-100 text-slate-700 hover:bg-slate-200 dark:bg-night-800 dark:text-night-200' : 'bg-brand-600 hover:bg-brand-700 text-white shadow-lg shadow-brand-600/25 hover:shadow-xl hover:shadow-brand-600/30 hover:-translate-y-0.5'}`}>
+              <button onClick={onAcceptTransfer} className={`w-full font-bold py-3 rounded-full transition-ui motion-fast flex items-center justify-center gap-2 ${canResume ? 'bg-slate-100 text-slate-700 hover:bg-slate-200' : 'bg-brand-600 hover:bg-brand-700 text-white shadow-lg shadow-brand-600/25 hover:shadow-xl hover:shadow-brand-600/30 hover:-translate-y-0.5'}`}>
                 <Download size={18} /> {canResume ? '重新下载所有' : '确认并下载'}
               </button>
             </div>
@@ -294,7 +277,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
               />
               <button
                 onClick={onReset}
-                className="w-full h-11 mt-5 rounded-full bg-red-50 text-sm font-medium text-red-700 transition-colors hover:bg-red-100 dark:bg-red-500/10 dark:text-red-400 dark:hover:bg-red-500/20"
+                className="w-full h-11 mt-5 rounded-full bg-red-50 text-sm font-medium text-red-700 transition-colors hover:bg-red-100"
               >
                 取消
               </button>
@@ -306,8 +289,8 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
       {state === TransferState.ERROR && (
         <div className="text-center py-8 animate-pop-in">
           <AlertCircle size={32} className="text-red-500 mx-auto mb-4" />
-          <h3 className="text-xl font-bold text-slate-800 dark:text-night-100">传输失败</h3>
-          <p className="text-slate-500 dark:text-night-400 mt-2 mb-6">{errorMsg}</p>
+          <h3 className="text-xl font-bold text-slate-800">传输失败</h3>
+          <p className="text-slate-500 mt-2 mb-6">{errorMsg}</p>
           <div className="flex gap-4 justify-center">
             <button onClick={onReset} className="px-6 py-2.5 bg-white border border-slate-200 text-slate-700 rounded-full font-medium">
               取消
@@ -322,7 +305,7 @@ export const ReceiverUI: React.FC<ReceiverUIProps> = ({
       {state === TransferState.COMPLETED && (
         <div className="text-center py-8 animate-pop-in">
           <HardDriveDownload size={32} className="text-green-500 mx-auto mb-6" />
-          <h3 className="text-xl font-bold text-slate-800 dark:text-night-100">下载完成</h3>
+          <h3 className="text-xl font-bold text-slate-800">下载完成</h3>
           <button onClick={onReset} className="mt-8 px-6 py-2.5 bg-slate-100 text-slate-700 font-medium rounded-full hover:bg-slate-200">
             接收下一个
           </button>

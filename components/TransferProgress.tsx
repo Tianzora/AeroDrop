@@ -52,7 +52,7 @@ export const ProgressTrack: React.FC<{ value: number; tone: 'brand' | 'success';
       aria-valuemin={0}
       aria-valuemax={100}
       aria-valuenow={Math.round(clamped)}
-      className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200/80 dark:bg-night-800"
+      className="h-1.5 w-full overflow-hidden rounded-full bg-slate-200/80"
     >
       <motion.div
         className={`relative h-full w-full origin-left overflow-hidden rounded-full ${
@@ -66,7 +66,7 @@ export const ProgressTrack: React.FC<{ value: number; tone: 'brand' | 'success';
         {!reduceMotion && !complete && (
           <motion.span
             aria-hidden="true"
-            className="absolute inset-y-0 left-0 w-1/3 bg-gradient-to-r from-transparent via-white/35 to-transparent"
+            className="absolute inset-y-0 left-0 w-1/3 bg-white/20"
             animate={{ x: ['-120%', '420%'] }}
             transition={{ duration: 1.5, repeat: Infinity, ease: 'linear' }}
           />
@@ -110,7 +110,7 @@ export const TransferProgressCard: React.FC<TransferProgressCardProps> = ({
   return (
     <motion.section
       className={`mt-5 rounded-control p-4 text-left transition-colors motion-base ${
-        complete ? 'bg-emerald-50/70 dark:bg-emerald-500/[0.07]' : 'bg-slate-50/80 dark:bg-night-900/60'
+        complete ? 'bg-emerald-50/70' : 'bg-slate-50/80'
       }`}
       initial={reduceMotion ? false : { opacity: 0, y: 6 }}
       animate={{ opacity: 1, y: 0 }}
@@ -119,10 +119,10 @@ export const TransferProgressCard: React.FC<TransferProgressCardProps> = ({
       <div className="flex items-start justify-between gap-3">
         <div className="min-w-0 flex-1">
           {fileName && (
-            <p className="truncate text-sm font-semibold text-slate-900 dark:text-night-100">{fileName}</p>
+            <p className="truncate text-sm font-semibold text-slate-900">{fileName}</p>
           )}
           {filePosition && (
-            <p className="mt-0.5 text-[11px] tabular-nums text-slate-500 dark:text-night-400">{filePosition}</p>
+            <p className="mt-0.5 text-xs tabular-nums text-slate-500">{filePosition}</p>
           )}
         </div>
         <div className="flex h-8 shrink-0 items-center">
@@ -136,9 +136,9 @@ export const TransferProgressCard: React.FC<TransferProgressCardProps> = ({
               <Check size={15} strokeWidth={3} aria-hidden="true" />
             </motion.span>
           ) : (
-            <span className="flex items-baseline font-mono text-2xl font-bold leading-none tabular-nums text-slate-900 dark:text-night-100">
+            <span className="flex items-baseline font-mono text-2xl font-bold leading-none tabular-nums text-slate-900">
               <AnimatedNumber value={clamped} format={(latest) => `${Math.round(latest)}`} />
-              <span className="ml-0.5 text-sm font-medium text-slate-500 dark:text-night-400">%</span>
+              <span className="ml-0.5 text-sm font-medium text-slate-500">%</span>
             </span>
           )}
         </div>
@@ -150,11 +150,11 @@ export const TransferProgressCard: React.FC<TransferProgressCardProps> = ({
 
       <div className="mt-3 flex items-end justify-between gap-3">
         <div className="min-w-0">
-          <p className="truncate text-[11px] tabular-nums text-slate-500 dark:text-night-400">
+          <p className="truncate text-xs tabular-nums text-slate-500">
             <AnimatedNumber value={transferredBytes} format={formatFileSize} /> / {formatFileSize(totalBytes)}
           </p>
           {averageSpeedBytes !== undefined && (
-            <p className="mt-0.5 text-[11px] tabular-nums text-slate-500 dark:text-night-400">
+            <p className="mt-0.5 text-xs tabular-nums text-slate-500">
               平均 <AnimatedNumber value={averageSpeedBytes} format={(latest) => `${formatFileSize(latest)}/s`} />
             </p>
           )}
@@ -162,13 +162,13 @@ export const TransferProgressCard: React.FC<TransferProgressCardProps> = ({
         {!complete && (currentSpeedBytes !== undefined || eta) && (
           <div className="shrink-0 text-right">
             {currentSpeedBytes !== undefined && (
-              <p className="flex items-center justify-end gap-1 text-xs font-semibold tabular-nums text-brand-600 dark:text-brand-400">
+              <p className="flex items-center justify-end gap-1 text-xs font-semibold tabular-nums text-brand-600">
                 <ArrowDown size={12} aria-hidden="true" />
                 <AnimatedNumber value={currentSpeedBytes} format={(latest) => `${formatFileSize(latest)}/s`} />
               </p>
             )}
             {eta && (
-              <p className="mt-0.5 text-[11px] tabular-nums text-slate-500 dark:text-night-400">剩余 {eta}</p>
+              <p className="mt-0.5 text-xs tabular-nums text-slate-500">剩余 {eta}</p>
             )}
           </div>
         )}

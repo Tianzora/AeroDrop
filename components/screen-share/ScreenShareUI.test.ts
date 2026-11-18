@@ -25,6 +25,7 @@ const baseProps: React.ComponentProps<typeof ScreenShareUI> = {
   needsPlayClick: false,
   onViewerPlayClick: () => {},
   stopViewing: () => {},
+  roomRetained: false,
   chat: {
     role: 'viewer' as const,
     open: false,
@@ -70,15 +71,59 @@ test('观看态：状态与画质叠进播放器，使用自绘控件条', () =>
   assert.match(markup, /实时观看对方共享的屏幕内容/);
   assert.match(markup, /正在观看/);
   assert.match(markup, /画质 高清/);
-  // 观看端不再提供「停止观看（暂停）」：留下只会让人以为能只停画面不离开房间。
+  // 观看端不做任何共享控制：没有「停止观看 / 重新观看 / 开始共享」，只保留播放器自绘控件。
   assert.doesNotMatch(markup, /停止观看/);
-  assert.match(markup, /结束并离开/);
+  assert.doesNotMatch(markup, /重新观看/);
+  assert.doesNotMatch(markup, />\s*开始共享\s*</);
+  assert.doesNotMatch(markup, /结束并离开/);
   assert.doesNotMatch(markup, /controls=""/);
   assert.match(markup, /aria-label="暂停"/);
   assert.match(markup, /aria-label="静音"/);
   assert.match(markup, /aria-label="全屏"/);
   // 画中画按浏览器能力出现；服务端渲染拿不到 document，因此不应出现在静态标记里
   assert.doesNotMatch(markup, /画中画/);
+});
+
+test('观看端共享停止后只显示浅色占位，房间聊天保留且没有任何按钮', () => {
+  const markup = render({
+    targetSharerId: 'sharer-1',
+    viewerSharePaused: true,
+    chat: { ...baseProps.chat, connected: true },
+  });
+
+  assert.match(markup, /共享已停止/);
+  assert.match(markup, /房间与聊天仍保留/);
+  assert.match(markup, /role="status"/);
+  // 观看端零共享控制：占位态不许出现任何停止/重新观看/开始/结束按钮。
+  assert.doesNotMatch(markup, /停止观看/);
+  assert.doesNotMatch(markup, /重新观看/);
+  assert.doesNotMatch(markup, />\s*开始共享\s*</);
+  assert.doesNotMatch(markup, /结束并离开/);
+});
+
+test('共享端停止共享后显示占位与开始共享，房间聊天入口仍在', () => {
+  const markup = render({
+    roomRetained: true,
+    sharePaused: true,
+    chat: { ...baseProps.chat, connected: true },
+  });
+
+  assert.match(markup, /共享已暂停/);
+  // 无观看者时不能说「观看者都还在」——文案随 viewerCount 切换。
+  assert.match(markup, /房间与聊天仍保留/);
+  assert.doesNotMatch(markup, /房间、聊天和观看者都还在/);
+  assert.match(markup, /开始共享/);
+  assert.doesNotMatch(markup, /停止共享/);
+  assert.doesNotMatch(markup, /开始共享屏幕/);
+  assert.match(markup, /结束并离开/);
+
+  const withViewers = render({
+    roomRetained: true,
+    sharePaused: true,
+    viewerCount: 2,
+    chat: { ...baseProps.chat, connected: true },
+  });
+  assert.match(withViewers, /房间、聊天和观看者都还在/);
 });
 
 test('聊天默认收起，点主卡「加入聊天房间」后才展开互动卡', () => {

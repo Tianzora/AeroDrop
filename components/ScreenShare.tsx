@@ -101,6 +101,14 @@ interface ScreenShareProps {
 
 type QualityLevel = ScreenShareQualityLevel;
 
+/** 远端共享结束的显式语义：stopped=只停共享，left=分享方离开页面/房间。 */
+type RemoteShareEndReason = 'stopped' | 'left';
+
+const REMOTE_SHARE_END_LABELS: Record<RemoteShareEndReason, string> = {
+  stopped: '共享方已停止共享',
+  left: '共享方已离开页面，屏幕共享已结束',
+};
+
 import {
   describeCaptureError,
   findLiveAudioSender,
@@ -115,6 +123,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const [isSharing, setIsSharing] = useState(false);
   const [isViewing, setIsViewing] = useState(false);
   const [isConnecting, setIsConnecting] = useState(false);
+  // 观看端的「画面暂停」是独立于 isConnecting 的稳定态：分享方停共享或本端点「停止观看」
+  // 都停留在这个状态里，保留房间/聊天，只把画面区换成占位，不把人赶回落地页。
+  const [viewerSharePaused, setViewerSharePaused] = useState(false);
+  const [viewerReconnecting, setViewerReconnecting] = useState(false);
 
   // 共享/观看/建连中切走页面会直接结束画面：这几种状态都禁用侧滑切换。
   const isBusyForNavigation = isSharing || isViewing || isConnecting;
@@ -202,8 +214,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   // 本次观众连接已经因为「分享者暂时查不到」重试过几次（分享端重建 Peer 期间会这样）。
   const shareUnavailableAttemptsRef = useRef(0);
   const remoteShareEndHandledRef = useRef(false);
+  // 本次观众会话是否已经收到过画面：区分「首连就失败」和「看着看着分享端崩了」。
+  const viewerHadStreamRef = useRef(false);
   // 分享方异常退出时，观看端等待恢复的兜底定时器。
   const viewerWaitTerminalTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // 事件回调闭包里读不到最新 state，用它判断「分享方重新开始时观看端是否仍停在占位态」。
+  const viewerSharePausedRef = useRef(false);
   // 分享链接是否真的发布过（信令 open、拿到 peerId、屏幕上有链接可复制）。
   // 房号登记成功 ≠ 链接可见：登记完成后还要等 WS 握手，信令一直起不来时用户从没见过链接，
   // 终态就不能说「此前分享的链接已失效」。
@@ -1454,6 +1470,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
   }, []);
 
+  const markViewerSharePaused = useCallback((paused: boolean) => {
+    viewerSharePausedRef.current = paused;
+    setViewerSharePaused(paused);
+  }, []);
+
   const stopViewing = useCallback((isManual = true) => {
     // 让所有在途的 connectToSharer 在下一个 await 之后失效，避免取消后还建出幽灵会话。
     viewerConnectAttemptRef.current += 1;
@@ -1504,9 +1525,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     setIsViewing(false);
     setIsConnecting(false);
     setViewerConnectingStage('');
+    markViewerSharePaused(false);
+    setViewerReconnecting(false);
 
     // 只有手动停止时才清除目标ID，方便重连；「结束并离开」同时清空聊天记录。
     if (isManual) {
+      viewerHadStreamRef.current = false;
       chat.reset('viewer');
       clearPersistedViewerSession();
       setTargetSharerId(null);
@@ -1516,48 +1540,69 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       remoteShareEndHandledRef.current = false;
       remoteShareFullRef.current = false;
     }
-  }, [clearPersistedViewerSession, clearViewerWaitTerminal, chat.reset]);
+  }, [clearPersistedViewerSession, clearViewerWaitTerminal, chat.reset, markViewerSharePaused]);
 
-  const handleRemoteShareEnded = useCallback((reason = '共享已结束') => {
-    if (remoteShareEndHandledRef.current) return;
-    remoteShareEndHandledRef.current = true;
-    remoteShareEndedRef.current = true;
-    // 真实调用 plan：停共享只暂停画面并保留聊天；window_closed = 房主离开，按终态全断。
-    const plan = planRemoteShareEnded({ peerLeavingRoom: reason.includes('离开') });
-    if (plan.destroyPeer) {
-      stopViewing(false);
-      if (plan.clearPersistedSession) clearPersistedViewerSession();
-      if (plan.closeRoomChat) chat.reset('viewer');
-      setError(reason);
-      return;
-    }
-    if (plan.pauseVideo) {
-      if (viewerStatsTimerRef.current) { clearInterval(viewerStatsTimerRef.current); viewerStatsTimerRef.current = null; }
-      if (videoRef.current) videoRef.current.srcObject = null;
-    }
-    if (!plan.keepStreamRef) streamRef.current = null;
-    setNeedsPlayClick(false); setIsViewing(false);
-    setViewerConnectingStage('waiting_stream'); setIsConnecting(true);
-    onNotification(`${reason}，聊天仍可用，等待对方重新开始`, 'info');
-    // 崩溃/无 pagehide 时对端不会再发 share-started：超时落终态，避免永久等待。
-    clearViewerWaitTerminal();
-    viewerWaitTerminalTimerRef.current = setTimeout(() => {
-      viewerWaitTerminalTimerRef.current = null;
-      if (!remoteShareEndedRef.current) return;
-      // 只结束「等待画面」这件事，不拆 peer/聊天：停共享后房间仍活着，
-      // 观看者可能只是想等久一点；终态提示不能顺带把聊天连接清掉。
+  /**
+   * 远端共享结束：显式枚举 reason，避免靠中文文案猜「只是停共享」还是「房主离开」。
+   * stopped = 停共享，房间/聊天保留，进入稳定的 viewerSharePaused 占位态；
+   * left = 房主离开页面/房间，才走 stopViewing 终态。
+   * explicit=true 表示收到了 share-ended 控制帧；false 表示只有媒体 call 被关（崩溃兜底）。
+   */
+  const handleRemoteShareEnded = useCallback(
+    (reason: RemoteShareEndReason, options: { explicit?: boolean } = {}) => {
+      if (options.explicit) clearViewerWaitTerminal();
+      // 观看者主动「停止观看」后，后续远端停共享不应把他从占位态拽回等待态。
+      if (isManualStopRef.current || remoteShareEndHandledRef.current) return;
+      remoteShareEndHandledRef.current = true;
+      remoteShareEndedRef.current = true;
+      const reasonLabel = REMOTE_SHARE_END_LABELS[reason];
+      // 真实调用 plan：停共享只暂停画面并保留聊天；left = 房主离开，按终态全断。
+      const plan = planRemoteShareEnded({ peerLeavingRoom: reason === 'left' });
+      if (plan.destroyPeer) {
+        stopViewing(false);
+        if (plan.clearPersistedSession) clearPersistedViewerSession();
+        if (plan.closeRoomChat) chat.reset('viewer');
+        setError(reasonLabel);
+        return;
+      }
+      if (plan.pauseVideo) {
+        if (viewerStatsTimerRef.current) { clearInterval(viewerStatsTimerRef.current); viewerStatsTimerRef.current = null; }
+        if (videoRef.current) videoRef.current.srcObject = null;
+      }
+      streamRef.current = null;
+      setNeedsPlayClick(false);
       setIsViewing(false);
       setIsConnecting(false);
       setViewerConnectingStage('');
-      setNeedsPlayClick(false);
-      setError('共享方长时间未恢复，屏幕共享已结束');
-    }, SCREEN_SHARE_VIEWER_WAIT_TERMINAL_MS);
-  }, [onNotification, stopViewing, clearPersistedViewerSession, chat.reset, clearViewerWaitTerminal]);
+      setViewerReconnecting(false);
+      markViewerSharePaused(true);
+      onNotification(`${reasonLabel}，房间和聊天仍保留，等待对方重新开始`, 'info');
+      // 只有「没有收到 share-ended 控制帧、只是媒体断了」才需要崩溃兜底；
+      // 明确的停共享是稳定的房间内状态，不能 8s/20s 后自动把用户赶走。
+      if (options.explicit) return;
+      clearViewerWaitTerminal();
+      viewerWaitTerminalTimerRef.current = setTimeout(() => {
+        viewerWaitTerminalTimerRef.current = null;
+        if (!remoteShareEndedRef.current) return;
+        // 只结束「等待画面」这件事，不拆 peer/聊天。
+        streamRef.current = null;
+        markViewerSharePaused(false);
+        setIsViewing(false);
+        setIsConnecting(false);
+        setViewerConnectingStage('');
+        setNeedsPlayClick(false);
+        setViewerReconnecting(false);
+        setError('共享方长时间未恢复，屏幕共享已结束');
+      }, SCREEN_SHARE_VIEWER_WAIT_TERMINAL_MS);
+    },
+    [onNotification, stopViewing, clearPersistedViewerSession, chat.reset, clearViewerWaitTerminal, markViewerSharePaused],
+  );
 
   const connectToSharer = useCallback(async (sharerId: string, isRetry = false) => {
     // attempt token：取消/新连接会让旧的 await 链作废。
     const attemptId = viewerConnectAttemptRef.current + 1;
     viewerConnectAttemptRef.current = attemptId;
+    if (!isRetry) viewerHadStreamRef.current = false;
 
     // 任何一次新建连都必须先撤销排队中的自动重连，否则旧定时器会把新连接拆掉。
     if (reconnectTimerRef.current) {
@@ -1578,6 +1623,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       remoteShareEndedRef.current = false;
       remoteShareEndHandledRef.current = false;
       remoteShareFullRef.current = false;
+      markViewerSharePaused(false);
+      setViewerReconnecting(false);
     }
     if (!isRetry) chat.reset('viewer');
     // 新的一次建连：上一次的限流/不在线结论不再适用（冷却结束后才允许点重试）。
@@ -1646,16 +1693,68 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         return;
       }
       if (data && data.type === 'share-ended') {
-        const reasonLabel = data.reason === 'window_closed' ? '共享方已离开页面，屏幕共享已结束' : '共享方已停止共享';
-        handleRemoteShareEnded(reasonLabel);
+        const reason = data.reason === 'window_closed' ? 'left' : 'stopped';
+        if (reason === 'left') {
+          handleRemoteShareEnded('left', { explicit: true });
+        } else {
+          // 明确的停共享控制帧：清除崩溃兜底计时器，并允许重新确认占位态
+          //（媒体 call 的 close 可能先到，已经把 handled 置位）。
+          clearViewerWaitTerminal();
+          if (!isManualStopRef.current) remoteShareEndHandledRef.current = false;
+          handleRemoteShareEnded('stopped', { explicit: true });
+        }
         return;
       }
       if (data && data.type === 'share-started') {
+        clearViewerWaitTerminal();
+        remoteShareEndHandledRef.current = false;
+        remoteShareEndedRef.current = false;
+        if (viewerSharePausedRef.current) {
+          // 观看端没有任何控制按钮：共享方重新开始时自动重建媒体连接，占位态显示 spinner。
+          markViewerSharePaused(false);
+          setViewerReconnecting(true);
+          setViewerConnectingStage('');
+          onNotification('共享方已重新开始共享，正在重新连接画面', 'info');
+          const resumeCall = peer.call(sharerId);
+          if (!resumeCall) {
+            setViewerReconnecting(false);
+            setError('共享已重新开始，但画面重连失败');
+            return;
+          }
+          mediaConnectionRef.current = resumeCall;
+          let resumeReceived = false;
+          resumeCall.on('stream', (remoteStream) => {
+            if (resumeReceived) return;
+            resumeReceived = true;
+            streamRef.current = remoteStream;
+            viewerHadStreamRef.current = true;
+            if (videoRef.current) {
+              videoRef.current.srcObject = remoteStream;
+              void videoRef.current.play().catch(() => setNeedsPlayClick(true));
+            }
+            setNeedsPlayClick(false);
+            setIsViewing(true);
+            setIsConnecting(false);
+            setViewerReconnecting(false);
+            setViewerConnectingStage('');
+            onNotification('画面已重新连接', 'success');
+          });
+          resumeCall.on('close', () => {
+            if (resumeReceived) return;
+            mediaConnectionRef.current = null;
+            setViewerReconnecting(false);
+            setError('共享已重新开始，但画面重连超时');
+          });
+          resumeCall.on('error', (err) => {
+            if (resumeReceived) return;
+            mediaConnectionRef.current = null;
+            setViewerReconnecting(false);
+            setError(getMediaConnectionErrorMessage(err));
+          });
+          return;
+        }
         if (mediaConnectionRef.current && streamRef.current) {
-          clearViewerWaitTerminal();
-          remoteShareEndHandledRef.current = false;
-          remoteShareEndedRef.current = false;
-          setViewerConnectingStage(''); setIsConnecting(false); setIsViewing(true); setNeedsPlayClick(false);
+          setIsConnecting(false); setIsViewing(true); setNeedsPlayClick(false);
           onNotification('共享方已重新开始共享', 'success');
         }
         return;
@@ -1763,7 +1862,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         if (isManualStopRef.current || remoteShareEndedRef.current || remoteShareFullRef.current) return;
         if (viewerConnectAttemptRef.current !== attemptId) return;
         stopFreezeWatch();
-        logDebug('warn', 'Unexpected disconnection, attempting reconnect...');
+        logDebug('warn', 'Unexpected disconnection, attempting reconnect…');
         stopViewing(false); // 不清除 targetId
 
         const plan = planViewerReconnect({
@@ -1954,9 +2053,12 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         });
 
         streamRef.current = remoteStream;
+        viewerHadStreamRef.current = true;
 
         setIsViewing(true);
         setIsConnecting(false);
+        setViewerReconnecting(false);
+        markViewerSharePaused(false);
         setNeedsPlayClick(false);
         if (call.peerConnection) startFreezeWatch(call.peerConnection);
         onNotification('已连接到屏幕共享', 'success');
@@ -1986,7 +2088,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
         switch (planViewerCallEndAction(outcome)) {
           case 'end-share':
-            handleRemoteShareEnded('共享方已结束共享');
+            handleRemoteShareEnded('stopped');
             return;
           case 'stop':
             // share-full 已由数据通道处理过（remoteShareFullRef 已置位），这里只收尾。
@@ -2065,7 +2167,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
             // peer.on('error') 已经在同一次信令错误上跑过分类：这里只保证不落满员文案。
             return;
           case 'end-share':
-            handleRemoteShareEnded('共享方已结束共享');
+            handleRemoteShareEnded('stopped');
             return;
           case 'stop':
             stopViewing(false);
@@ -2100,7 +2202,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       console.error('Peer error:', err);
 
       if (remoteShareEndedRef.current) {
-        handleRemoteShareEnded('共享方已结束共享');
+        handleRemoteShareEnded('stopped');
         return;
       }
 
@@ -2117,6 +2219,16 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       });
 
       if (peerErrorPlan.kind === 'ignore') return;
+
+      if (
+        viewerHadStreamRef.current &&
+        (peerErrorPlan.kind === 'share-unavailable-retry' || peerErrorPlan.kind === 'share-unavailable')
+      ) {
+        // 已经收到过画面的观众：分享端崩溃/被强杀时信令会先报房号查不到。
+        // 这时不能把房间和聊天一起拆掉，转入「共享已停止」占位，交给兜底终态。
+        handleRemoteShareEnded('stopped');
+        return;
+      }
 
       if (peerErrorPlan.kind === 'share-unavailable-retry') {
         // 分享端重建 Peer 时会复用同一个房号：这几秒里房号查不到，但恢复后旧链接仍然有效。
@@ -2260,7 +2372,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
 
     if (video.srcObject === stream) return;
 
-    logDebug('log', 'Callback ref: Attaching stream to video element...');
+    logDebug('log', 'Callback ref: Attaching stream to video element…');
     video.srcObject = stream;
     video.defaultMuted = true;
     video.muted = true;
@@ -2672,6 +2784,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         }
       }}
       stopViewing={() => stopViewing(true)}
+      roomRetained={Boolean(shareRoom)}
+      sharePaused={Boolean(shareRoom) && !isSharing && !sharerFailure}
+      onResumeShare={startScreenShare}
+      viewerSharePaused={viewerSharePaused}
+      viewerReconnecting={viewerReconnecting}
       chat={chat.ui}
       qualityLabels={qualityLabels}
       remoteQuality={remoteQuality}

@@ -9,6 +9,7 @@ import {
   disposeRoomChatConnections,
   hasOpenRoomChatConnection,
   linkRoomChatConnection,
+  pruneRoomChatConnections,
   sendRoomChatText,
   useRoomChat,
   type RoomChatApi,
@@ -148,6 +149,28 @@ test('useRoomChat 行为：reset 清理旧连接监听并 close，避免旧通�
   assert.equal(conn.closed, true);
   assert.equal(conn.listenerCount('data'), 0);
   assert.equal(session.getMessages().length, 0);
+});
+
+test('useRoomChat 行为：死连接被摘除时同时 off 监听，避免旧通道继续灌消息', () => {
+  const session = new ChatSession({ rateLimitMaxMessages: 100, rateLimitWindowMs: 10_000, now: () => 1 });
+  const conn = new FakeRoomConnection();
+  const attachment = linkRoomChatConnection(
+    conn as unknown as Parameters<typeof linkRoomChatConnection>[0],
+    session,
+    () => {},
+  );
+  assert.equal(conn.listenerCount('data'), 1);
+
+  // 模拟连接已死（close/error 后 open=false），由 prune 负责真正 off + close。
+  conn.open = false;
+  const alive = pruneRoomChatConnections([attachment]);
+
+  assert.equal(alive.length, 0);
+  assert.equal(conn.closed, true);
+  assert.equal(conn.listenerCount('data'), 0);
+  assert.equal(conn.listenerCount('open'), 0);
+  assert.equal(conn.listenerCount('close'), 0);
+  assert.equal(conn.listenerCount('error'), 0);
 });
 
 test('useRoomChat 行为：连接 close 后 connected 判定变为 false', () => {

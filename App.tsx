@@ -501,10 +501,10 @@ const App: React.FC = () => {
   };
 
   return (
-    <div className="min-h-[100dvh] bg-slate-50 dark:bg-night-950 flex flex-col transition-colors motion-base relative overflow-hidden">
+    <div className="min-h-dvh bg-slate-50 flex flex-col transition-colors motion-base relative overflow-hidden">
       {swUpdateReady && (
         <div className="fixed top-[calc(env(safe-area-inset-top)+1rem)] left-4 right-4 md:left-auto md:right-4 z-50 pointer-events-auto">
-          <div className="flex items-center justify-between gap-3 rounded-control border border-brand-100 bg-brand-50/95 px-4 py-3 text-brand-900 shadow-lg backdrop-blur dark:border-brand-500/30 dark:bg-night-900/95 dark:text-brand-200">
+          <div className="flex items-center justify-between gap-3 rounded-control border border-brand-100 bg-brand-50/95 px-4 py-3 text-brand-900 shadow-lg">
             <p className="text-sm font-medium">发现新版本</p>
             <button
               onClick={applySwUpdate}
@@ -522,15 +522,15 @@ const App: React.FC = () => {
 
             {/* 顶部留出 env(safe-area-inset-top)：PWA/刘海屏下让 header 自己的底色铺到状态栏后面（沉浸），
           而不是让状态栏区域露出页面底色。 */}
-      <header className="bg-white dark:bg-night-900 border-b border-slate-200 dark:border-night-750 sticky top-0 z-20 pt-[env(safe-area-inset-top)] transition-colors motion-base">
+      <header className="bg-white border-b border-slate-200 sticky top-0 z-20 pt-[env(safe-area-inset-top)] transition-colors motion-base">
         <div className="max-w-5xl mx-auto px-4 sm:px-6 lg:px-8 h-14 md:h-16 flex items-center justify-between">
           <div className="flex items-center gap-3 cursor-pointer" onClick={() => changeMode('send')}>
-            <div className="bg-brand-600 p-1.5 md:p-2 rounded-[26.5%] text-white shadow-sm">
+            <div className="bg-brand-600 p-1.5 md:p-2 rounded-xl text-white shadow-sm">
               <Package size={20} className="md:w-6 md:h-6" />
             </div>
             <div className="flex items-baseline gap-2">
-              <h1 className="text-xl font-bold text-slate-900 dark:text-night-100 tracking-tighter">AeroDrop</h1>
-              <span className="text-xs font-bold tracking-tight text-brand-600 dark:text-brand-400 pb-0.5">
+              <h1 className="text-xl font-bold text-slate-900 tracking-tighter">AeroDrop</h1>
+              <span className="text-xs font-bold tracking-tight text-brand-600 pb-0.5">
                 @Tian
               </span>
             </div>
@@ -540,14 +540,14 @@ const App: React.FC = () => {
             {showRiskBanner && (
               <>
                 {/* Desktop Badge */}
-                <div className="hidden md:flex items-center gap-2 bg-amber-50 dark:bg-amber-500/10 border border-amber-200 dark:border-amber-500/30 rounded-full px-3 py-1.5 animate-slide-up">
-                  <ShieldAlert className="w-4 h-4 text-amber-600 dark:text-amber-400" />
-                  <span className="text-xs font-medium text-amber-700 dark:text-amber-300">
+                <div className="hidden md:flex items-center gap-2 bg-amber-50 border border-amber-200 rounded-full px-3 py-1.5 animate-slide-up">
+                  <ShieldAlert className="w-4 h-4 text-amber-600" />
+                  <span className="text-xs font-medium text-amber-700">
                     检测到代理网络，点对点传输和屏幕共享可能失效，建议关闭代理
                   </span>
                   <button
                     onClick={dismissRiskBanner}
-                    className="relative ml-1 p-2 rounded-full after:absolute after:-inset-2 after:content-[''] hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400 transition-colors"
+                    className="relative ml-1 p-2 rounded-full after:absolute after:-inset-2 after:content-[''] hover:bg-amber-100 text-amber-700 transition-colors"
                     aria-label="关闭警告"
                   >
                     <X size={16} />
@@ -559,8 +559,8 @@ const App: React.FC = () => {
                   id="network-risk-toggle"
                   className={`md:hidden inline-flex min-h-11 items-center gap-1.5 rounded-full border px-3 text-xs font-bold transition-colors ${
                     isRiskBannerExpanded
-                      ? 'border-amber-300 bg-amber-100 text-amber-700 dark:border-amber-500/40 dark:bg-amber-500/15 dark:text-amber-300'
-                      : 'border-amber-200/80 bg-amber-50/80 text-amber-700 hover:bg-amber-100 dark:border-amber-500/25 dark:bg-amber-500/10 dark:text-amber-300 dark:hover:bg-amber-500/15'
+                      ? 'border-amber-300 bg-amber-100 text-amber-700'
+                      : 'border-amber-200/80 bg-amber-50/80 text-amber-700 hover:bg-amber-100'
                   }`}
                   onClick={() => setIsRiskBannerExpanded(!isRiskBannerExpanded)}
                   aria-expanded={isRiskBannerExpanded}
@@ -587,14 +587,14 @@ const App: React.FC = () => {
           id="network-risk-banner"
           role="status"
           aria-live="polite"
-          className="md:hidden bg-amber-50 dark:bg-amber-500/10 border-b border-amber-200 dark:border-amber-500/30 px-4 py-3 flex items-start gap-3 animate-slide-down relative z-10 shadow-sm"
+          className="md:hidden bg-amber-50 border-b border-amber-200 px-4 py-3 flex items-start gap-3 animate-slide-down relative z-10 shadow-sm"
         >
-          <ShieldAlert className="w-5 h-5 text-amber-600 dark:text-amber-400 shrink-0 mt-0.5" />
+          <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
           <div className="flex-1">
-            <p className="text-xs font-semibold text-amber-800 dark:text-amber-200 mb-1">
+            <p className="text-xs font-semibold text-amber-800 mb-1">
               网络环境受限
             </p>
-            <p className="text-xs leading-relaxed text-amber-700/90 dark:text-amber-300/90">
+            <p className="text-xs leading-relaxed text-amber-700/90">
               检测到代理网络，点对点传输和屏幕共享可能失效，建议关闭代理
             </p>
           </div>
@@ -602,7 +602,7 @@ const App: React.FC = () => {
             onClick={() => {
               dismissRiskBanner();
             }}
-            className="inline-flex min-w-11 min-h-11 items-center justify-center -mr-2 -my-2 rounded-full hover:bg-amber-100 dark:hover:bg-amber-800/50 text-amber-500 dark:text-amber-400"
+            className="inline-flex min-w-11 min-h-11 items-center justify-center -mr-2 -my-2 rounded-full hover:bg-amber-100 text-amber-700"
             aria-label="关闭网络警告"
           >
             <X size={16} />
@@ -622,12 +622,11 @@ const App: React.FC = () => {
       >
 
         <div className="w-full max-w-xl mb-8 relative z-10">
-            <div className="bg-white dark:bg-night-900 p-1.5 rounded-full grid grid-cols-3 relative shadow-card border border-slate-50 dark:border-night-750">
+            <div className="bg-white p-1.5 rounded-full grid grid-cols-3 relative shadow-card border border-slate-50">
               <div
-                  className="absolute top-1.5 left-1.5 bottom-1.5 w-[calc((100%-0.75rem)/3)] bg-brand-600 dark:bg-brand-500 rounded-full shadow-[inset_2px_2px_6px_rgba(0,0,0,0.2)]"
+                  className="motion-move absolute top-1.5 left-1.5 bottom-1.5 w-[calc((100%-0.75rem)/3)] bg-brand-600 rounded-full shadow-[inset_2px_2px_6px_rgba(0,0,0,0.2)]"
                   style={{
                     transform: `translateX(${activeMode === 'send' ? '0%' : activeMode === 'receive' ? '100%' : '200%'})`,
-                    transition: 'transform var(--dur-base) var(--ease-move)'
                   }}
               ></div>
 
@@ -637,7 +636,7 @@ const App: React.FC = () => {
                 className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-[color] motion-fast whitespace-nowrap ${
                   activeMode === 'send'
                     ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-900 dark:text-night-400 dark:hover:text-night-100'
+                    : 'text-slate-500 hover:text-slate-900'
                 }`}
               >
                 <Send size={18} className={`transition-transform motion-base ${activeMode === 'send' ? 'scale-110' : ''}`} />
@@ -649,7 +648,7 @@ const App: React.FC = () => {
                 className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-[color] motion-fast whitespace-nowrap ${
                   activeMode === 'receive'
                     ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-900 dark:text-night-400 dark:hover:text-night-100'
+                    : 'text-slate-500 hover:text-slate-900'
                 }`}
               >
                 <Inbox size={18} className={`transition-transform motion-base ${activeMode === 'receive' ? 'scale-110' : ''}`} />
@@ -661,7 +660,7 @@ const App: React.FC = () => {
                 className={`relative z-10 flex items-center justify-center gap-2 px-3 py-3 rounded-full text-sm font-bold transition-[color] motion-fast whitespace-nowrap ${
                   activeMode === 'screen'
                     ? 'text-white'
-                    : 'text-slate-500 hover:text-slate-900 dark:text-night-400 dark:hover:text-night-100'
+                    : 'text-slate-500 hover:text-slate-900'
                 }`}
               >
                 <Monitor size={18} className={`transition-transform motion-base ${activeMode === 'screen' ? 'scale-110' : ''}`} />
@@ -702,7 +701,7 @@ const App: React.FC = () => {
         </div>
         
         <div className="mt-8 text-center max-w-md mx-auto space-y-2 pb-4 md:pb-0">
-          <p className="text-xs text-slate-500 dark:text-night-400">
+          <p className="text-xs text-slate-500">
             Powered by WebRTC.
           </p>
         </div>

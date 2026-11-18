@@ -80,6 +80,24 @@ export function disposeRoomChatConnections(connections: readonly RoomChatAttachm
   connections.forEach((item) => item.dispose());
 }
 
+/**
+ * 摘掉已经 close/error 的死连接：不仅从数组移除，还要 off 掉 data/open/close/error
+ * 四个监听并 close，避免死通道继续把消息灌进当前会话。
+ */
+export function pruneRoomChatConnections(
+  connections: readonly RoomChatAttachment[],
+): RoomChatAttachment[] {
+  const alive: RoomChatAttachment[] = [];
+  connections.forEach((item) => {
+    if (item.conn.open) {
+      alive.push(item);
+    } else {
+      item.dispose();
+    }
+  });
+  return alive;
+}
+
 /** 向所有 open 的房间连接广播一条消息；本地历史由 ChatSession.compose 写入。 */
 export function sendRoomChatText(
   session: ChatSession | null,
@@ -130,10 +148,8 @@ export function useRoomChat({ onNotify }: UseRoomChatOptions = {}): RoomChatApi 
     if (connectionsRef.current.some((item) => item.conn === conn)) return;
     const syncConnected = () => setConnected(hasOpenRoomChatConnection(connectionsRef.current));
     const attachment = linkRoomChatConnection(conn, sessionRef.current, () => {
-      // close/error 后把死连接摘掉；open 时保留，connected 只看真正 open 的那几条。
-      connectionsRef.current = connectionsRef.current.filter(
-        (item) => item.conn !== conn || item.conn.open,
-      );
+      // close/error 后把死连接连监听一起摘掉；open 时保留，connected 只看真正 open 的那几条。
+      connectionsRef.current = pruneRoomChatConnections(connectionsRef.current);
       syncConnected();
     });
     connectionsRef.current.push(attachment);
