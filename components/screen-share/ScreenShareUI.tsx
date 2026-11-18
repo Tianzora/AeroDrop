@@ -319,16 +319,16 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
           <>
           <div className="text-center mb-8">
             <div className="inline-flex items-center justify-center w-16 h-16 bg-brand-100 dark:bg-brand-500/12 rounded-card mb-4 ring-1 ring-brand-200/70 dark:ring-brand-500/20">
-              {isConnecting ? (
+              {isConnecting || targetSharerId ? (
                 <Eye size={32} className="text-brand-600" />
               ) : (
                 <Monitor size={32} className="text-brand-600" />
               )}
             </div>
             <h2 className="text-xl font-bold text-slate-900 dark:text-night-100">
-              {isConnecting ? '正在连接...' : '屏幕共享'}
+              {isConnecting ? '正在连接...' : targetSharerId ? '观看屏幕' : '屏幕共享'}
             </h2>
-            {!isConnecting && (
+            {!isConnecting && !targetSharerId && (
               <p className="mt-2 text-sm text-slate-500 dark:text-night-400">
                 与其他设备实时共享您的屏幕内容
               </p>
@@ -773,8 +773,9 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               </div>
             )}
 
-            {/* 终态卡里已经有「重新开始共享」：同一屏再放一颗「开始共享屏幕」是重复 CTA。 */}
-            {!isSharing && !sharerFailure && (
+            {/* 终态卡里已经有「重新开始共享」：同一屏再放一颗「开始共享屏幕」是重复 CTA。
+                观看端（targetSharerId 还在）也只该重试/取消，不能出现发送端的「开始共享屏幕」。 */}
+            {!isSharing && !sharerFailure && !targetSharerId && (
               <div className="mt-2 flex flex-col items-center gap-2">
                 <button
                   onClick={startScreenShare}

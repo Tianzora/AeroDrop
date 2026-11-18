@@ -374,6 +374,18 @@ test('观众没有冷却时不显示倒计时，也不禁用重试', () => {
   assert.doesNotMatch(markup, /disabled=""/);
 });
 
+test('观众端错误终态只留重试/取消，不冒出发送端的「开始共享屏幕」', () => {
+  const markup = render({
+    error: '共享方长时间未恢复，屏幕共享已结束',
+    targetSharerId: 'sharer-1',
+  });
+
+  assert.match(markup, /观看屏幕/);
+  assert.match(markup, /重试连接/);
+  assert.doesNotMatch(markup, /开始共享屏幕/);
+  assert.doesNotMatch(markup, /与其他设备实时共享您的屏幕内容/);
+});
+
 test('房号过期卡说明「重新开始共享」会断开现有观众', () => {
   const markup = render({
     isSharing: true,

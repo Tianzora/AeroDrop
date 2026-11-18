@@ -1271,6 +1271,9 @@ test.describe('screen share', () => {
       // 终态只结束等待画面，聊天面板与历史仍在。
       await expect(viewer.locator('aside[aria-label="房间聊天"]')).toBeVisible();
       await expect(viewer.getByText('before-crash', { exact: true })).toBeVisible();
+      // 观看端错误态不能再出现发送端的「开始共享屏幕」，否则同一张卡既像观众又像房主。
+      await expect(viewer.getByRole('button', { name: '开始共享屏幕' })).toHaveCount(0);
+      await expect(viewer.getByText('观看屏幕', { exact: true })).toBeVisible();
     } finally {
       await viewer.context().close();
     }
