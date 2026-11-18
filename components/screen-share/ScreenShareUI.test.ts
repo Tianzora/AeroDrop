@@ -148,7 +148,7 @@ test('房号登记就失败（从来没有链接）：说「未能开始共享�
   assert.match(markup, /重新开始共享/);
 });
 
-test('容量：给出建议人数，超过建议值给出降画质提示', () => {
+test('容量：保留实际观看人数，但不再展示建议人数/上限文案', () => {
   const markup = render({
     isSharing: true,
     isShareLive: true,
@@ -158,14 +158,15 @@ test('容量：给出建议人数，超过建议值给出降画质提示', () =>
     maxViewerCount: 6,
   });
 
-  assert.match(markup, /建议 4 人同时观看（依网络），最多 6 人/);
-  assert.match(markup, /当前 5 人已超过建议人数，部分观众画质可能下降/);
+  assert.match(markup, /5 人观看/);
+  assert.doesNotMatch(markup, /建议 4 人同时观看（依网络），最多 6 人/);
+  assert.doesNotMatch(markup, /超过建议人数/);
 });
 
-test('未开始时也展示建议人数，且不渲染共享链接卡片', () => {
+test('未开始时不再展示建议人数，且不渲染共享链接卡片', () => {
   const markup = render({ recommendedViewerCount: 4, maxViewerCount: 6 });
 
-  assert.match(markup, /建议 4 人同时观看（依网络），最多 6 人/);
+  assert.doesNotMatch(markup, /建议 4 人同时观看（依网络），最多 6 人/);
   assert.doesNotMatch(markup, /复制分享链接/);
 });
 

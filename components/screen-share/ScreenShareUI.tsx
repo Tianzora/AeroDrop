@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
+import { createPortal } from 'react-dom';
 import { Monitor, StopCircle, Play, Pause, AlertCircle, Copy, Check, Share2, Eye, Loader2, RefreshCw, X, MonitorUp, Maximize, Minimize, Volume2, VolumeX, PictureInPicture, AlertTriangle, LogOut } from 'lucide-react';
-import { shouldWarnViewerCapacity } from '../../services/screenShare/viewerCapacity';
 import { ChatPanel, type ChatPanelMessage } from './ChatPanel';
 
 export type ScreenShareViewerConnectingStage = 'fetching_ice' | 'connecting_signaling' | 'connecting_media' | 'waiting_stream' | '';
@@ -95,8 +95,6 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   dismissSharerFailure,
   shareRoomRetrySeconds,
   viewerRetrySeconds,
-  recommendedViewerCount,
-  maxViewerCount,
   viewerCount,
   qualityLevel,
   sharerVideoRef,
@@ -255,9 +253,21 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
     copyShareLink();
   }, [shareLink, copyShareLink]);
 
+  // 聊天改为页面内嵌：只要房间还在（连接中/共享中/观看中，或聊天通道仍连着），就占一列。
+  // “停止共享”只停画面、不断房间，所以不能因为 isSharing 变 false 就把聊天收掉。
+  // 全屏观看时画面要占满视口，聊天列让位，退出全屏后自动回来。
+  const showChat =
+    (isSharing || isViewing || isConnecting || chat.connected || chat.messages.length > 0) &&
+    !viewerFullscreen;
+
   return (
-    <div className="w-full max-w-xl mx-auto">
-      <div className="bg-white dark:bg-night-850 rounded-card shadow-card border border-slate-100 dark:border-night-750 p-6 md:p-8 transition-colors motion-base">
+    <div className="w-full mx-auto">
+      <div
+        className={`grid items-stretch gap-4 ${
+          showChat ? 'lg:grid-cols-[minmax(0,1fr)_22rem]' : ''
+        }`}
+      >
+        <div className="min-w-0 bg-white dark:bg-night-850 rounded-card shadow-card border border-slate-100 dark:border-night-750 p-6 md:p-8 transition-colors motion-base">
         {/* 共享 / 观看中把装饰性大头部压成工具条式紧凑头部：Meet / Zoom 进入「正在
             共享」态后都会收起介绍性大标题，把纵向空间让给画面和操作；未开始时保
             留图标 + 标题的引导性头部。 */}
@@ -299,12 +309,6 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
             {!isConnecting && (
               <p className="mt-2 text-sm text-slate-500 dark:text-night-400">
                 与其他设备实时共享您的屏幕内容
-              </p>
-            )}
-            {!isConnecting && (
-              /* 6 人是信令/编码的硬上限，不是画质承诺：按聚合上行预算给建议值。 */
-              <p className="mt-1 text-xs text-slate-400 dark:text-night-500">
-                建议 {recommendedViewerCount} 人同时观看（依网络），最多 {maxViewerCount} 人
               </p>
             )}
           </div>
@@ -692,14 +696,6 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                     分享链接续期失败，到期后观众将无法再加入
                   </p>
                 )}
-                <p className="mt-1.5 text-xs text-slate-400 dark:text-night-500">
-                  建议 {recommendedViewerCount} 人同时观看（依网络），最多 {maxViewerCount} 人
-                </p>
-                {shouldWarnViewerCapacity(viewerCount, recommendedViewerCount) && (
-                  <p className="mt-1.5 text-xs text-amber-600 dark:text-amber-400">
-                    当前 {viewerCount} 人已超过建议人数，部分观众画质可能下降
-                  </p>
-                )}
               </div>
             )}
 
@@ -808,54 +804,57 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
 
           </>
         )}
-      </div>
-      {showEndConfirm && (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm"
-          role="dialog"
-          aria-modal="true"
-          aria-labelledby="end-room-confirm-title"
-        >
-          <div className="w-full max-w-sm rounded-card bg-white p-6 shadow-card ring-1 ring-slate-200/70 dark:bg-night-800 dark:ring-night-700">
-            <div className="mb-4 inline-flex h-11 w-11 items-center justify-center rounded-full bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-300">
-              <AlertTriangle size={20} />
-            </div>
-            <h3 id="end-room-confirm-title" className="text-lg font-bold text-slate-900 dark:text-white">
-              结束并离开？
-            </h3>
-            <p className="mt-2 text-sm leading-relaxed text-slate-600 dark:text-night-300">
-              {isViewing
-                ? '将断开与共享方的连接，房间即刻关闭，当前聊天记录也会清空。'
-                : '所有观看者会立即断开，房号作废，当前聊天记录也会清空。只想停画面请用「停止共享」，房间与聊天会保留。'}
-            </p>
-            <div className="mt-5 flex justify-end gap-2">
-              <button
-                onClick={() => setShowEndConfirm(false)}
-                className="inline-flex h-10 items-center justify-center rounded-full px-4 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 dark:text-night-300 dark:hover:bg-night-750"
-              >
-                取消
-              </button>
-              <button
-                onClick={() => { setShowEndConfirm(false); (isViewing ? stopViewing : onEndRoom)(); }}
-                className="inline-flex h-10 items-center justify-center rounded-full bg-red-600 px-4 text-sm font-bold text-white transition-colors hover:bg-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
-              >
-                结束并离开
-              </button>
-            </div>
-          </div>
         </div>
-      )}
-      <ChatPanel
-        role={chat.role}
-        open={chat.open}
-        connected={chat.connected}
-        messages={chat.messages}
-        onToggle={chat.onToggle}
-        onClose={chat.onClose}
-        onSend={chat.onSend}
-        onExport={chat.onExport}
-        connectingHint={chat.role === 'viewer' ? '共享已结束，聊天连接建立中' : '等待观众加入聊天'}
-      />
+
+        {showChat && (
+          <ChatPanel
+            role={chat.role}
+            connected={chat.connected}
+            messages={chat.messages}
+            onSend={chat.onSend}
+            onExport={chat.onExport}
+            connectingHint={chat.role === 'viewer' ? '共享已结束，聊天连接建立中' : '等待观众加入聊天'}
+          />
+        )}
+      </div>
+      {showEndConfirm &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-[100] flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="end-room-confirm-title"
+          >
+            <div className="w-full max-w-sm rounded-card bg-white p-6 shadow-card ring-1 ring-slate-200/70 dark:bg-night-800 dark:ring-night-700">
+              <div className="mb-4 inline-flex h-11 w-11 items-center justify-center rounded-full bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-300">
+                <AlertTriangle size={20} />
+              </div>
+              <h3 id="end-room-confirm-title" className="text-lg font-bold text-slate-900 dark:text-white">
+                结束并离开？
+              </h3>
+              <p className="mt-2 text-sm leading-relaxed text-slate-600 dark:text-night-300">
+                {isViewing
+                  ? '将断开与共享方的连接，房间即刻关闭，当前聊天记录也会清空。'
+                  : '所有观看者会立即断开，房号作废，当前聊天记录也会清空。只想停画面请用「停止共享」，房间与聊天会保留。'}
+              </p>
+              <div className="mt-5 flex justify-end gap-2">
+                <button
+                  onClick={() => setShowEndConfirm(false)}
+                  className="inline-flex h-10 items-center justify-center rounded-full px-4 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 dark:text-night-300 dark:hover:bg-night-750"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => { setShowEndConfirm(false); (isViewing ? stopViewing : onEndRoom)(); }}
+                  className="inline-flex h-10 items-center justify-center rounded-full bg-red-600 px-4 text-sm font-bold text-white transition-colors hover:bg-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
+                >
+                  结束并离开
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
     </div>
   );
 };

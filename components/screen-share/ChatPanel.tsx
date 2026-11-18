@@ -1,5 +1,5 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { MessageCircle, X, Send, Download, WifiOff } from 'lucide-react';
+import { MessageCircle, Send, Download, WifiOff } from 'lucide-react';
 
 export interface ChatPanelMessage {
   id: string;
@@ -9,17 +9,15 @@ export interface ChatPanelMessage {
 }
 
 export interface ChatPanelProps {
-  /** sender=共享端浅色白卡；viewer=观看端深色玻璃浮层。 */
+  /** sender=共享端；viewer=观看端。两端都用页面内嵌白卡，不再做悬浮玻璃层。 */
   role: 'sender' | 'viewer';
-  open: boolean;
   connected: boolean;
   messages: ChatPanelMessage[];
-  onToggle: () => void;
-  onClose: () => void;
   onSend: (text: string) => void;
   onExport: () => void;
-  /** 面板挂载但连接还没起来时给一句说明。 */
+  /** 面板已挂载但连接还没起来时给一句说明。 */
   connectingHint?: string;
+  className?: string;
 }
 
 export const formatClock = (ts: number): string => {
@@ -61,111 +59,95 @@ export const handleDraftKeyDown = (
 };
 
 /**
- * 两端共用的聊天浮层（右下角）。纯展示 + 本地输入状态，传输逻辑在 ScreenShare 里。
- * 固定定位，不随共享/观看状态挂载卸载——停画面后聊天入口仍需保留。
+ * 房间聊天面板：页面内嵌的一列，不再固定悬浮在右下角。
+ * 纯展示 + 本地输入状态，传输逻辑在 ScreenShare 里；停画面后聊天入口仍需保留。
  */
 export const ChatPanel: React.FC<ChatPanelProps> = ({
   role,
-  open,
   connected,
   messages,
-  onToggle,
-  onClose,
   onSend,
   onExport,
   connectingHint,
+  className = '',
 }) => {
   const [draft, setDraft] = useState('');
   const listRef = useRef<HTMLDivElement | null>(null);
   const isViewer = role === 'viewer';
 
   useEffect(() => {
-    if (!open) return;
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
-  }, [messages, open]);
-
-  const shell = isViewer
-    ? 'bg-[rgba(15,23,36,0.86)] text-night-100 ring-1 ring-white/10 shadow-2xl'
-    : 'bg-white text-slate-800 ring-1 ring-slate-100 shadow-card';
-  const subtle = isViewer ? 'text-night-400' : 'text-slate-500';
-  const bubble = isViewer ? 'bg-white/10 text-night-100' : 'bg-slate-100 text-slate-800';
-  const inputShell = isViewer
-    ? 'bg-black/30 text-white placeholder:text-night-500 ring-1 ring-white/10'
-    : 'bg-slate-50 text-slate-800 placeholder:text-slate-400 ring-1 ring-slate-200';
-
-  if (!open) {
-    return (
-      <button
-        type="button"
-        onClick={onToggle}
-        aria-label="打开聊天"
-        title="聊天"
-        className={`fixed bottom-4 right-4 z-50 inline-flex h-12 items-center gap-2 rounded-full px-4 text-sm font-medium backdrop-blur transition-colors ${
-          isViewer
-            ? 'bg-[rgba(15,23,36,0.86)] text-night-100 ring-1 ring-white/10 hover:bg-[rgba(15,23,36,0.95)]'
-            : 'bg-white text-slate-700 ring-1 ring-slate-200 shadow-card hover:bg-slate-50'
-        }`}
-      >
-        <MessageCircle size={18} />
-        聊天
-        {connected ? null : <WifiOff size={14} className="opacity-70" />}
-      </button>
-    );
-  }
+  }, [messages]);
 
   return (
-    <div className={`fixed bottom-4 right-4 z-50 flex max-h-[70vh] w-[20rem] max-w-[calc(100vw-2rem)] flex-col overflow-hidden rounded-card backdrop-blur-md ${shell}`}>
-      <div className={`flex items-center gap-2 border-b px-3 py-2 ${isViewer ? 'border-white/10' : 'border-slate-100'}`}>
-        <MessageCircle size={16} />
-        <span className="text-sm font-semibold">聊天</span>
-        <span className={`ml-1 inline-flex items-center gap-1 text-xs ${subtle}`}>
-          <span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-green-400' : 'bg-amber-400'}`} />
-          {connected ? '已连接' : '未连接'}
+    <aside
+      className={`flex h-full min-h-[24rem] flex-col overflow-hidden rounded-card border border-slate-100 bg-white shadow-card transition-colors dark:border-night-750 dark:bg-night-850 ${className}`}
+      aria-label="房间聊天"
+    >
+      <div className="flex flex-wrap items-center gap-2 border-b border-slate-100 px-4 py-3 dark:border-night-750">
+        <span className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-control bg-brand-50 text-brand-600 dark:bg-brand-500/12 dark:text-brand-400">
+          <MessageCircle size={16} />
         </span>
-        <span className="flex-1" />
+        <div className="min-w-0">
+          <p className="text-sm font-bold text-slate-900 dark:text-night-100">聊天</p>
+          <p className="text-[11px] text-slate-400 dark:text-night-500">
+            仅本次房间 · 不持久保存
+          </p>
+        </div>
+        <span className="ml-auto inline-flex items-center gap-1 text-xs text-slate-500 dark:text-night-400">
+          <span className={`h-1.5 w-1.5 rounded-full ${connected ? 'bg-green-500' : 'bg-amber-400'}`} />
+          {connected ? '已连接' : '未连接'}
+          {!connected && <WifiOff size={13} className="opacity-60" />}
+        </span>
         <button
           type="button"
           onClick={onExport}
           disabled={messages.length === 0}
           aria-label="导出聊天记录"
           title="导出聊天记录 (.txt)"
-          className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-colors disabled:cursor-not-allowed disabled:opacity-40 ${isViewer ? 'hover:bg-white/10' : 'hover:bg-slate-100'}`}
+          className="inline-flex h-8 w-8 shrink-0 items-center justify-center rounded-full text-slate-500 transition-colors hover:bg-slate-100 disabled:cursor-not-allowed disabled:opacity-40 dark:text-night-400 dark:hover:bg-night-750"
         >
           <Download size={16} />
         </button>
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="收起聊天"
-          title="收起"
-          className={`inline-flex h-8 w-8 items-center justify-center rounded-full transition-colors ${isViewer ? 'hover:bg-white/10' : 'hover:bg-slate-100'}`}
-        >
-          <X size={16} />
-        </button>
       </div>
 
-      <div ref={listRef} className="flex-1 space-y-2 overflow-y-auto px-3 py-2">
+      <div ref={listRef} className="min-h-0 flex-1 space-y-3 overflow-y-auto px-4 py-3">
         {messages.length === 0 ? (
-          <p className={`py-6 text-center text-xs leading-relaxed ${subtle}`}>
-            {connected ? '晚加入者没有历史消息，聊两句吧' : connectingHint ?? '聊天连接尚未建立'}
-          </p>
-        ) : (
-          messages.map((message) => (
-            <div key={message.id} className="flex flex-col gap-0.5">
-              <div className={`flex items-center gap-2 text-[11px] ${subtle}`}>
-                <span className="max-w-[10rem] truncate">{message.fromPeerId}</span>
-                <span>{formatClock(message.ts)}</span>
-              </div>
-              <div className={`w-fit max-w-full whitespace-pre-wrap break-words rounded-control px-2.5 py-1.5 text-sm ${bubble}`}>
-                {message.text}
-              </div>
+          <div className="flex h-full min-h-[12rem] flex-col items-center justify-center px-4 text-center">
+            <div className="mb-3 inline-flex h-10 w-10 items-center justify-center rounded-full bg-slate-100 text-slate-400 dark:bg-night-800 dark:text-night-500">
+              <MessageCircle size={18} />
             </div>
-          ))
+            <p className="text-xs leading-relaxed text-slate-400 dark:text-night-500">
+              {connected ? '晚加入者没有历史消息，聊两句吧' : connectingHint ?? '聊天连接尚未建立'}
+            </p>
+          </div>
+        ) : (
+          messages.map((message) => {
+            const mine = message.fromPeerId === 'me';
+            const authorLabel = mine ? '我' : isViewer ? '房主' : '观众';
+            return (
+              <div key={message.id} className={`flex flex-col gap-1 ${mine ? 'items-end' : 'items-start'}`}>
+                <div className="flex items-center gap-2 px-1 text-[11px] text-slate-400 dark:text-night-500">
+                  <span className="max-w-[10rem] truncate">{authorLabel}</span>
+                  <span>{formatClock(message.ts)}</span>
+                </div>
+                <div
+                  className={`w-fit max-w-[85%] whitespace-pre-wrap break-words rounded-control px-3 py-2 text-sm ${
+                    mine
+                      ? 'bg-brand-600 text-white'
+                      : 'bg-slate-100 text-slate-800 dark:bg-night-800 dark:text-night-100'
+                  }`}
+                >
+                  {message.text}
+                </div>
+              </div>
+            );
+          })
         )}
       </div>
 
-      <div className={`flex items-center gap-2 border-t px-2 py-2 ${isViewer ? 'border-white/10' : 'border-slate-100'}`}>
+      <div className="flex items-center gap-2 border-t border-slate-100 p-3 dark:border-night-750">
         <input
           value={draft}
           onChange={handleDraftChange.bind(null, setDraft)}
@@ -173,18 +155,18 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           maxLength={2000}
           disabled={!connected}
           placeholder={connected ? '输入消息，回车发送' : '连接后即可聊天'}
-          className={`min-w-0 flex-1 rounded-full px-3 py-2 text-sm outline-none disabled:cursor-not-allowed disabled:opacity-60 ${inputShell}`}
+          className="min-w-0 flex-1 rounded-full bg-slate-50 px-3.5 py-2.5 text-sm text-slate-800 outline-none ring-1 ring-slate-200 placeholder:text-slate-400 disabled:cursor-not-allowed disabled:opacity-60 dark:bg-night-800 dark:text-night-100 dark:ring-night-700 dark:placeholder:text-night-500"
         />
         <button
           type="button"
           onClick={submitChatDraft.bind(null, draft, onSend, setDraft)}
           disabled={!connected || draft.trim().length === 0}
           aria-label="发送"
-          className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-600 text-white transition-colors hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-40"
+          className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-full bg-brand-600 text-white transition-colors hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-40"
         >
           <Send size={16} />
         </button>
       </div>
-    </div>
+    </aside>
   );
 };

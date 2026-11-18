@@ -197,9 +197,8 @@ const blockRoomChatSignaling = async (page: Page): Promise<void> => {
 };
 
 const openChatPanel = async (page: Page): Promise<void> => {
-  const trigger = page.getByRole('button', { name: '打开聊天' });
-  if (await trigger.isVisible().catch(() => false)) await trigger.click();
-  await expect(page.getByRole('button', { name: '收起聊天' })).toBeVisible({ timeout: 10_000 });
+  // 聊天已改为页面内嵌面板，不再有“打开聊天/收起聊天”的悬浮入口。
+  await expect(page.locator('aside[aria-label="房间聊天"]')).toBeVisible({ timeout: 10_000 });
 };
 
 const waitForChatConnected = async (page: Page): Promise<void> => {
@@ -1159,8 +1158,8 @@ test.describe('screen share', () => {
       await expect(page.getByRole('button', { name: '开始共享屏幕' })).toBeVisible({
         timeout: 20_000,
       });
-      // share_stopped 之后聊天入口不能被一起收掉。
-      await expect(page.getByRole('button', { name: '收起聊天' })).toBeVisible();
+      // share_stopped 之后聊天面板不能被一起收掉。
+      await expect(page.locator('aside[aria-label="房间聊天"]')).toBeVisible();
       await sendChatMessage(page, 'still-chatting-while-stopped');
       await expect(viewer.getByText('still-chatting-while-stopped', { exact: true })).toBeVisible({
         timeout: 15_000,
@@ -1265,8 +1264,8 @@ test.describe('screen share', () => {
       await expect(viewer.getByText('共享方长时间未恢复，屏幕共享已结束', { exact: true })).toBeVisible({
         timeout: 35_000,
       });
-      // 终态只结束等待画面，聊天入口与历史仍在。
-      await expect(viewer.getByRole('button', { name: '收起聊天' })).toBeVisible();
+      // 终态只结束等待画面，聊天面板与历史仍在。
+      await expect(viewer.locator('aside[aria-label="房间聊天"]')).toBeVisible();
       await expect(viewer.getByText('before-crash', { exact: true })).toBeVisible();
     } finally {
       await viewer.context().close();

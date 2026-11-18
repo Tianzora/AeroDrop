@@ -8,11 +8,8 @@ import { ChatPanel, formatClock, handleDraftChange, handleDraftKeyDown, submitCh
 
 const baseProps: React.ComponentProps<typeof ChatPanel> = {
   role: 'viewer',
-  open: true,
   connected: true,
   messages: [],
-  onToggle: () => {},
-  onClose: () => {},
   onSend: () => {},
   onExport: () => {},
   connectingHint: '正在建立聊天通道',
@@ -21,16 +18,17 @@ const baseProps: React.ComponentProps<typeof ChatPanel> = {
 const render = (overrides: Partial<React.ComponentProps<typeof ChatPanel>> = {}) =>
   renderToStaticMarkup(React.createElement(ChatPanel, { ...baseProps, ...overrides }));
 
-test('关闭时只渲染右下角聊天入口，观看端使用玻璃浮层样式', () => {
-  const markup = render({ open: false, connected: false });
+test('聊天以页面内嵌面板渲染，不再出现右下角悬浮入口', () => {
+  const markup = render({ connected: false });
 
-  assert.match(markup, /aria-label="打开聊天"/);
-  assert.match(markup, /聊天/);
-  assert.match(markup, /rgba\(15,23,36,0\.86\)/);
-  assert.doesNotMatch(markup, /输入消息/);
+  assert.match(markup, /aria-label="房间聊天"/);
+  assert.match(markup, /rounded-card/);
+  assert.match(markup, /正在建立聊天通道/);
+  assert.doesNotMatch(markup, /aria-label="打开聊天"/);
+  assert.doesNotMatch(markup, /fixed bottom-4 right-4/);
 });
 
-test('发送端使用浅色白卡，未连接时禁用输入并展示连接提示', () => {
+test('未连接时禁用输入并展示连接提示', () => {
   const markup = render({ role: 'sender', connected: false });
 
   assert.match(markup, /bg-white/);
@@ -49,8 +47,9 @@ test('有消息时逐条渲染发送者、时间和文本，并启用导出', ()
     ],
   });
 
-  assert.match(markup, /peer-alpha/);
-  assert.match(markup, /peer-beta/);
+  // 观看端看到的对方消息统一显示为“房主”，不把 peer id 暴露在界面上。
+  assert.equal((markup.match(/>房主</g) ?? []).length, 2);
+  assert.doesNotMatch(markup, /peer-alpha|peer-beta/);
   assert.match(markup, /09:05/);
   assert.match(markup, /你好\n世界/);
   assert.match(markup, /收到/);
