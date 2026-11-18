@@ -21,11 +21,6 @@ interface ScreenShareUIProps {
   needsPlayClick: boolean;
   onViewerPlayClick: () => void;
   stopViewing: () => void;
-  /** 观看端「停止观看」（琥珀）：本地停收画面但保留房间与聊天；与 stopViewing（结束并离开）语义分开。 */
-  onViewerStopWatching: () => void;
-  /** 停止观看后对方仍在共享：显示「重新观看」，只重接画面、不动聊天。 */
-  canViewerRewatch: boolean;
-  onViewerRewatch: () => void;
 
   /** 房间聊天浮层的展示状态与回调，由 ScreenShare 提供。 */
   chat: {
@@ -86,9 +81,6 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   needsPlayClick,
   onViewerPlayClick,
   stopViewing,
-  onViewerStopWatching,
-  canViewerRewatch,
-  onViewerRewatch,
   chat,
   qualityLabels,
   remoteQuality,
@@ -115,6 +107,13 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
 }) => {
   // 链接可用 = 信令就绪 且 房号没过期。任一不成立，这个链接就指向一个连不上的分享。
   const linkUsable = isShareLive && !shareRoomExpired;
+
+  // 观看端建连的四个阶段：把「系统正在做什么」摊成一条可见的进度轨，
+  // 而不是只留一个转圈图标（.impeccable：动效要成为系统在工作的证据）。
+  const viewerStageSteps = ['fetching_ice', 'connecting_signaling', 'connecting_media', 'waiting_stream'] as const;
+  const viewerStageIndex = viewerConnectingStage
+    ? viewerStageSteps.indexOf(viewerConnectingStage as (typeof viewerStageSteps)[number])
+    : -1;
 
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
   const viewerElRef = useRef<HTMLVideoElement | null>(null);
@@ -263,17 +262,22 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
             共享」态后都会收起介绍性大标题，把纵向空间让给画面和操作；未开始时保
             留图标 + 标题的引导性头部。 */}
         {isSharing || isViewing ? (
-          <div className="mb-6 flex items-center gap-2.5">
-            <div className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-control bg-brand-100 dark:bg-brand-500/12">
+          <div className="mb-6 flex items-center gap-3">
+            <div className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-control bg-brand-100 ring-1 ring-brand-200/70 dark:bg-brand-500/12 dark:ring-brand-500/20">
               {isViewing ? (
                 <Eye size={20} className="text-brand-600" />
               ) : (
                 <Monitor size={20} className="text-brand-600" />
               )}
             </div>
-            <h2 className="truncate text-xl font-bold text-slate-900 dark:text-night-100">
-              {isViewing ? '观看屏幕' : '屏幕共享'}
-            </h2>
+            <div className="min-w-0">
+              <p className="text-[10px] font-semibold uppercase tracking-[0.22em] text-brand-600/70 dark:text-brand-400/70">
+                Screen Share
+              </p>
+              <h2 className="truncate text-lg font-bold leading-tight text-slate-900 dark:text-night-100">
+                {isViewing ? '观看屏幕' : '屏幕共享'}
+              </h2>
+            </div>
             {isViewing && (
               <p className="ml-auto min-w-0 truncate text-xs text-slate-500 dark:text-night-400">
                 实时观看对方共享的屏幕内容
@@ -282,7 +286,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
           </div>
         ) : (
           <div className="text-center mb-8">
-            <div className="inline-flex items-center justify-center w-16 h-16 bg-brand-100 dark:bg-brand-500/12 rounded-card mb-4">
+            <div className="inline-flex items-center justify-center w-16 h-16 bg-brand-100 dark:bg-brand-500/12 rounded-card mb-4 ring-1 ring-brand-200/70 dark:ring-brand-500/20">
               {isConnecting ? (
                 <Eye size={32} className="text-brand-600" />
               ) : (
@@ -343,6 +347,25 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               {viewerConnectingStage === 'waiting_stream' && '正在等待屏幕画面...'}
               {!viewerConnectingStage && '正在连接到屏幕共享...'}
             </p>
+            {/* 四段进度：已完成段变浅蓝短线、当前段拉长，给「还在推进」一个可见的节奏。 */}
+            <div className="flex items-center gap-2" aria-hidden="true">
+              {viewerStageSteps.map((step, index) => {
+                const done = viewerStageIndex >= 0 && index < viewerStageIndex;
+                const active = index === viewerStageIndex;
+                return (
+                  <span
+                    key={step}
+                    className={`h-1.5 rounded-full transition-all duration-300 motion-base ${
+                      active
+                        ? 'w-7 bg-brand-500'
+                        : done
+                          ? 'w-3.5 bg-brand-300 dark:bg-brand-400/50'
+                          : 'w-3.5 bg-slate-200 dark:bg-night-700'
+                    }`}
+                  />
+                );
+              })}
+            </div>
           </div>
         )}
 
@@ -429,8 +452,8 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
 
               {/* 观看状态与画质叠进画面，与共享者一侧的 LIVE 徽标同构，
                   不再在播放器下方单独占一行。 */}
-              <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/60 via-black/25 to-transparent p-2.5">
-                <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-sm">
+              <div className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/70 via-black/20 to-transparent p-3">
+                <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 text-xs font-medium text-white ring-1 ring-white/15 backdrop-blur-sm">
                   <span className="relative flex h-2 w-2">
                     <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
                     <span className="relative inline-flex h-2 w-2 rounded-full bg-green-400"></span>
@@ -438,7 +461,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                   正在观看
                 </span>
                 <span className="flex flex-wrap items-center justify-end gap-1.5">
-                  <span className="inline-flex items-center gap-1 rounded-full bg-black/55 px-2 py-1 text-xs font-medium text-white backdrop-blur-sm">
+                  <span className="inline-flex items-center gap-1 rounded-full bg-black/55 px-2 py-1 text-xs font-medium tabular-nums text-white ring-1 ring-white/15 backdrop-blur-sm">
                     画质 {qualityLabels[remoteQuality]}
                   </span>
                 </span>
@@ -447,7 +470,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               {/* 自绘控件条：原生 controls 与页面气质不符，直播画面又不需要进度条，
                   所以只留播放/静音/画中画/全屏。指针活动时显形，暂停时常驻。 */}
               <div
-                className={`pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-gradient-to-t from-black/70 via-black/30 to-transparent p-2.5 transition-opacity duration-200 ${
+                className={`pointer-events-none absolute inset-x-0 bottom-0 flex items-center gap-1.5 bg-gradient-to-t from-black/75 via-black/25 to-transparent p-3 transition-opacity duration-200 ${
                   controlsVisible ? 'opacity-100' : 'opacity-0'
                 }`}
               >
@@ -456,7 +479,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                   onClick={toggleViewerPlay}
                   aria-label={viewerPlaying ? '暂停' : '播放'}
                   title={viewerPlaying ? '暂停' : '播放'}
-                  className="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-colors hover:bg-black/65"
+                  className="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/50 text-white ring-1 ring-white/15 backdrop-blur-sm transition-colors hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
                 >
                   {viewerPlaying ? <Pause size={18} /> : <Play size={18} />}
                 </button>
@@ -465,7 +488,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                   onClick={toggleViewerMute}
                   aria-label={viewerMuted ? '取消静音' : '静音'}
                   title={viewerMuted ? '取消静音' : '静音'}
-                  className="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-colors hover:bg-black/65"
+                  className="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/50 text-white ring-1 ring-white/15 backdrop-blur-sm transition-colors hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
                 >
                   {viewerMuted ? <VolumeX size={18} /> : <Volume2 size={18} />}
                 </button>
@@ -478,7 +501,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                     }}
                     aria-label={viewerPip ? '退出画中画' : '画中画'}
                     title={viewerPip ? '退出画中画' : '画中画'}
-                    className="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-colors hover:bg-black/65"
+                    className="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/50 text-white ring-1 ring-white/15 backdrop-blur-sm transition-colors hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
                   >
                     <PictureInPicture size={18} />
                   </button>
@@ -488,7 +511,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                   onClick={toggleViewerFullscreen}
                   aria-label={viewerFullscreen ? '退出全屏' : '全屏'}
                   title={viewerFullscreen ? '退出全屏' : '全屏'}
-                  className="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/45 text-white backdrop-blur-sm transition-colors hover:bg-black/65"
+                  className="pointer-events-auto inline-flex h-10 w-10 items-center justify-center rounded-full bg-black/50 text-white ring-1 ring-white/15 backdrop-blur-sm transition-colors hover:bg-white/20 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-white/70"
                 >
                   {viewerFullscreen ? <Minimize size={18} /> : <Maximize size={18} />}
                 </button>
@@ -509,17 +532,10 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
 
             <div className="flex items-center gap-2">
               <button
-                onClick={onViewerStopWatching}
-                className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full bg-amber-500 px-5 text-sm font-bold text-white shadow-card transition-ui motion-fast hover:bg-amber-600 active:scale-[0.99]"
-              >
-                <Pause size={18} />
-                停止观看
-              </button>
-              <button
                 onClick={() => setShowEndConfirm(true)}
-                className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full bg-red-600 px-5 text-sm font-bold text-white shadow-card transition-ui motion-fast hover:bg-red-700 active:scale-[0.99]"
+                className="inline-flex h-12 w-full items-center justify-center gap-2 rounded-full border border-red-200 bg-white px-5 text-sm font-bold text-red-600 shadow-sm transition-ui motion-fast hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300 active:scale-[0.99] dark:border-red-500/30 dark:bg-transparent dark:text-red-300 dark:hover:bg-red-500/10"
               >
-                <StopCircle size={18} />
+                <LogOut size={18} />
                 结束并离开
               </button>
             </div>
@@ -528,19 +544,6 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
 
         {!isViewing && !isConnecting && (
           <>
-            {canViewerRewatch && (
-              <div className="mb-4 flex flex-col items-start gap-2 rounded-card border border-white/20 bg-white/10 p-4">
-                <p className="text-sm text-white/80">你已停止观看画面，聊天仍保持连接。</p>
-                <button
-                  onClick={onViewerRewatch}
-                  className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-brand-600 px-5 text-sm font-semibold text-white transition-colors hover:bg-brand-700"
-                >
-                  <RefreshCw size={16} />
-                  重新观看
-                </button>
-              </div>
-            )}
-
             {sharerFailure && !isSharing && (
               /* 信令终态：不能只弹 toast。绿色 LIVE 消失、预览停止、链接作废，
                  这里说明原因并给一条重新开始的路。 */
@@ -599,11 +602,14 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
             )}
 
             {isSharing && shareLink && (
-              <div className="mb-4 rounded-card border border-slate-200 dark:border-night-750 bg-slate-50 dark:bg-night-900/50 px-3 py-2.5">
-                <div className="mb-1 flex items-center justify-between gap-2">
-                  <p className="text-xs font-medium text-slate-600 dark:text-night-300">
-                    将此链接分享给观看者
-                  </p>
+              <div className="mb-4 rounded-card border border-slate-200/80 bg-slate-50/70 px-4 py-3 ring-1 ring-white/50 dark:border-night-750 dark:bg-night-900/50 dark:ring-white/5">
+                <div className="mb-2 flex items-center justify-between gap-2">
+                  <div className="flex min-w-0 items-center gap-2">
+                    <span className={`h-1.5 w-1.5 rounded-full ${linkUsable ? 'bg-green-500' : 'bg-amber-500'}`} />
+                    <p className="text-[10px] font-semibold uppercase tracking-[0.18em] text-slate-500 dark:text-night-400">
+                      实时链接
+                    </p>
+                  </div>
                   {viewerCount > 0 && (
                     /* pr-3 让文字右缘与下方 44px 图标按钮的可见图标右缘对齐
                        （图标 18px 居中，左右各留 13px 内边距） */
@@ -613,7 +619,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                     </span>
                   )}
                 </div>
-                <div className="flex items-center gap-1.5">
+                <div className="flex items-center gap-1.5 rounded-control bg-white px-3 py-1 ring-1 ring-slate-200/80 dark:bg-night-800 dark:ring-night-700">
                   <a
                     href={shareLink}
                     target="_blank"
@@ -714,10 +720,10 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                 <div
                   role="status"
                   aria-live="polite"
-                  className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/60 via-black/25 to-transparent p-2.5"
+                  className="pointer-events-none absolute inset-x-0 top-0 flex items-start justify-between gap-2 bg-gradient-to-b from-black/70 via-black/20 to-transparent p-3"
                 >
                   {linkUsable ? (
-                    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 text-xs font-medium text-white backdrop-blur-sm">
+                    <span className="inline-flex shrink-0 items-center gap-1.5 rounded-full bg-black/55 px-2.5 py-1 text-xs font-medium text-white ring-1 ring-white/15 backdrop-blur-sm">
                       <span className="relative flex h-2 w-2">
                         <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-green-400 opacity-75"></span>
                         <span className="relative inline-flex h-2 w-2 rounded-full bg-green-400"></span>
@@ -738,7 +744,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                     </span>
                   )}
                   <span className="flex flex-wrap items-center justify-end gap-1.5">
-                    <span className="inline-flex items-center gap-1 rounded-full bg-black/55 px-2 py-1 text-xs font-medium text-white backdrop-blur-sm">
+                    <span className="inline-flex items-center gap-1 rounded-full bg-black/55 px-2 py-1 text-xs font-medium tabular-nums text-white ring-1 ring-white/15 backdrop-blur-sm">
                       画质 {qualityLabels[qualityLevel]}
                     </span>
                   </span>
@@ -778,21 +784,21 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               <div className="flex items-center gap-2">
                 <button
                   onClick={changeScreenSource}
-                  className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-full border border-slate-300 px-3 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 dark:border-night-700 dark:text-night-300 dark:hover:bg-night-750 sm:px-4"
+                  className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-full border border-slate-200 bg-white px-3 text-sm font-medium text-slate-600 shadow-sm transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 dark:border-night-700 dark:bg-transparent dark:text-night-300 dark:hover:bg-night-750 sm:px-4"
                 >
                   <MonitorUp size={18} />
                   切换窗口
                 </button>
                 <button
                   onClick={stopScreenShare}
-                  className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full border border-red-200 bg-white px-4 text-sm font-bold text-red-600 shadow-card transition-ui motion-fast hover:bg-red-50 active:scale-[0.99] dark:border-red-500/30 dark:bg-transparent dark:text-red-300 dark:hover:bg-red-500/10"
+                  className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full border border-slate-300 bg-white px-4 text-sm font-bold text-slate-700 shadow-sm transition-ui motion-fast hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 active:scale-[0.99] dark:border-night-600 dark:bg-transparent dark:text-night-200 dark:hover:bg-night-750"
                 >
                   <StopCircle size={18} />
                   停止共享
                 </button>
                 <button
                   onClick={() => setShowEndConfirm(true)}
-                  className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-full bg-red-600 px-4 text-sm font-bold text-white shadow-card transition-ui motion-fast hover:bg-red-700 active:scale-[0.99]"
+                  className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-full border border-red-200 bg-white px-4 text-sm font-bold text-red-600 shadow-sm transition-ui motion-fast hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300 active:scale-[0.99] dark:border-red-500/30 dark:bg-transparent dark:text-red-300 dark:hover:bg-red-500/10"
                 >
                   <LogOut size={18} />
                   结束并离开
@@ -805,30 +811,33 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
       </div>
       {showEndConfirm && (
         <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4 backdrop-blur-sm"
           role="dialog"
           aria-modal="true"
           aria-labelledby="end-room-confirm-title"
         >
-          <div className="w-full max-w-sm rounded-card bg-white p-6 shadow-card dark:bg-night-800">
+          <div className="w-full max-w-sm rounded-card bg-white p-6 shadow-card ring-1 ring-slate-200/70 dark:bg-night-800 dark:ring-night-700">
+            <div className="mb-4 inline-flex h-11 w-11 items-center justify-center rounded-full bg-red-50 text-red-600 dark:bg-red-500/10 dark:text-red-300">
+              <AlertTriangle size={20} />
+            </div>
             <h3 id="end-room-confirm-title" className="text-lg font-bold text-slate-900 dark:text-white">
               结束并离开？
             </h3>
             <p className="mt-2 text-sm leading-relaxed text-slate-600 dark:text-night-300">
               {isViewing
-                ? '将断开与共享方的连接，当前聊天记录也会清空。只想停画面请用「停止观看」，房间与聊天会保留。'
+                ? '将断开与共享方的连接，房间即刻关闭，当前聊天记录也会清空。'
                 : '所有观看者会立即断开，房号作废，当前聊天记录也会清空。只想停画面请用「停止共享」，房间与聊天会保留。'}
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <button
                 onClick={() => setShowEndConfirm(false)}
-                className="inline-flex h-10 items-center justify-center rounded-full px-4 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 dark:text-night-300 dark:hover:bg-night-750"
+                className="inline-flex h-10 items-center justify-center rounded-full px-4 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300 dark:text-night-300 dark:hover:bg-night-750"
               >
                 取消
               </button>
               <button
                 onClick={() => { setShowEndConfirm(false); (isViewing ? stopViewing : onEndRoom)(); }}
-                className="inline-flex h-10 items-center justify-center rounded-full bg-red-600 px-4 text-sm font-bold text-white transition-colors hover:bg-red-700"
+                className="inline-flex h-10 items-center justify-center rounded-full bg-red-600 px-4 text-sm font-bold text-white transition-colors hover:bg-red-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300"
               >
                 结束并离开
               </button>

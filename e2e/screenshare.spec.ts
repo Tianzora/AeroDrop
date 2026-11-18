@@ -1131,9 +1131,9 @@ test.describe('screen share', () => {
     expect(await page.locator('body').innerText()).not.toContain('屏幕共享启动失败');
   });
 
-  // M1 聊天：停止共享 = 只暂停画面，房间/聊天会话仍在；重新共享后画面恢复，
+  // M1 聊天：停止共享 = 只暂停画面，房间/聊天会话仍在；重新共享后画面自动恢复，
   // 历史不能被清空（这正是「停共享 ≠ 结束房间」的端到端证据）。
-  test('chat survives stopping and restarting a share, and the viewer can rewatch', async ({
+  test('chat survives stopping and restarting a share, and the viewer auto-resumes', async ({
     browser,
     page,
   }) => {
@@ -1168,17 +1168,7 @@ test.describe('screen share', () => {
 
       await page.getByRole('button', { name: '开始共享屏幕' }).click();
       await expect(page.getByText('正在共享')).toBeVisible({ timeout: 20_000 });
-      const rewatch = viewer.getByRole('button', { name: '重新观看' });
-      await expect
-        .poll(
-          async () => {
-            if (await rewatch.isVisible().catch(() => false)) return 'rewatch';
-            return (await sampleVideos(viewer)).frames > 0 ? 'auto' : 'waiting';
-          },
-          { timeout: FRAME_TIMEOUT_MS, message: 'viewer neither auto-resumed nor offered rewatch' }
-        )
-        .not.toBe('waiting');
-      if (await rewatch.isVisible().catch(() => false)) await rewatch.click();
+      // 观看端没有「重新观看」按钮：共享方重新开始共享后，画面应自动恢复。
       await dismissAutoplayOverlay(viewer);
       const resumed = await waitForViewerFrames(viewer);
       // 画面必须继续增长，不能只靠旧帧残留混过去。
@@ -1198,9 +1188,12 @@ test.describe('screen share', () => {
     }
   });
 
-  // 观看端两个按钮语义必须分开：琥珀「停止观看」只停画面且保留聊天；
-  // 红色「结束并离开」才清空房间聊天。
-  test('viewer stop-watching keeps chat while end-and-leave clears it', async ({ browser, page }) => {
+  // 观看端只保留「结束并离开」：没有「暂停/停止观看」这种只停画面不离开的入口，
+  // 避免用户以为可以一边离开画面一边留在房间。
+  test('viewer has no pause-watching button and end-and-leave clears the room chat', async ({
+    browser,
+    page,
+  }) => {
     test.slow();
     await page.goto('/');
     await ensureDisplayCapture(page);
@@ -1212,33 +1205,18 @@ test.describe('screen share', () => {
       await openChatPanel(viewer);
       await waitForChatConnected(page);
       await waitForChatConnected(viewer);
-      await sendChatMessage(page, 'before-stop-watching');
-      await expect(viewer.getByText('before-stop-watching', { exact: true })).toBeVisible({
+      await sendChatMessage(page, 'before-leave');
+      await expect(viewer.getByText('before-leave', { exact: true })).toBeVisible({
         timeout: 15_000,
       });
 
-      await viewer.getByRole('button', { name: '停止观看' }).click();
-      await expect(viewer.getByRole('button', { name: '重新观看' })).toBeVisible({
-        timeout: 15_000,
-      });
-      await expect(viewer.getByText('before-stop-watching', { exact: true })).toBeVisible();
-      await sendChatMessage(viewer, 'chat-after-stop-watching');
-      await expect(page.getByText('chat-after-stop-watching', { exact: true })).toBeVisible({
-        timeout: 15_000,
-      });
-
-      await viewer.getByRole('button', { name: '重新观看' }).click();
-      await dismissAutoplayOverlay(viewer);
-      await waitForViewerFrames(viewer);
-      await sendChatMessage(viewer, 'chat-after-rewatch');
-      await expect(page.getByText('chat-after-rewatch', { exact: true })).toBeVisible({
-        timeout: 15_000,
-      });
+      await expect(viewer.getByRole('button', { name: '停止观看' })).toHaveCount(0);
+      await expect(viewer.getByRole('button', { name: '重新观看' })).toHaveCount(0);
 
       await viewer.getByRole('button', { name: '结束并离开' }).click();
       await expect(viewer.getByText('结束并离开？', { exact: true })).toBeVisible();
       await viewer.getByRole('button', { name: '结束并离开' }).last().click();
-      await expect(viewer.getByText('chat-after-rewatch', { exact: true })).toHaveCount(0, {
+      await expect(viewer.getByText('before-leave', { exact: true })).toHaveCount(0, {
         timeout: 15_000,
       });
     } finally {

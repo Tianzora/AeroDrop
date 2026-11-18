@@ -25,9 +25,6 @@ const baseProps: React.ComponentProps<typeof ScreenShareUI> = {
   needsPlayClick: false,
   onViewerPlayClick: () => {},
   stopViewing: () => {},
-  onViewerStopWatching: () => {},
-  canViewerRewatch: false,
-  onViewerRewatch: () => {},
   chat: {
     role: 'viewer' as const,
     open: false,
@@ -73,7 +70,9 @@ test('观看态：状态与画质叠进播放器，使用自绘控件条', () =>
   assert.match(markup, /实时观看对方共享的屏幕内容/);
   assert.match(markup, /正在观看/);
   assert.match(markup, /画质 高清/);
-  assert.match(markup, /停止观看/);
+  // 观看端不再提供「停止观看（暂停）」：留下只会让人以为能只停画面不离开房间。
+  assert.doesNotMatch(markup, /停止观看/);
+  assert.match(markup, /结束并离开/);
   assert.doesNotMatch(markup, /controls=""/);
   assert.match(markup, /aria-label="暂停"/);
   assert.match(markup, /aria-label="静音"/);
