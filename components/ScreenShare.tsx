@@ -104,6 +104,7 @@ type QualityLevel = ScreenShareQualityLevel;
 import {
   describeCaptureError,
   findLiveAudioSender,
+  findLiveVideoSender,
   isEmbeddedFrame,
   readRateLimitLayer,
   readRetryAfterMs,
@@ -1504,8 +1505,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     setIsConnecting(false);
     setViewerConnectingStage('');
 
-    // 只有手动停止时才清除目标ID，方便重连
+    // 只有手动停止时才清除目标ID，方便重连；「结束并离开」同时清空聊天记录。
     if (isManual) {
+      chat.reset('viewer');
       clearPersistedViewerSession();
       setTargetSharerId(null);
       setError(null);
@@ -1514,7 +1516,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       remoteShareEndHandledRef.current = false;
       remoteShareFullRef.current = false;
     }
-  }, [clearPersistedViewerSession, clearViewerWaitTerminal]);
+  }, [clearPersistedViewerSession, clearViewerWaitTerminal, chat.reset]);
 
   const handleRemoteShareEnded = useCallback((reason = '共享已结束') => {
     if (remoteShareEndHandledRef.current) return;
@@ -1557,6 +1559,20 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
    * 聊天不因停画面中断；真正离房走 stopViewing（结束并离开）。
    */
   const stopWatchingKeepChat = useCallback(() => {
+    // 用户主动停画面：让在途连接作废，并抑制关闭媒体连接引发的自动重连。
+    // 之前只 close 不置 manualStop，call.close 会走 reconnectViewerAfterLoss，
+    // 结果「停止观看」立刻变成「正在尝试重连」，重新观看按钮也永远不出现。
+    viewerConnectAttemptRef.current += 1;
+    isManualStopRef.current = true;
+    clearViewerWaitTerminal();
+    if (connectingTimeoutRef.current) {
+      clearTimeout(connectingTimeoutRef.current);
+      connectingTimeoutRef.current = null;
+    }
+    if (reconnectTimerRef.current) {
+      clearTimeout(reconnectTimerRef.current);
+      reconnectTimerRef.current = null;
+    }
     if (mediaConnectionRef.current) {
       try { mediaConnectionRef.current.close(); } catch { /* ignore */ }
       mediaConnectionRef.current = null;
@@ -1569,8 +1585,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     streamRef.current = null;
     setNeedsPlayClick(false);
     setIsViewing(false);
+    setIsConnecting(false);
+    setViewerConnectingStage('');
+    setError(null);
     onNotification('已停止观看画面，聊天仍可用', 'info');
-  }, [onNotification]);
+  }, [onNotification, clearViewerWaitTerminal]);
 
   const connectToSharer = useCallback(async (sharerId: string, isRetry = false, preserveChat = false) => {
     // attempt token：取消/新连接会让旧的 await 链作废。
@@ -2203,12 +2222,70 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     });
   }, [onNotification, stopViewing, handleRemoteShareEnded, persistViewerSession]);
 
-  /** 观看端「重新观看」：重新接画，但不 reset 聊天、不丢历史。 */
+  /** 观看端「重新观看」：在现有 room peer 上重开媒体 call，不动聊天连接与历史。 */
   const rewatchSharer = useCallback(() => {
     if (!targetSharerId) return;
     clearViewerWaitTerminal();
-    void connectToSharer(targetSharerId, true, true);
-  }, [targetSharerId, connectToSharer, clearViewerWaitTerminal]);
+    // 这是用户重新发起的会话，不是自动重连：解除停看标记，并清掉上一轮终态。
+    isManualStopRef.current = false;
+    remoteShareEndedRef.current = false;
+    remoteShareEndHandledRef.current = false;
+    setError(null);
+
+    const peer = peerRef.current;
+    if (!peer || peer.destroyed) {
+      // peer 已经没了（例如页面恢复后的极端情况）：只能走完整重连，历史仍保留。
+      void connectToSharer(targetSharerId, false, true);
+      return;
+    }
+
+    const attemptId = viewerConnectAttemptRef.current + 1;
+    viewerConnectAttemptRef.current = attemptId;
+    if (mediaConnectionRef.current) {
+      try { mediaConnectionRef.current.close(); } catch { /* ignore */ }
+      mediaConnectionRef.current = null;
+    }
+    setIsConnecting(true);
+    setViewerConnectingStage('waiting_stream');
+    setNeedsPlayClick(false);
+
+    const call = peer.call(targetSharerId);
+    if (!call) {
+      setIsConnecting(false);
+      setViewerConnectingStage('');
+      setError('无法重新连接，请稍后重试');
+      return;
+    }
+    mediaConnectionRef.current = call;
+    let gotStream = false;
+    call.on('stream', (remoteStream) => {
+      if (viewerConnectAttemptRef.current !== attemptId || gotStream) return;
+      gotStream = true;
+      streamRef.current = remoteStream;
+      if (videoRef.current) {
+        videoRef.current.srcObject = remoteStream;
+        videoRef.current.play().catch(() => { /* autoplay overlay handles it */ });
+      }
+      setIsViewing(true);
+      setIsConnecting(false);
+      setViewerConnectingStage('');
+      setNeedsPlayClick(false);
+      onNotification('画面已重新连接', 'success');
+    });
+    call.on('close', () => {
+      if (viewerConnectAttemptRef.current !== attemptId) return;
+      setIsViewing(false);
+      setIsConnecting(false);
+      setViewerConnectingStage('');
+      if (!gotStream) setError('重新观看连接失败，请重试');
+    });
+    call.on('error', (err) => {
+      if (viewerConnectAttemptRef.current !== attemptId) return;
+      setIsConnecting(false);
+      setViewerConnectingStage('');
+      setError(getMediaConnectionErrorMessage(err));
+    });
+  }, [targetSharerId, connectToSharer, clearViewerWaitTerminal, onNotification]);
 
   const cancelConnecting = useCallback(() => {
     stopViewing();
@@ -2458,10 +2535,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     const nextAudioTrack = stream.getAudioTracks()[0];
 
     activeCallsRef.current.forEach((call) => {
-      const senders = call.peerConnection?.getSenders();
-      if (!senders) return;
-
-      const videoSender = senders.find((sender) => sender.track?.kind === 'video');
+      // 停共享时 replaceTrack(null) 已把 sender.track 清空，不能再按 track.kind 找；
+      // 复用房间重开必须从 transceiver 方向找回视频 sender，否则新画面挂不回去。
+      const videoSender = findLiveVideoSender(call.peerConnection ?? undefined);
       if (videoSender && nextVideoTrack) {
         videoSender.replaceTrack(nextVideoTrack);
       }

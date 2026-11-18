@@ -135,6 +135,41 @@ const openViewer = async (browser: Browser, shareLink: string, track?: string): 
   return viewer;
 };
 /**
+ * 产品套件顺序执行时，同一出口 IP 的 offer 配额（24 次/60s）会被前面的多观众用例吃掉，
+ * 新开的观看端可能一上来就收到「连接请求过多」。这不是聊天回归：等限流窗口过去后
+ * 换一个观看页重试即可。仅用于等待首帧的聊天用例，不改动既有用例的断言强度。
+ */
+const openChatViewerWithFrames = async (createViewer: () => Promise<Page>): Promise<Page> => {
+  let lastError: unknown;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    const viewer = await createViewer();
+    await dismissAutoplayOverlay(viewer);
+    const limited = await viewer
+      .getByText(/连接请求过多/)
+      .waitFor({ state: 'visible', timeout: 3_000 })
+      .then(() => true)
+      .catch(() => false);
+    if (limited) {
+      const body = await viewer.locator('body').innerText().catch(() => '');
+      const seconds = Number(body.match(/(\d+) 秒后可重试/)?.[1] ?? 0);
+      await viewer.context().close();
+      lastError = new Error('viewer was rate limited before the first frame');
+      if (seconds > 0) {
+        await new Promise((resolve) => setTimeout(resolve, (seconds + 1) * 1_000));
+      }
+      continue;
+    }
+    try {
+      await waitForViewerFrames(viewer);
+      return viewer;
+    } catch (error) {
+      lastError = error;
+      await viewer.context().close();
+    }
+  }
+  throw lastError instanceof Error ? lastError : new Error('viewer never connected');
+};
+/**
  * 模拟「旧对端」：把 kind:'room' 的信令从 WebSocket 出站流量里丢掉。
  *
  * M1 的聊天通道是新增协议；旧版本只认识 data/media，遇到 room 不会建立通道。
@@ -175,7 +210,7 @@ const sendChatMessage = async (page: Page, text: string): Promise<void> => {
   const input = page.getByPlaceholder('输入消息，回车发送');
   await expect(input).toBeVisible({ timeout: 10_000 });
   await input.fill(text);
-  await page.getByRole('button', { name: '发送' }).click();
+  await page.getByLabel('发送').click();
 };
 
 const collectPageErrors = (page: Page): string[] => {
@@ -1102,14 +1137,13 @@ test.describe('screen share', () => {
     browser,
     page,
   }) => {
+    test.slow();
     await page.goto('/');
     await ensureDisplayCapture(page);
     await startSharing(page);
     const shareLink = await getShareLink(page);
-    const viewer = await openViewer(browser, shareLink);
+    const viewer = await openChatViewerWithFrames(() => openViewer(browser, shareLink));
     try {
-      await dismissAutoplayOverlay(viewer);
-      await waitForViewerFrames(viewer);
       await openChatPanel(page);
       await openChatPanel(viewer);
       await waitForChatConnected(page);
@@ -1167,14 +1201,13 @@ test.describe('screen share', () => {
   // 观看端两个按钮语义必须分开：琥珀「停止观看」只停画面且保留聊天；
   // 红色「结束并离开」才清空房间聊天。
   test('viewer stop-watching keeps chat while end-and-leave clears it', async ({ browser, page }) => {
+    test.slow();
     await page.goto('/');
     await ensureDisplayCapture(page);
     await startSharing(page);
     const shareLink = await getShareLink(page);
-    const viewer = await openViewer(browser, shareLink);
+    const viewer = await openChatViewerWithFrames(() => openViewer(browser, shareLink));
     try {
-      await dismissAutoplayOverlay(viewer);
-      await waitForViewerFrames(viewer);
       await openChatPanel(page);
       await openChatPanel(viewer);
       await waitForChatConnected(page);
@@ -1215,6 +1248,7 @@ test.describe('screen share', () => {
 
   // 分享方异常退出（无 pagehide）时，观看端不能永远停在「正在等待屏幕画面」。
   test('a viewer waiting for a crashed sharer lands on a terminal notice', async ({ browser, page }) => {
+    test.slow();
     await page.addInitScript(() => {
       // 模拟崩溃/被强杀：页面卸载时应用注册的 pagehide/beforeunload 不会执行，
       // 因此对端收不到 window_closed，只能靠观看端自己的兜底。
@@ -1232,10 +1266,8 @@ test.describe('screen share', () => {
     await ensureDisplayCapture(page);
     await startSharing(page);
     const shareLink = await getShareLink(page);
-    const viewer = await openViewer(browser, shareLink);
+    const viewer = await openChatViewerWithFrames(() => openViewer(browser, shareLink));
     try {
-      await dismissAutoplayOverlay(viewer);
-      await waitForViewerFrames(viewer);
       await openChatPanel(page);
       await openChatPanel(viewer);
       await waitForChatConnected(page);
@@ -1268,17 +1300,16 @@ test.describe('screen share', () => {
     browser,
     page,
   }) => {
+    test.slow();
     await blockRoomChatSignaling(page);
     await page.goto('/');
     await ensureDisplayCapture(page);
     await startSharing(page);
     const shareLink = await getShareLink(page);
     const sharerErrors = collectPageErrors(page);
-    const viewer = await openViewer(browser, shareLink);
+    const viewer = await openChatViewerWithFrames(() => openViewer(browser, shareLink));
     const viewerErrors = collectPageErrors(viewer);
     try {
-      await dismissAutoplayOverlay(viewer);
-      await waitForViewerFrames(viewer);
       await openChatPanel(viewer);
       await expect(viewer.getByText('未连接', { exact: true })).toBeVisible({ timeout: 30_000 });
       // 原共享/停止共享照旧可用。
@@ -1294,18 +1325,21 @@ test.describe('screen share', () => {
   });
 
   test('a new sharer keeps sharing when the viewer drops room-chat signaling', async ({ browser, page }) => {
+    test.slow();
     await page.goto('/');
     await ensureDisplayCapture(page);
     await startSharing(page);
     const shareLink = await getShareLink(page);
     const sharerErrors = collectPageErrors(page);
-    const viewerContext = await browser.newContext();
-    const viewer = await viewerContext.newPage();
-    await blockRoomChatSignaling(viewer);
+    const viewer = await openChatViewerWithFrames(async () => {
+      const context = await browser.newContext();
+      const page = await context.newPage();
+      await blockRoomChatSignaling(page);
+      await page.goto(shareLink);
+      return page;
+    });
     const viewerErrors = collectPageErrors(viewer);
     try {
-      await viewer.goto(shareLink);
-      await dismissAutoplayOverlay(viewer);
       const first = await waitForViewerFrames(viewer);
       await openChatPanel(viewer);
       await expect(viewer.getByText('未连接', { exact: true })).toBeVisible({ timeout: 30_000 });
@@ -1318,7 +1352,7 @@ test.describe('screen share', () => {
       expect(sharerErrors).toEqual([]);
       expect(viewerErrors).toEqual([]);
     } finally {
-      await viewerContext.close();
+      await viewer.context().close();
     }
   });
 

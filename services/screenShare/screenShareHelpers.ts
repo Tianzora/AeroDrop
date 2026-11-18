@@ -58,3 +58,15 @@ export const findLiveAudioSender = (pc: RTCPeerConnection | undefined): RTCRtpSe
     .find((item) => item.receiver.track?.kind === 'audio' && item.direction !== 'stopped');
   return transceiver?.sender ?? null;
 };
+
+/**
+ * 找到已经协商出来的视频 sender。和音频同理：停共享时 `replaceTrack(null)` 会把
+ * `sender.track` 清空，只有 transceiver 的 receiver 还保留 video 方向。重新开始共享
+ * 必须靠它把新画面挂回同一条媒体连接，否则复用房间时画面永远黑屏。
+ */
+export const findLiveVideoSender = (pc: RTCPeerConnection | undefined): RTCRtpSender | null => {
+  const transceiver = pc
+    ?.getTransceivers()
+    .find((item) => item.receiver.track?.kind === 'video' && item.direction !== 'stopped');
+  return transceiver?.sender ?? null;
+};

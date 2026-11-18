@@ -5,6 +5,7 @@ import type { MediaConnection } from '../peerRuntime';
 import {
   describeCaptureError,
   findLiveAudioSender,
+  findLiveVideoSender,
   hasUserActivation,
   isEmbeddedFrame,
   readRateLimitLayer,
@@ -124,6 +125,27 @@ test('findLiveAudioSender 跳过 stopped 的 transceiver 并返回 sender', () =
   );
 });
 
+test('findLiveVideoSender 在 replaceTrack(null) 后仍能按 transceiver 方向找回视频 sender', () => {
+  const videoSender = { track: null };
+  assert.equal(findLiveVideoSender(undefined), null);
+  assert.equal(
+    findLiveVideoSender({
+      getTransceivers: () => [
+        { receiver: { track: { kind: 'audio' } }, direction: 'sendrecv', sender: { track: null } },
+        { receiver: { track: { kind: 'video' } }, direction: 'sendrecv', sender: videoSender },
+      ],
+    } as unknown as RTCPeerConnection),
+    videoSender,
+  );
+  assert.equal(
+    findLiveVideoSender({
+      getTransceivers: () => [
+        { receiver: { track: { kind: 'video' } }, direction: 'stopped', sender: { track: null } },
+      ],
+    } as unknown as RTCPeerConnection),
+    null,
+  );
+});
 test('startBandwidthMonitoring 采样统计并应用码率上限', async () => {
   const stats = makeStats({
     out: { type: 'outbound-rtp', kind: 'video', bytesSent: 1000, packetsSent: 10, remoteId: 'rin' },

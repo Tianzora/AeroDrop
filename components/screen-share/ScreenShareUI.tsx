@@ -516,7 +516,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                 停止观看
               </button>
               <button
-                onClick={stopViewing}
+                onClick={() => setShowEndConfirm(true)}
                 className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full bg-red-600 px-5 text-sm font-bold text-white shadow-card transition-ui motion-fast hover:bg-red-700 active:scale-[0.99]"
               >
                 <StopCircle size={18} />
@@ -815,7 +815,9 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               结束并离开？
             </h3>
             <p className="mt-2 text-sm leading-relaxed text-slate-600 dark:text-night-300">
-              所有观看者会立即断开，房号作废，当前聊天记录也会清空。只想停画面请用「停止共享」，房间与聊天会保留。
+              {isViewing
+                ? '将断开与共享方的连接，当前聊天记录也会清空。只想停画面请用「停止观看」，房间与聊天会保留。'
+                : '所有观看者会立即断开，房号作废，当前聊天记录也会清空。只想停画面请用「停止共享」，房间与聊天会保留。'}
             </p>
             <div className="mt-5 flex justify-end gap-2">
               <button
@@ -825,7 +827,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                 取消
               </button>
               <button
-                onClick={() => { setShowEndConfirm(false); onEndRoom(); }}
+                onClick={() => { setShowEndConfirm(false); (isViewing ? stopViewing : onEndRoom)(); }}
                 className="inline-flex h-10 items-center justify-center rounded-full bg-red-600 px-4 text-sm font-bold text-white transition-colors hover:bg-red-700"
               >
                 结束并离开
