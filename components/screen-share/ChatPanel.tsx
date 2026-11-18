@@ -22,12 +22,42 @@ export interface ChatPanelProps {
   connectingHint?: string;
 }
 
-const formatClock = (ts: number): string => {
+export const formatClock = (ts: number): string => {
   const date = new Date(ts);
   if (Number.isNaN(date.getTime())) return '';
   const h = date.getHours();
   const m = date.getMinutes();
   return `${h < 10 ? `0${h}` : h}:${m < 10 ? `0${m}` : m}`;
+};
+
+/** 抽出输入处理，组件只负责绑定，便于在 Node 里直接测试。 */
+export const submitChatDraft = (
+  draft: string,
+  onSend: (text: string) => void,
+  setDraft: (text: string) => void
+): void => {
+  if (draft.trim().length === 0) return;
+  onSend(draft);
+  setDraft('');
+};
+
+export const handleDraftChange = (
+  setDraft: (text: string) => void,
+  event: React.ChangeEvent<HTMLInputElement>
+): void => {
+  setDraft(event.target.value);
+};
+
+export const handleDraftKeyDown = (
+  draft: string,
+  onSend: (text: string) => void,
+  setDraft: (text: string) => void,
+  event: React.KeyboardEvent<HTMLInputElement>
+): void => {
+  if (event.key === 'Enter' && !event.shiftKey) {
+    event.preventDefault();
+    submitChatDraft(draft, onSend, setDraft);
+  }
 };
 
 /**
@@ -54,13 +84,6 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
     const el = listRef.current;
     if (el) el.scrollTop = el.scrollHeight;
   }, [messages, open]);
-
-  const submit = () => {
-    const text = draft;
-    if (text.trim().length === 0) return;
-    onSend(text);
-    setDraft('');
-  };
 
   const shell = isViewer
     ? 'bg-[rgba(15,23,36,0.86)] text-night-100 ring-1 ring-white/10 shadow-2xl'
@@ -145,13 +168,8 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
       <div className={`flex items-center gap-2 border-t px-2 py-2 ${isViewer ? 'border-white/10' : 'border-slate-100'}`}>
         <input
           value={draft}
-          onChange={(event) => setDraft(event.target.value)}
-          onKeyDown={(event) => {
-            if (event.key === 'Enter' && !event.shiftKey) {
-              event.preventDefault();
-              submit();
-            }
-          }}
+          onChange={handleDraftChange.bind(null, setDraft)}
+          onKeyDown={handleDraftKeyDown.bind(null, draft, onSend, setDraft)}
           maxLength={2000}
           disabled={!connected}
           placeholder={connected ? '输入消息，回车发送' : '连接后即可聊天'}
@@ -159,7 +177,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         />
         <button
           type="button"
-          onClick={submit}
+          onClick={submitChatDraft.bind(null, draft, onSend, setDraft)}
           disabled={!connected || draft.trim().length === 0}
           aria-label="发送"
           className="inline-flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-brand-600 text-white transition-colors hover:bg-brand-700 disabled:cursor-not-allowed disabled:opacity-40"
