@@ -26,7 +26,7 @@ const trackedSources = (): string[] =>
     .filter((line) => !line.endsWith('.d.ts'));
 
 test('生产代码里的 as any 不得超过当轮上限，且分布必须与文档一致', () => {
-  const LIMIT = 16;
+  const LIMIT = 12;
   const files = trackedSources();
   const offenders = files
     .map((file) => ({ file, count: (readText(file).match(/\bas any\b/g) ?? []).length }))
@@ -38,16 +38,16 @@ test('生产代码里的 as any 不得超过当轮上限，且分布必须与文
     `as any 总数 ${total} 超过上限 ${LIMIT}：${offenders.map((entry) => `${entry.file}=${entry.count}`).join(', ')}`
   );
 
-  // 分布写进注释也写进断言：真正要拆的是 ScreenShare（11 处），不是"随便哪两个组件"。
+  // 分布写进注释也写进断言：真正要拆的是 ScreenShare（7 处），不是"随便哪两个组件"。
   const byFile = new Map(offenders.map((entry) => [entry.file, entry.count]));
-  assert.equal(byFile.get('components/ScreenShare.tsx') ?? 0, 11, 'ScreenShare 的 as any 数量变了，需同步更新文档');
+  assert.equal(byFile.get('components/ScreenShare.tsx') ?? 0, 7, 'ScreenShare 的 as any 数量变了，需同步更新文档');
   assert.equal(byFile.get('components/Sender.tsx') ?? 0, 2, 'Sender 的 as any 数量变了，需同步更新文档');
 });
 
 test('千行组件的体量不得超过当轮上限（只降不升）', () => {
   const limits: [string, number][] = [
     ['components/Receiver.tsx', 3367],
-    ['components/ScreenShare.tsx', 2955],
+    ['components/ScreenShare.tsx', 2900],
     ['components/Sender.tsx', 1670],
   ];
   for (const [file, limit] of limits) {

@@ -123,6 +123,10 @@ export const CONNECTION_TIMINGS = {
   SCREEN_SHARE_VIEWER_STATS_INTERVAL_MS: 5_000,
 } as const;
 
+// 分享方异常退出（崩溃、无 pagehide）时，观看端停在 waiting_stream 的兜底时长：
+// 超过后落终态并提示，而不是无限等一个永远不会回来的分享方。
+export const SCREEN_SHARE_VIEWER_WAIT_TERMINAL_MS = 20_000;
+
 // 屏幕共享走 P2P mesh：每个 viewer 一条独立 PC 和独立编码，发送端上行是 N 份。
 // 这里不引入 SFU，只做纯客户端的上行预算与人数上限，避免住宅/移动网络被瞬间打满。
 export const SCREEN_SHARE_LIMITS = {

@@ -27,6 +27,79 @@ export interface RoomChatApi {
   setRole: (role: 'sender' | 'viewer') => void;
 }
 
+/** 一条已接管的房间聊天连接及其监听器清理句柄。 */
+export interface RoomChatAttachment {
+  conn: DataConnection;
+  dispose: () => void;
+}
+
+/**
+ * 把一条 DataConnection 接到聊天会话上。
+ *
+ * 关键安全点：入站帧的可信来源固定取 `conn.peer`，而不是报文里的 fromPeerId；
+ * 这样限流/去重/展示都绑定真实连接身份，载荷无法冒名或绕过配额。
+ */
+export function linkRoomChatConnection(
+  conn: DataConnection,
+  session: ChatSession | null,
+  onChange: () => void,
+): RoomChatAttachment {
+  const onData = (raw: unknown) => {
+    session?.receive(raw, conn.peer);
+  };
+  const onOpen = () => onChange();
+  const onClose = () => onChange();
+  const onError = () => onChange();
+  conn.on('data', onData);
+  conn.on('open', onOpen);
+  conn.on('close', onClose);
+  conn.on('error', onError);
+  return {
+    conn,
+    dispose: () => {
+      conn.off('data', onData);
+      conn.off('open', onOpen);
+      conn.off('close', onClose);
+      conn.off('error', onError);
+      try {
+        conn.close();
+      } catch {
+        /* 已经关闭的连接不抛错，清理继续 */
+      }
+    },
+  };
+}
+
+export type RoomChatSendResult = 'sent' | 'not-connected' | 'invalid';
+
+export function hasOpenRoomChatConnection(connections: readonly RoomChatAttachment[]): boolean {
+  return connections.some((item) => item.conn.open);
+}
+
+export function disposeRoomChatConnections(connections: readonly RoomChatAttachment[]): void {
+  connections.forEach((item) => item.dispose());
+}
+
+/** 向所有 open 的房间连接广播一条消息；本地历史由 ChatSession.compose 写入。 */
+export function sendRoomChatText(
+  session: ChatSession | null,
+  connections: readonly RoomChatAttachment[],
+  text: string,
+): RoomChatSendResult {
+  const openConnections = connections.filter((item) => item.conn.open);
+  if (openConnections.length === 0) return 'not-connected';
+  const message = session?.compose(text) ?? null;
+  if (!message) return 'invalid';
+  openConnections.forEach((item) => {
+    try {
+      item.conn.send(message);
+    } catch {
+      /* 单条发送失败不影响其他连接与本地历史 */
+    }
+  });
+  return 'sent';
+}
+
 /**
  * 把「房间聊天」的传输与状态从组件里抽出来的独立 hook。
  * 传输逻辑（环形缓冲/去重/限流/导出）都在 chatCore，组件只拿这份命令面，
@@ -38,7 +111,7 @@ export function useRoomChat({ onNotify }: UseRoomChatOptions = {}): RoomChatApi 
   const [role, setRoleState] = useState<'sender' | 'viewer'>('sender');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const sessionRef = useRef<ChatSession | null>(null);
-  const connectionsRef = useRef<DataConnection[]>([]);
+  const connectionsRef = useRef<RoomChatAttachment[]>([]);
 
   useEffect(() => {
     const session = new ChatSession();
@@ -47,34 +120,29 @@ export function useRoomChat({ onNotify }: UseRoomChatOptions = {}): RoomChatApi 
     const unsubscribe = session.subscribe(() => setMessages(session.getMessages()));
     return () => {
       unsubscribe();
-      sessionRef.current = null;
+      disposeRoomChatConnections(connectionsRef.current);
       connectionsRef.current = [];
+      sessionRef.current = null;
     };
   }, []);
 
   const attachRoomConnection = useCallback((conn: DataConnection) => {
-    if (connectionsRef.current.includes(conn)) return;
-    connectionsRef.current.push(conn);
-    const session = sessionRef.current;
-    conn.on('data', (raw: unknown) => {
-      session?.receive(raw);
-    });
-    const syncConnected = () => {
-      setConnected(connectionsRef.current.some((item) => item.open));
-    };
-    if (conn.open) syncConnected();
-    conn.on('open', syncConnected);
-    conn.on('close', () => {
-      connectionsRef.current = connectionsRef.current.filter((item) => item !== conn);
+    if (connectionsRef.current.some((item) => item.conn === conn)) return;
+    const syncConnected = () => setConnected(hasOpenRoomChatConnection(connectionsRef.current));
+    const attachment = linkRoomChatConnection(conn, sessionRef.current, () => {
+      // close/error 后把死连接摘掉；open 时保留，connected 只看真正 open 的那几条。
+      connectionsRef.current = connectionsRef.current.filter(
+        (item) => item.conn !== conn || item.conn.open,
+      );
       syncConnected();
     });
-    conn.on('error', () => {
-      connectionsRef.current = connectionsRef.current.filter((item) => item !== conn);
-      syncConnected();
-    });
+    connectionsRef.current.push(attachment);
+    syncConnected();
   }, []);
 
   const reset = useCallback((nextRole: 'sender' | 'viewer') => {
+    // 旧连接必须真正 off + close，否则重新进房后旧通道还会把消息灌进新会话。
+    disposeRoomChatConnections(connectionsRef.current);
     sessionRef.current?.clear();
     connectionsRef.current = [];
     setConnected(false);
@@ -84,25 +152,9 @@ export function useRoomChat({ onNotify }: UseRoomChatOptions = {}): RoomChatApi 
 
   const send = useCallback(
     (text: string) => {
-      const session = sessionRef.current;
-      if (!session) return;
-      const openConnections = connectionsRef.current.filter((item) => item.open);
-      if (openConnections.length === 0) {
-        onNotify?.('聊天尚未连接', 'error');
-        return;
-      }
-      const message = session.compose(text);
-      if (!message) {
-        onNotify?.('消息为空或超过 2KB，未发送', 'error');
-        return;
-      }
-      openConnections.forEach((conn) => {
-        try {
-          conn.send(message);
-        } catch {
-          /* 单条发送失败不影响其他连接与本地历史 */
-        }
-      });
+      const result = sendRoomChatText(sessionRef.current, connectionsRef.current, text);
+      if (result === 'not-connected') onNotify?.('聊天尚未连接', 'error');
+      if (result === 'invalid') onNotify?.('消息为空或超过 2KB，未发送', 'error');
     },
     [onNotify]
   );

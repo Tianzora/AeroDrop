@@ -63,6 +63,11 @@ export function planRestartScreenShare(input: RestartScreenShareInput): RestartS
   };
 }
 
+export interface RemoteShareEndedInput {
+  /** true = 分享方是整个房间离开（window_closed），不是单纯停共享。 */
+  peerLeavingRoom?: boolean;
+}
+
 export interface RemoteShareEndedPlan {
   destroyPeer: boolean;
   closeRoomChat: boolean;
@@ -71,21 +76,27 @@ export interface RemoteShareEndedPlan {
   clearPersistedSession: boolean;
 }
 
-export function planRemoteShareEnded(): RemoteShareEndedPlan {
+export function planRemoteShareEnded(input: RemoteShareEndedInput = {}): RemoteShareEndedPlan {
+  const leaving = input.peerLeavingRoom === true;
   return {
-    destroyPeer: false,
-    closeRoomChat: false,
-    keepStreamRef: true,
-    pauseVideo: true,
-    clearPersistedSession: false,
+    destroyPeer: leaving,
+    closeRoomChat: leaving,
+    keepStreamRef: !leaving,
+    pauseVideo: !leaving,
+    clearPersistedSession: leaving,
   };
 }
 
+/**
+ * 停共享只摘视频轨，不要动音频：M2 语音复用同一条 PC，把 audio sender 一起
+ * replaceTrack(null) 会在画面暂停时顺带把人声静音。
+ */
 export function pauseActiveCallVideo(
   calls: ReadonlyArray<{ peerConnection: RTCPeerConnection | null }>,
 ): void {
   calls.forEach((call) => {
     call.peerConnection?.getSenders().forEach((sender) => {
+      if (sender.track?.kind === 'audio') return;
       void sender.replaceTrack(null);
     });
   });

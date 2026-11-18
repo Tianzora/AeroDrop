@@ -134,6 +134,55 @@ const openViewer = async (browser: Browser, shareLink: string, track?: string): 
   await viewer.goto(shareLink);
   return viewer;
 };
+/**
+ * 模拟「旧对端」：把 kind:'room' 的信令从 WebSocket 出站流量里丢掉。
+ *
+ * M1 的聊天通道是新增协议；旧版本只认识 data/media，遇到 room 不会建立通道。
+ * 这里在信令边界重现这点，验证新的一端在对方没有聊天能力时仍能正常传屏、
+ * 不抛未捕获异常（聊天面板显示未连接即可）。
+ */
+const blockRoomChatSignaling = async (page: Page): Promise<void> => {
+  await page.addInitScript(() => {
+    const nativeSend = WebSocket.prototype.send;
+    WebSocket.prototype.send = function patchedSend(
+      this: WebSocket,
+      data: string | ArrayBufferLike | Blob | ArrayBufferView
+    ) {
+      try {
+        if (typeof data === 'string') {
+          const message = JSON.parse(data) as { kind?: string };
+          if (message?.kind === 'room') return;
+        }
+      } catch {
+        /* 非 JSON 信令原样放过 */
+      }
+      return nativeSend.call(this, data);
+    } as typeof WebSocket.prototype.send;
+  });
+};
+
+const openChatPanel = async (page: Page): Promise<void> => {
+  const trigger = page.getByRole('button', { name: '打开聊天' });
+  if (await trigger.isVisible().catch(() => false)) await trigger.click();
+  await expect(page.getByRole('button', { name: '收起聊天' })).toBeVisible({ timeout: 10_000 });
+};
+
+const waitForChatConnected = async (page: Page): Promise<void> => {
+  await expect(page.getByText('已连接', { exact: true })).toBeVisible({ timeout: 30_000 });
+};
+
+const sendChatMessage = async (page: Page, text: string): Promise<void> => {
+  const input = page.getByPlaceholder('输入消息，回车发送');
+  await expect(input).toBeVisible({ timeout: 10_000 });
+  await input.fill(text);
+  await page.getByRole('button', { name: '发送' }).click();
+};
+
+const collectPageErrors = (page: Page): string[] => {
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  return errors;
+};
 
 
 /**
@@ -141,7 +190,7 @@ const openViewer = async (browser: Browser, shareLink: string, track?: string): 
  * 存在的函数，但「没有可采集的桌面」只会在调用时抛错。只有真抓到一帧才算支持。
  *
  * 本机开发者没有显示服务时允许 skip（否则本地/无头环境寸步难行）；但 CI 里
- * fake-capture flag（playwright.product.config.ts）一旦回归，12 条走 ensureDisplayCapture 的用例会整组 skip
+ * fake-capture flag（playwright.product.config.ts）一旦回归，17 条走 ensureDisplayCapture 的用例会整组 skip
  * 而 job 依旧全绿——所以 CI 下把探测结果当断言，必须为 true。
  */
 const ensureDisplayCapture = async (page: Page): Promise<void> => {
@@ -1045,6 +1094,232 @@ test.describe('screen share', () => {
     await page.waitForTimeout(1_500);
     await expect(message).toHaveCount(1);
     expect(await page.locator('body').innerText()).not.toContain('屏幕共享启动失败');
+  });
+
+  // M1 聊天：停止共享 = 只暂停画面，房间/聊天会话仍在；重新共享后画面恢复，
+  // 历史不能被清空（这正是「停共享 ≠ 结束房间」的端到端证据）。
+  test('chat survives stopping and restarting a share, and the viewer can rewatch', async ({
+    browser,
+    page,
+  }) => {
+    await page.goto('/');
+    await ensureDisplayCapture(page);
+    await startSharing(page);
+    const shareLink = await getShareLink(page);
+    const viewer = await openViewer(browser, shareLink);
+    try {
+      await dismissAutoplayOverlay(viewer);
+      await waitForViewerFrames(viewer);
+      await openChatPanel(page);
+      await openChatPanel(viewer);
+      await waitForChatConnected(page);
+      await waitForChatConnected(viewer);
+
+      await sendChatMessage(viewer, 'hello-from-viewer');
+      await expect(page.getByText('hello-from-viewer', { exact: true })).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(viewer.getByText('hello-from-viewer', { exact: true })).toBeVisible();
+
+      await page.getByRole('button', { name: '停止共享' }).click();
+      await expect(page.getByRole('button', { name: '开始共享屏幕' })).toBeVisible({
+        timeout: 20_000,
+      });
+      // share_stopped 之后聊天入口不能被一起收掉。
+      await expect(page.getByRole('button', { name: '收起聊天' })).toBeVisible();
+      await sendChatMessage(page, 'still-chatting-while-stopped');
+      await expect(viewer.getByText('still-chatting-while-stopped', { exact: true })).toBeVisible({
+        timeout: 15_000,
+      });
+
+      await page.getByRole('button', { name: '开始共享屏幕' }).click();
+      await expect(page.getByText('正在共享')).toBeVisible({ timeout: 20_000 });
+      const rewatch = viewer.getByRole('button', { name: '重新观看' });
+      await expect
+        .poll(
+          async () => {
+            if (await rewatch.isVisible().catch(() => false)) return 'rewatch';
+            return (await sampleVideos(viewer)).frames > 0 ? 'auto' : 'waiting';
+          },
+          { timeout: FRAME_TIMEOUT_MS, message: 'viewer neither auto-resumed nor offered rewatch' }
+        )
+        .not.toBe('waiting');
+      if (await rewatch.isVisible().catch(() => false)) await rewatch.click();
+      await dismissAutoplayOverlay(viewer);
+      const resumed = await waitForViewerFrames(viewer);
+      // 画面必须继续增长，不能只靠旧帧残留混过去。
+      await expect
+        .poll(async () => (await sampleVideos(viewer)).frames, {
+          timeout: 10_000,
+          message: 'viewer frames did not grow after the share resumed',
+        })
+        .toBeGreaterThan(resumed.frames);
+      await expect(viewer.getByText('still-chatting-while-stopped', { exact: true })).toBeVisible();
+      await sendChatMessage(viewer, 'after-rewatch');
+      await expect(page.getByText('after-rewatch', { exact: true })).toBeVisible({
+        timeout: 15_000,
+      });
+    } finally {
+      await viewer.context().close();
+    }
+  });
+
+  // 观看端两个按钮语义必须分开：琥珀「停止观看」只停画面且保留聊天；
+  // 红色「结束并离开」才清空房间聊天。
+  test('viewer stop-watching keeps chat while end-and-leave clears it', async ({ browser, page }) => {
+    await page.goto('/');
+    await ensureDisplayCapture(page);
+    await startSharing(page);
+    const shareLink = await getShareLink(page);
+    const viewer = await openViewer(browser, shareLink);
+    try {
+      await dismissAutoplayOverlay(viewer);
+      await waitForViewerFrames(viewer);
+      await openChatPanel(page);
+      await openChatPanel(viewer);
+      await waitForChatConnected(page);
+      await waitForChatConnected(viewer);
+      await sendChatMessage(page, 'before-stop-watching');
+      await expect(viewer.getByText('before-stop-watching', { exact: true })).toBeVisible({
+        timeout: 15_000,
+      });
+
+      await viewer.getByRole('button', { name: '停止观看' }).click();
+      await expect(viewer.getByRole('button', { name: '重新观看' })).toBeVisible({
+        timeout: 15_000,
+      });
+      await expect(viewer.getByText('before-stop-watching', { exact: true })).toBeVisible();
+      await sendChatMessage(viewer, 'chat-after-stop-watching');
+      await expect(page.getByText('chat-after-stop-watching', { exact: true })).toBeVisible({
+        timeout: 15_000,
+      });
+
+      await viewer.getByRole('button', { name: '重新观看' }).click();
+      await dismissAutoplayOverlay(viewer);
+      await waitForViewerFrames(viewer);
+      await sendChatMessage(viewer, 'chat-after-rewatch');
+      await expect(page.getByText('chat-after-rewatch', { exact: true })).toBeVisible({
+        timeout: 15_000,
+      });
+
+      await viewer.getByRole('button', { name: '结束并离开' }).click();
+      await expect(viewer.getByText('结束并离开？', { exact: true })).toBeVisible();
+      await viewer.getByRole('button', { name: '结束并离开' }).last().click();
+      await expect(viewer.getByText('chat-after-rewatch', { exact: true })).toHaveCount(0, {
+        timeout: 15_000,
+      });
+    } finally {
+      await viewer.context().close();
+    }
+  });
+
+  // 分享方异常退出（无 pagehide）时，观看端不能永远停在「正在等待屏幕画面」。
+  test('a viewer waiting for a crashed sharer lands on a terminal notice', async ({ browser, page }) => {
+    await page.addInitScript(() => {
+      // 模拟崩溃/被强杀：页面卸载时应用注册的 pagehide/beforeunload 不会执行，
+      // 因此对端收不到 window_closed，只能靠观看端自己的兜底。
+      const nativeAdd = window.addEventListener.bind(window);
+      window.addEventListener = ((
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+        options?: boolean | AddEventListenerOptions
+      ) => {
+        if (type === 'pagehide' || type === 'beforeunload') return;
+        return nativeAdd(type, listener, options);
+      }) as typeof window.addEventListener;
+    });
+    await page.goto('/');
+    await ensureDisplayCapture(page);
+    await startSharing(page);
+    const shareLink = await getShareLink(page);
+    const viewer = await openViewer(browser, shareLink);
+    try {
+      await dismissAutoplayOverlay(viewer);
+      await waitForViewerFrames(viewer);
+      await openChatPanel(page);
+      await openChatPanel(viewer);
+      await waitForChatConnected(page);
+      await waitForChatConnected(viewer);
+      await sendChatMessage(page, 'before-crash');
+      await expect(viewer.getByText('before-crash', { exact: true })).toBeVisible({
+        timeout: 15_000,
+      });
+
+      await page.getByRole('button', { name: '停止共享' }).click();
+      await expect(viewer.getByText('正在等待屏幕画面...', { exact: true })).toBeVisible({
+        timeout: 20_000,
+      });
+      // 硬关分享端：不再有 window_closed，也不会重新开始共享。
+      await page.close({ runBeforeUnload: false });
+
+      await expect(viewer.getByText('共享方长时间未恢复，屏幕共享已结束', { exact: true })).toBeVisible({
+        timeout: 35_000,
+      });
+      // 终态只结束等待画面，聊天入口与历史仍在。
+      await expect(viewer.getByRole('button', { name: '收起聊天' })).toBeVisible();
+      await expect(viewer.getByText('before-crash', { exact: true })).toBeVisible();
+    } finally {
+      await viewer.context().close();
+    }
+  });
+
+  // 旧×新双向矩阵（旧对端不认识 kind:'room'，聊天降级为未连接，但原传屏不受影响）。
+  test('a new viewer degrades gracefully when the sharer drops room-chat signaling', async ({
+    browser,
+    page,
+  }) => {
+    await blockRoomChatSignaling(page);
+    await page.goto('/');
+    await ensureDisplayCapture(page);
+    await startSharing(page);
+    const shareLink = await getShareLink(page);
+    const sharerErrors = collectPageErrors(page);
+    const viewer = await openViewer(browser, shareLink);
+    const viewerErrors = collectPageErrors(viewer);
+    try {
+      await dismissAutoplayOverlay(viewer);
+      await waitForViewerFrames(viewer);
+      await openChatPanel(viewer);
+      await expect(viewer.getByText('未连接', { exact: true })).toBeVisible({ timeout: 30_000 });
+      // 原共享/停止共享照旧可用。
+      await page.getByRole('button', { name: '停止共享' }).click();
+      await expect(page.getByRole('button', { name: '开始共享屏幕' })).toBeVisible({
+        timeout: 20_000,
+      });
+      expect(sharerErrors).toEqual([]);
+      expect(viewerErrors).toEqual([]);
+    } finally {
+      await viewer.context().close();
+    }
+  });
+
+  test('a new sharer keeps sharing when the viewer drops room-chat signaling', async ({ browser, page }) => {
+    await page.goto('/');
+    await ensureDisplayCapture(page);
+    await startSharing(page);
+    const shareLink = await getShareLink(page);
+    const sharerErrors = collectPageErrors(page);
+    const viewerContext = await browser.newContext();
+    const viewer = await viewerContext.newPage();
+    await blockRoomChatSignaling(viewer);
+    const viewerErrors = collectPageErrors(viewer);
+    try {
+      await viewer.goto(shareLink);
+      await dismissAutoplayOverlay(viewer);
+      const first = await waitForViewerFrames(viewer);
+      await openChatPanel(viewer);
+      await expect(viewer.getByText('未连接', { exact: true })).toBeVisible({ timeout: 30_000 });
+      await expect
+        .poll(async () => (await sampleVideos(viewer)).frames, {
+          timeout: 10_000,
+          message: 'viewer frames stopped growing when only chat signaling is unavailable',
+        })
+        .toBeGreaterThan(first.frames);
+      expect(sharerErrors).toEqual([]);
+      expect(viewerErrors).toEqual([]);
+    } finally {
+      await viewerContext.close();
+    }
   });
 
 })

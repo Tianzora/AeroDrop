@@ -271,8 +271,13 @@ export class ChatSession {
   /**
    * 处理一条入站原始帧：字符串先 JSON.parse，然后结构校验、字节上限、per-peer 限流、
    * 按 id 去重。任何一步不通过都返回 null（静默丢弃，不抛错）。
+   *
+   * sourcePeerId 由传输层按真实 DataConnection.peer 盖章，绝不信任报文里的
+   * fromPeerId——否则任何人都能冒名顶替或绕过 per-peer 配额。载荷里的 fromPeerId
+   * 只做结构占位，进入历史与限流前会被可信来源覆盖。
    */
-  receive(raw: unknown): ChatMessage | null {
+  receive(raw: unknown, sourcePeerId: string): ChatMessage | null {
+    if (typeof sourcePeerId !== 'string' || sourcePeerId.trim().length === 0) return null;
     let value: unknown = raw;
     if (typeof raw === 'string') {
       try {
@@ -283,12 +288,13 @@ export class ChatSession {
     }
     const message = normalizeChatMessage(value, this.maxTextLength);
     if (!message) return null;
+    message.fromPeerId = sourcePeerId;
     if (measureChatMessageBytes(message) > this.maxMessageBytes) return null;
     const now = this.now();
-    if (!this.limiter.allow(message.fromPeerId, now)) return null;
+    if (!this.limiter.allow(sourcePeerId, now)) return null;
     if (!this.history.add(message)) {
       // 重复帧不应占用限流额度：撤销刚才那一次计数。
-      this.limiter.forget(message.fromPeerId, now);
+      this.limiter.forget(sourcePeerId, now);
       return null;
     }
     this.notify();

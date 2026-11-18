@@ -67,25 +67,36 @@ test('远端 share-ended 只暂停画面：不 destroy peer、不关房间聊天
   assert.equal(plan.clearPersistedSession, false);
 });
 
-test('停共享把每条连接的所有 sender 都 replaceTrack(null)，不关闭连接', () => {
-  const released: Array<string | null> = [];
-  const makeSender = (label: string) => ({
+test('远端整房离开（window_closed）走全断：destroy peer、关聊天、清持久会话', () => {
+  const plan = planRemoteShareEnded({ peerLeavingRoom: true });
+
+  assert.equal(plan.destroyPeer, true);
+  assert.equal(plan.closeRoomChat, true);
+  assert.equal(plan.keepStreamRef, false);
+  assert.equal(plan.pauseVideo, false);
+  assert.equal(plan.clearPersistedSession, true);
+});
+
+test('停共享只把 video sender replaceTrack(null)，跳过 audio 轨', () => {
+  const released: Array<{ label: string; kind: string } | null> = [];
+  const makeSender = (label: string, kind: string) => ({
+    track: { kind },
     replaceTrack: async (track: MediaStreamTrack | null) => {
-      released.push(track === null ? null : `${label}:${track.kind}`);
+      released.push(track === null ? null : { label, kind: track.kind });
     },
   });
   const callA = {
     peerConnection: {
-      getSenders: () => [makeSender('a-video'), makeSender('a-audio')],
+      getSenders: () => [makeSender('a-video', 'video'), makeSender('a-audio', 'audio')],
     } as unknown as RTCPeerConnection,
   };
   const callB = {
     peerConnection: {
-      getSenders: () => [makeSender('b-video')],
+      getSenders: () => [makeSender('b-video', 'video'), makeSender('b-audio', 'audio')],
     } as unknown as RTCPeerConnection,
   };
 
   pauseActiveCallVideo([callA, callB]);
 
-  assert.deepEqual(released, [null, null, null]);
+  assert.deepEqual(released, [null, null]);
 });

@@ -23,6 +23,9 @@ interface ScreenShareUIProps {
   stopViewing: () => void;
   /** 观看端「停止观看」（琥珀）：本地停收画面但保留房间与聊天；与 stopViewing（结束并离开）语义分开。 */
   onViewerStopWatching: () => void;
+  /** 停止观看后对方仍在共享：显示「重新观看」，只重接画面、不动聊天。 */
+  canViewerRewatch: boolean;
+  onViewerRewatch: () => void;
 
   /** 房间聊天浮层的展示状态与回调，由 ScreenShare 提供。 */
   chat: {
@@ -84,6 +87,8 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   onViewerPlayClick,
   stopViewing,
   onViewerStopWatching,
+  canViewerRewatch,
+  onViewerRewatch,
   chat,
   qualityLabels,
   remoteQuality,
@@ -523,7 +528,18 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
 
         {!isViewing && !isConnecting && (
           <>
-
+            {canViewerRewatch && (
+              <div className="mb-4 flex flex-col items-start gap-2 rounded-card border border-white/20 bg-white/10 p-4">
+                <p className="text-sm text-white/80">你已停止观看画面，聊天仍保持连接。</p>
+                <button
+                  onClick={onViewerRewatch}
+                  className="inline-flex h-10 items-center justify-center gap-2 rounded-full bg-brand-600 px-5 text-sm font-semibold text-white transition-colors hover:bg-brand-700"
+                >
+                  <RefreshCw size={16} />
+                  重新观看
+                </button>
+              </div>
+            )}
 
             {sharerFailure && !isSharing && (
               /* 信令终态：不能只弹 toast。绿色 LIVE 消失、预览停止、链接作废，

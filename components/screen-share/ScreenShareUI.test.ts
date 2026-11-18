@@ -26,6 +26,8 @@ const baseProps: React.ComponentProps<typeof ScreenShareUI> = {
   onViewerPlayClick: () => {},
   stopViewing: () => {},
   onViewerStopWatching: () => {},
+  canViewerRewatch: false,
+  onViewerRewatch: () => {},
   chat: {
     role: 'viewer' as const,
     open: false,
