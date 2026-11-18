@@ -10,6 +10,23 @@ import { logDebug } from '../diagnostics';
 
 type QualityLevel = ScreenShareQualityLevel;
 
+interface RtcStatsLike extends RTCStats {
+  kind?: string;
+  mediaType?: string;
+  isRemote?: boolean;
+  selectedCandidatePairId?: string;
+  selected?: boolean;
+  nominated?: boolean;
+  state?: string;
+  localCandidateId?: string;
+  remoteCandidateId?: string;
+  remoteId?: string;
+  bytesSent?: number;
+  packetsSent?: number;
+  packetsLost?: number;
+  candidateType?: string;
+}
+
 export interface BandwidthMonitorEntry {
   timer: ReturnType<typeof setInterval>;
   pc: RTCPeerConnection;
@@ -65,43 +82,47 @@ export function startBandwidthMonitoring(call: MediaConnection, deps: BandwidthM
         let currentBytesSent = 0;
         let packetsLost = 0;
         let packetsSent = 0;
-        const outboundCandidates: any[] = [];
-        const remoteInboundCandidates: any[] = [];
+        const outboundCandidates: RtcStatsLike[] = [];
+        const remoteInboundCandidates: RtcStatsLike[] = [];
 
-        stats.forEach((report: any) => {
-          const mediaKind = report.kind || report.mediaType;
-          if (report.type === 'outbound-rtp' && mediaKind === 'video' && !report.isRemote) {
-            outboundCandidates.push(report);
+        stats.forEach((report) => {
+          const typed = report as RtcStatsLike;
+          const mediaKind = typed.kind || typed.mediaType;
+          if (typed.type === 'outbound-rtp' && mediaKind === 'video' && !typed.isRemote) {
+            outboundCandidates.push(typed);
           }
-          if (report.type === 'remote-inbound-rtp' && mediaKind === 'video') {
-            remoteInboundCandidates.push(report);
+          if (typed.type === 'remote-inbound-rtp' && mediaKind === 'video') {
+            remoteInboundCandidates.push(typed);
           }
         });
 
-        let selectedPair: any = null;
-        stats.forEach((report: any) => {
+        let selectedPair: RtcStatsLike | null = null;
+        stats.forEach((report) => {
           if (selectedPair) return;
-          if (report.type === 'transport' && report.selectedCandidatePairId) {
-            selectedPair = stats.get(report.selectedCandidatePairId) || null;
+          const typed = report as RtcStatsLike;
+          if (typed.type === 'transport' && typed.selectedCandidatePairId) {
+            selectedPair = (stats.get(typed.selectedCandidatePairId) as RtcStatsLike | undefined) || null;
           }
         });
         if (!selectedPair) {
-          stats.forEach((report: any) => {
+          stats.forEach((report) => {
             if (selectedPair) return;
+            const typed = report as RtcStatsLike;
             if (
-              report.type === 'candidate-pair' &&
-              (report.selected === true || (report.nominated === true && report.state === 'succeeded'))
+              typed.type === 'candidate-pair' &&
+              (typed.selected === true || (typed.nominated === true && typed.state === 'succeeded'))
             ) {
-              selectedPair = report;
+              selectedPair = typed;
             }
           });
         }
-        if (selectedPair) {
-          const localCandidate = selectedPair.localCandidateId
-            ? stats.get(selectedPair.localCandidateId) as any
+        const pair = selectedPair as RtcStatsLike | null;
+        if (pair) {
+          const localCandidate = pair.localCandidateId
+            ? (stats.get(pair.localCandidateId) as RtcStatsLike | undefined)
             : null;
-          const remoteCandidate = selectedPair.remoteCandidateId
-            ? stats.get(selectedPair.remoteCandidateId) as any
+          const remoteCandidate = pair.remoteCandidateId
+            ? (stats.get(pair.remoteCandidateId) as RtcStatsLike | undefined)
             : null;
           const localType = localCandidate?.candidateType as string | undefined;
           const remoteType = remoteCandidate?.candidateType as string | undefined;
@@ -119,14 +140,14 @@ export function startBandwidthMonitoring(call: MediaConnection, deps: BandwidthM
             const bestBytes = typeof best?.bytesSent === 'number' ? best.bytesSent : -1;
             const itemBytes = typeof item?.bytesSent === 'number' ? item.bytesSent : -1;
             return itemBytes > bestBytes ? item : best;
-          }, outboundCandidates[0] as any);
+          }, outboundCandidates[0]);
 
           currentBytesSent = selectedOutbound?.bytesSent || 0;
           packetsSent = selectedOutbound?.packetsSent || 0;
 
           const linkedRemoteId = selectedOutbound?.remoteId;
           if (linkedRemoteId && stats.has(linkedRemoteId)) {
-            const linkedRemote = stats.get(linkedRemoteId) as any;
+            const linkedRemote = stats.get(linkedRemoteId) as RtcStatsLike | undefined;
             if (linkedRemote && linkedRemote.type === 'remote-inbound-rtp') {
               packetsLost = linkedRemote.packetsLost || 0;
             }
