@@ -228,7 +228,7 @@ const collectPageErrors = (page: Page): string[] => {
  * 存在的函数，但「没有可采集的桌面」只会在调用时抛错。只有真抓到一帧才算支持。
  *
  * 本机开发者没有显示服务时允许 skip（否则本地/无头环境寸步难行）；但 CI 里
- * fake-capture flag（playwright.product.config.ts）一旦回归，16 条走 ensureDisplayCapture 的用例会整组 skip
+ * fake-capture flag（playwright.product.config.ts）一旦回归，17 条走 ensureDisplayCapture 的用例会整组 skip
  * 而 job 依旧全绿——所以 CI 下把探测结果当断言，必须为 true。
  */
 const ensureDisplayCapture = async (page: Page): Promise<void> => {
@@ -1159,7 +1159,9 @@ test.describe('screen share', () => {
       await expect(viewer.getByText('hello-from-viewer', { exact: true })).toBeVisible();
 
       await page.getByRole('button', { name: '停止共享' }).click();
-      await expect(page.getByText('共享已暂停', { exact: true })).toBeVisible({ timeout: 20_000 });
+      await expect(page.getByText('还没有人共享屏幕', { exact: true })).toBeVisible({
+        timeout: 20_000,
+      });
       await expect(page.getByRole('button', { name: '开始共享' })).toBeVisible({
         timeout: 20_000,
       });
@@ -1185,6 +1187,56 @@ test.describe('screen share', () => {
       await expect(viewer.getByText('still-chatting-while-stopped', { exact: true })).toBeVisible();
       await sendChatMessage(viewer, 'after-rewatch');
       await expect(page.getByText('after-rewatch', { exact: true })).toBeVisible({
+        timeout: 15_000,
+      });
+    } finally {
+      await viewer.context().close();
+    }
+  });
+
+  // 房间内任意成员都能接替共享：B 点「顶替共享」先弹确认；确认前 A 仍在共享，
+  // 确认后 A 被切为观看并收到提示，聊天全程不断。
+  test('a watching member can take over the share after confirming, and chat stays online', async ({
+    browser,
+    page,
+  }) => {
+    test.slow();
+    await page.goto('/');
+    await ensureDisplayCapture(page);
+    await startSharing(page);
+    const shareLink = await getShareLink(page);
+    const viewer = await openChatViewerWithFrames(() => openViewer(browser, shareLink));
+    try {
+      await openChatPanel(page);
+      await openChatPanel(viewer);
+      await waitForChatConnected(page);
+      await waitForChatConnected(viewer);
+      await sendChatMessage(viewer, 'before-takeover');
+      await expect(page.getByText('before-takeover', { exact: true })).toBeVisible({
+        timeout: 15_000,
+      });
+
+      await viewer.getByRole('button', { name: '顶替共享' }).click();
+      await expect(viewer.getByText('接替对方的共享？', { exact: true })).toBeVisible();
+      // 未确认前不能发生静默抢占。
+      await expect(page.getByText('正在共享')).toBeVisible();
+
+      await viewer.getByRole('button', { name: '确认接替' }).click();
+      await expect(viewer.getByText('正在共享')).toBeVisible({ timeout: 20_000 });
+      await expect(
+        page.getByText('共享已被其他成员接替，已转为观看', { exact: true })
+      ).toBeVisible({ timeout: 20_000 });
+      await expect(page.getByText('观看屏幕', { exact: true })).toBeVisible({ timeout: 20_000 });
+      await dismissAutoplayOverlay(page);
+      await waitForViewerFrames(page);
+
+      // 共享槽换人只影响画面，聊天两个方向都还在。
+      await sendChatMessage(page, 'host-after-takeover');
+      await expect(viewer.getByText('host-after-takeover', { exact: true })).toBeVisible({
+        timeout: 15_000,
+      });
+      await sendChatMessage(viewer, 'viewer-after-takeover');
+      await expect(page.getByText('viewer-after-takeover', { exact: true })).toBeVisible({
         timeout: 15_000,
       });
     } finally {

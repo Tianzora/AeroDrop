@@ -16,6 +16,8 @@ export interface RoomChatUi {
 
 export interface UseRoomChatOptions {
   onNotify?: (message: string, type: 'success' | 'info' | 'error') => void;
+  /** 房间控制帧（共享槽信令）旁路；聊天文本仍走 ChatSession.receive。 */
+  onControl?: (message: unknown, sourcePeerId: string) => void;
 }
 
 /** 供 ScreenShare 调用的命令面：连接接入、按房间重置、设置本端 id / 角色。 */
@@ -25,6 +27,8 @@ export interface RoomChatApi {
   reset: (role: 'sender' | 'viewer') => void;
   setLocalPeerId: (peerId: string) => void;
   setRole: (role: 'sender' | 'viewer') => void;
+  /** 向所有 open 的 room 连接广播共享槽控制帧；返回是否至少发给一条连接。 */
+  sendControl: (message: unknown) => boolean;
 }
 
 /** 一条已接管的房间聊天连接及其监听器清理句柄。 */
@@ -43,8 +47,20 @@ export function linkRoomChatConnection(
   conn: DataConnection,
   session: ChatSession | null,
   onChange: () => void,
+  onControl?: (message: unknown, sourcePeerId: string) => void,
 ): RoomChatAttachment {
   const onData = (raw: unknown) => {
+    // 控制帧一定带 type，聊天消息一定带 text；控制帧不进聊天环形缓冲/限流。
+    if (
+      onControl &&
+      raw !== null &&
+      typeof raw === 'object' &&
+      typeof (raw as { type?: unknown }).type === 'string' &&
+      !('text' in raw)
+    ) {
+      onControl(raw, conn.peer);
+      return;
+    }
     session?.receive(raw, conn.peer);
   };
   const onOpen = () => onChange();
@@ -98,6 +114,23 @@ export function pruneRoomChatConnections(
   return alive;
 }
 
+/** 向所有 open 的 room 连接广播一条共享槽控制帧；不写聊天历史、不计聊天限流。 */
+export function sendRoomControl(
+  connections: readonly RoomChatAttachment[],
+  message: unknown,
+): boolean {
+  const openConnections = connections.filter((item) => item.conn.open);
+  if (openConnections.length === 0) return false;
+  openConnections.forEach((item) => {
+    try {
+      item.conn.send(message);
+    } catch {
+      /* 单条发送失败不影响其他连接 */
+    }
+  });
+  return true;
+}
+
 /** 向所有 open 的房间连接广播一条消息；本地历史由 ChatSession.compose 写入。 */
 export function sendRoomChatText(
   session: ChatSession | null,
@@ -123,13 +156,17 @@ export function sendRoomChatText(
  * 传输逻辑（环形缓冲/去重/限流/导出）都在 chatCore，组件只拿这份命令面，
  * 不把 DataChannel 细节堆进 components/。
  */
-export function useRoomChat({ onNotify }: UseRoomChatOptions = {}): RoomChatApi {
+export function useRoomChat({ onNotify, onControl }: UseRoomChatOptions = {}): RoomChatApi {
   const [open, setOpen] = useState(false);
   const [connected, setConnected] = useState(false);
   const [role, setRoleState] = useState<'sender' | 'viewer'>('sender');
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const sessionRef = useRef<ChatSession | null>(null);
   const connectionsRef = useRef<RoomChatAttachment[]>([]);
+  const onControlRef = useRef(onControl);
+  useEffect(() => {
+    onControlRef.current = onControl;
+  }, [onControl]);
 
   useEffect(() => {
     const session = new ChatSession();
@@ -147,11 +184,16 @@ export function useRoomChat({ onNotify }: UseRoomChatOptions = {}): RoomChatApi 
   const attachRoomConnection = useCallback((conn: DataConnection) => {
     if (connectionsRef.current.some((item) => item.conn === conn)) return;
     const syncConnected = () => setConnected(hasOpenRoomChatConnection(connectionsRef.current));
-    const attachment = linkRoomChatConnection(conn, sessionRef.current, () => {
-      // close/error 后把死连接连监听一起摘掉；open 时保留，connected 只看真正 open 的那几条。
-      connectionsRef.current = pruneRoomChatConnections(connectionsRef.current);
-      syncConnected();
-    });
+    const attachment = linkRoomChatConnection(
+      conn,
+      sessionRef.current,
+      () => {
+        // close/error 后把死连接连监听一起摘掉；open 时保留，connected 只看真正 open 的那几条。
+        connectionsRef.current = pruneRoomChatConnections(connectionsRef.current);
+        syncConnected();
+      },
+      (message, sourcePeerId) => onControlRef.current?.(message, sourcePeerId),
+    );
     connectionsRef.current.push(attachment);
     syncConnected();
   }, []);
@@ -176,6 +218,10 @@ export function useRoomChat({ onNotify }: UseRoomChatOptions = {}): RoomChatApi 
     },
     [onNotify]
   );
+
+  const sendControl = useCallback((message: unknown) => {
+    return sendRoomControl(connectionsRef.current, message);
+  }, []);
 
   const exportTranscript = useCallback(() => {
     const text = sessionRef.current?.exportTranscript() ?? '';
@@ -212,5 +258,5 @@ export function useRoomChat({ onNotify }: UseRoomChatOptions = {}): RoomChatApi 
     [role, open, connected, messages, send, exportTranscript]
   );
 
-  return { ui, attachRoomConnection, reset, setLocalPeerId, setRole: setRoleState };
+  return { ui, attachRoomConnection, reset, setLocalPeerId, setRole: setRoleState, sendControl };
 }

@@ -32,6 +32,12 @@ interface ScreenShareUIProps {
   viewerSharePaused?: boolean;
   /** 观看端正在同一容器内自动重连画面（无按钮，仅状态提示）。 */
   viewerReconnecting?: boolean;
+  /** 房间级共享槽当前 active 的 peerId；null = 空闲。 */
+  shareSlotActiveId?: string | null;
+  /** 本端 peerId：判断当前 active 是否是自己。 */
+  localPeerId?: string | null;
+  /** 观看端在「他人共享中」发起顶替（UI 已做二次确认）。 */
+  onTakeoverShare?: () => void;
 
   /** 房间聊天浮层的展示状态与回调，由 ScreenShare 提供。 */
   chat: {
@@ -97,6 +103,9 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   onResumeShare,
   viewerSharePaused = false,
   viewerReconnecting = false,
+  shareSlotActiveId = null,
+  localPeerId = null,
+  onTakeoverShare,
   chat,
   qualityLabels,
   remoteQuality,
@@ -122,8 +131,15 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   // 链接可用 = 信令就绪 且 房号没过期。任一不成立，这个链接就指向一个连不上的分享。
   const linkUsable = isShareLive && !shareRoomExpired;
   // 只要还在房间里，就保持共享工具条/聊天入口，而不是退回大标题落地页。
-  const isViewerSession = isViewing || Boolean(targetSharerId) || viewerSharePaused;
+  const isViewerSession =
+    isViewing || Boolean(targetSharerId) || viewerSharePaused || Boolean(shareSlotActiveId);
   const inRoomShell = isSharing || isViewerSession || roomRetained || sharePaused;
+  // 房间共享槽：active 是别人 → watching（可顶替）；没有 active 且不在收流/连接 → idle。
+  const slotActiveIsOther = Boolean(
+    shareSlotActiveId && localPeerId && shareSlotActiveId !== localPeerId,
+  );
+  const slotIdle =
+    inRoomShell && !isSharing && !isViewing && !isConnecting && !viewerSharePaused && !slotActiveIsOther;
   const reduceMotion = useReducedMotion();
 
   // 观看端建连的四个阶段：把「系统正在做什么」摊成一条可见的进度轨，
@@ -143,6 +159,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   const [pipSupported, setPipSupported] = useState(false);
   const [viewerPip, setViewerPip] = useState(false);
   const [showEndConfirm, setShowEndConfirm] = useState(false);
+  const [showTakeoverConfirm, setShowTakeoverConfirm] = useState(false);
 
   const attachViewerVideo = useCallback(
     (element: HTMLVideoElement | null) => {
@@ -611,6 +628,25 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
           </>
         )}
 
+        {slotActiveIsOther && (
+          <div className="mb-4 flex items-center gap-2">
+            <button
+              onClick={() => setShowTakeoverConfirm(true)}
+              className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full border border-amber-700/20 bg-amber-50 px-4 text-sm font-bold text-amber-700 transition-colors motion-fast hover:bg-amber-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300 active:scale-[0.985]"
+            >
+              <MonitorUp size={18} />
+              顶替共享
+            </button>
+            <button
+              onClick={() => setShowEndConfirm(true)}
+              className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-full border border-red-200 bg-white px-4 text-sm font-bold text-red-600 transition-ui motion-fast hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300 active:scale-[0.985]"
+            >
+              <LogOut size={18} />
+              结束并离开
+            </button>
+          </div>
+        )}
+
         {!isViewing && !isConnecting && (
           <>
             {sharerFailure && !isSharing && (
@@ -833,6 +869,42 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               </div>
             )}
 
+            {slotIdle && (
+              <>
+                <div
+                  role="status"
+                  aria-live="polite"
+                  className="relative mb-4 aspect-video overflow-hidden rounded-card border border-slate-200 bg-slate-100"
+                >
+                  <div className="absolute inset-0 flex flex-col items-center justify-center px-6 text-center">
+                    <div className="mb-3 inline-flex h-12 w-12 items-center justify-center rounded-control bg-white text-slate-500 ring-1 ring-slate-200">
+                      <Monitor size={24} />
+                    </div>
+                    <p className="text-base font-bold text-slate-900">还没有人共享屏幕</p>
+                    <p className="mt-1 max-w-sm text-sm text-slate-500">
+                      房间、聊天和语音都还在，任何人都可以开始共享。
+                    </p>
+                  </div>
+                </div>
+                <div className="mb-4 flex items-center gap-2">
+                  <button
+                    onClick={startScreenShare}
+                    className="inline-flex h-12 flex-1 items-center justify-center gap-2 rounded-full bg-brand-600 px-4 text-sm font-bold text-white transition-colors motion-fast hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 active:scale-[0.985]"
+                  >
+                    <Play size={18} fill="currentColor" />
+                    开始共享
+                  </button>
+                  <button
+                    onClick={() => setShowEndConfirm(true)}
+                    className="inline-flex h-12 shrink-0 items-center justify-center gap-2 rounded-full border border-red-200 bg-white px-4 text-sm font-bold text-red-600 transition-ui motion-fast hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-300 active:scale-[0.985]"
+                  >
+                    <LogOut size={18} />
+                    结束并离开
+                  </button>
+                </div>
+              </>
+            )}
+
             {/* 终态卡里已经有「重新开始共享」：同一屏再放一颗「开始共享屏幕」是重复 CTA。
                 观看端（targetSharerId 还在）也只该重试/取消，不能出现发送端的「开始共享屏幕」。 */}
             {!isSharing && !sharePaused && !sharerFailure && !targetSharerId && !roomRetained && (
@@ -918,6 +990,50 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
           />
         )}
       </div>
+      {showTakeoverConfirm &&
+        createPortal(
+          <div
+            className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/55 p-4"
+            role="dialog"
+            aria-modal="true"
+            aria-labelledby="takeover-confirm-title"
+            onKeyDown={(event) => {
+              if (event.key === 'Escape') {
+                event.stopPropagation();
+                setShowTakeoverConfirm(false);
+              }
+            }}
+          >
+            <div className="w-full max-w-sm rounded-card bg-white p-6 shadow-card ring-1 ring-slate-200/70">
+              <div className="mb-4 inline-flex h-11 w-11 items-center justify-center rounded-control bg-amber-50 text-amber-700">
+                <MonitorUp size={20} />
+              </div>
+              <h3 id="takeover-confirm-title" className="text-lg font-bold text-slate-900">
+                接替对方的共享？
+              </h3>
+              <p className="mt-2 text-sm leading-relaxed text-slate-600">
+                确认后，对方会立即停止共享并转为观看；聊天和语音不会中断。
+              </p>
+              <div className="mt-5 flex justify-end gap-2">
+                <button
+                  autoFocus
+                  onClick={() => setShowTakeoverConfirm(false)}
+                  className="inline-flex h-10 items-center justify-center rounded-full px-4 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-100 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
+                >
+                  取消
+                </button>
+                <button
+                  onClick={() => { setShowTakeoverConfirm(false); onTakeoverShare?.(); }}
+                  className="inline-flex h-10 items-center justify-center rounded-full bg-amber-700 px-4 text-sm font-bold text-white transition-colors hover:bg-amber-800 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-amber-300"
+                >
+                  确认接替
+                </button>
+              </div>
+            </div>
+          </div>,
+          document.body
+        )}
+
       {showEndConfirm &&
         createPortal(
           <div

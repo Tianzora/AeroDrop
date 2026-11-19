@@ -11,6 +11,7 @@ import {
   linkRoomChatConnection,
   pruneRoomChatConnections,
   sendRoomChatText,
+  sendRoomControl,
   useRoomChat,
   type RoomChatApi,
 } from './useRoomChat.ts';
@@ -38,7 +39,7 @@ test('useRoomChat 默认给出关闭态、未连接、空历史的发送端浮�
 
 test('useRoomChat 暴露连接接入、重置与身份设置四条命令', () => {
   const { api } = renderProbe();
-  const surface: Array<keyof RoomChatApi> = ['attachRoomConnection', 'reset', 'setLocalPeerId', 'setRole'];
+  const surface: Array<keyof RoomChatApi> = ['attachRoomConnection', 'reset', 'setLocalPeerId', 'setRole', 'sendControl'];
   for (const key of surface) {
     assert.equal(typeof api[key], 'function', `${key} 必须是可调用函数`);
   }
@@ -171,6 +172,43 @@ test('useRoomChat 行为：死连接被摘除时同时 off 监听，避免旧通
   assert.equal(conn.listenerCount('open'), 0);
   assert.equal(conn.listenerCount('close'), 0);
   assert.equal(conn.listenerCount('error'), 0);
+});
+
+test('useRoomChat 控制帧：share-request 被旁路到 onControl，不进聊天历史', () => {
+  const session = new ChatSession({ rateLimitMaxMessages: 100, rateLimitWindowMs: 10_000, now: () => 1 });
+  const conn = new FakeRoomConnection();
+  const controls: Array<{ message: unknown; sourcePeerId: string }> = [];
+  linkRoomChatConnection(
+    conn as unknown as Parameters<typeof linkRoomChatConnection>[0],
+    session,
+    () => {},
+    (message, sourcePeerId) => controls.push({ message, sourcePeerId }),
+  );
+
+  conn.emit('data', { type: 'share-request', action: 'start' });
+  assert.equal(controls.length, 1);
+  assert.deepEqual(controls[0].message, { type: 'share-request', action: 'start' });
+  assert.equal(controls[0].sourcePeerId, 'peer-42');
+  assert.equal(session.getMessages().length, 0);
+
+  conn.emit('data', JSON.stringify({ id: 'c1', fromPeerId: 'x', ts: 1, text: 'hi' }));
+  assert.equal(session.getMessages().length, 1);
+  assert.equal(controls.length, 1);
+});
+
+test('useRoomChat 控制帧：sendRoomControl 广播给所有 open 连接', () => {
+  const first = new FakeRoomConnection();
+  const second = new FakeRoomConnection();
+  const attachments = [
+    linkRoomChatConnection(first as unknown as Parameters<typeof linkRoomChatConnection>[0], null, () => {}),
+    linkRoomChatConnection(second as unknown as Parameters<typeof linkRoomChatConnection>[0], null, () => {}),
+  ];
+  assert.equal(sendRoomControl(attachments, { type: 'share-state', activeSharerId: null }), true);
+  assert.equal(first.sent.length, 1);
+  assert.equal(second.sent.length, 1);
+  first.open = false;
+  assert.equal(sendRoomControl(attachments, { type: 'share-state', activeSharerId: 'x' }), true);
+  assert.equal(second.sent.length, 2);
 });
 
 test('useRoomChat 行为：连接 close 后 connected 判定变为 false', () => {

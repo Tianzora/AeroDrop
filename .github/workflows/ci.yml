@@ -52,7 +52,7 @@ jobs:
   # 而且先撞上的是「≤3 条」的条目上限。
   # 为什么不放在 verify 里：verify 是 e2e / e2e-product 的前置（`needs: verify`）。这个
   # job 的红绿取决于白名单预算，一旦有人再往白名单里塞文件（或把上限改小）它就是红的；
-  # 把它塞进 verify 会连带让浏览器用例（含 19 条屏幕共享）整批跳过，那正好抵消了把
+  # 把它塞进 verify 会连带让浏览器用例（含 20 条屏幕共享）整批跳过，那正好抵消了把
   # screenshare E2E 接进 CI 的意义。独立 job 的好处是：红灯一眼看得到，其余 job 照常跑。
   coverage-components:
     name: 'coverage gate (components, allowlist budget)'
@@ -80,8 +80,8 @@ jobs:
       # 测试加载它们；渲染依赖真实 WebRTC/采集能力）三个登记为白名单并写明理由；
       # ErrorBoundary 与 PWAInstallPrompt 由 scripts/component-import-smoke.test.ts 拉进分母。
       # 白名单还有机械预算：≤3 条、被排除行数 ≤ 本 scope 总行数的 80%。当前实测
-      # 7859/10872 行 = 72.29%，**刚好在预算内（余量约 838 行）**，所以这一步现在是绿的；
-      # 但白名单把两个最大的状态机（ScreenShare 2822 行、Sender 1670 行）整块挪出分母后，
+      # 8237/11366 行 = 72.47%，现在实测 72.47% ≤ 80% 上限（余量约 855 行），所以这一步现在是绿的；
+      # 但白名单把两个最大的状态机（ScreenShare 3200 行、Sender 1670 行）整块挪出分母后，
       # 「组件 60%」实际上只覆盖 1/4 的代码 —— 上限存在的意义是「再挪一个中等文件进来就
       # 红」，而不是给现状背书。负对照：把 maxExcludedLineShare 临时改 0.7 → 这一步 exit 1；
       # 往白名单里加第 4 条 → 条目上限先红。解除方式是（按代价从低到高）把可测的状态机逻辑
@@ -173,7 +173,7 @@ jobs:
 
       # test:e2e:product-transfer = `npm run build` + `wrangler dev`(:8787) + playwright
       # --config=playwright.product.config.ts，覆盖 product-transfer.spec.ts（3 条：SEO 元数据、
-      # 2 MiB 真实传输、口令撤销宽限恢复）与 screenshare.spec.ts（19 条：分享/观看帧增长、
+      # 2 MiB 真实传输、口令撤销宽限恢复）与 screenshare.spec.ts（20 条：分享/观看帧增长、
       # 信令被拒终态、登记限流、瞬时失败恢复、卡住终态、房号过期、停止后立即重启、观众媒体失败、
       # 无活跃分享者的死链终态、第 7 位观众满员提示）。屏幕共享用 Chromium 的 fake display capture（flag 见
       # playwright.product.config.ts），因此 runner 上不需要 X server 或真实屏幕。

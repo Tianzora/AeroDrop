@@ -90,6 +90,7 @@ import { planShareRoomExpiryCheck } from '../services/screenShare/shareRoomExpir
 import { describeRetryCooldown } from '../services/screenShare/retryCooldown';
 import { createShareStartNotice } from '../services/screenShare/shareStartNotice';
 import { pauseActiveCallVideo, planRemoteShareEnded, planRestartScreenShare, planStopScreenShare } from '../services/screenShare/roomShareLifecycle';
+import { createRoomShareLeave, createRoomShareRequest, createRoomShareState, isRoomShareControl, planRoomShareRequest, type RoomShareRequestAction } from '../services/screenShare/roomShareControl';
 import { startBandwidthMonitoring as startRoomBandwidthMonitoring } from '../services/screenShare/bandwidthMonitor';
 
 interface ScreenShareProps {
@@ -131,6 +132,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   // 共享/观看/建连中切走页面会直接结束画面：这几种状态都禁用侧滑切换。
   const isBusyForNavigation = isSharing || isViewing || isConnecting;
   useEffect(() => {
+    isSharingRef.current = isSharing;
+  }, [isSharing]);
+  useEffect(() => {
     onBusyChange?.(isBusyForNavigation);
   }, [isBusyForNavigation, onBusyChange]);
   const [viewerConnectingStage, setViewerConnectingStage] = useState<ScreenShareViewerConnectingStage>('');
@@ -169,12 +173,21 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const [copied, setCopied] = useState(false);
   const [viewerCount, setViewerCount] = useState(0);
   const [targetSharerId, setTargetSharerId] = useState<string | null>(null);
+  // 房间级单一共享槽：null = 空闲；字符串 = 当前 sharer 的 peerId。房主权威、全员一致。
+  const [activeSharerId, setActiveSharerId] = useState<string | null>(null);
+  const [localPeerId, setLocalPeerId] = useState<string | null>(null);
 
   const [needsPlayClick, setNeedsPlayClick] = useState(false);
 
+  // 房间控制帧先送到 ref，再由下方稳定回调处理；chat hook 不直接依赖组件的闭包状态。
+  const roomControlHandlerRef = useRef<(message: unknown, sourcePeerId: string) => void>(() => {});
+
   // —— 房间聊天（M1 文本）——
   // 会话/环形缓冲/去重/限流/导出都在 useRoomChat 里；停画面不重建会话，聊天不中断。
-  const chat = useRoomChat({ onNotify: onNotification });
+  const chat = useRoomChat({
+    onNotify: onNotification,
+    onControl: (message, sourcePeerId) => roomControlHandlerRef.current(message, sourcePeerId),
+  });
 
   const hasInitialConnectedRef = useRef(false);
 
@@ -255,6 +268,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   // 服务端登记的房号：每次开始分享登记一次；信令重建复用同一 peerId + code + secret，
   // 这样已发出去的链接不会失效，服务端也认这是同一会话（同 secretHash 才允许接管）。
   const shareRoomRef = useRef<ScreenShareRoom | null>(null);
+  // 共享槽（ShareSlot）的本地镜像：房主通过 room 控制帧广播给全员。
+  const activeSharerIdRef = useRef<string | null>(null);
+  const localPeerIdRef = useRef<string | null>(null);
+  const roomHostIdRef = useRef<string | null>(null);
+  const isSharingRef = useRef(false);
+  const activeWatchedSharerRef = useRef<string | null>(null);
+  // 是否至少收到过一次房主广播的 ShareSlot 快照；用于区分「房间确实空闲」与「刚连接、快照还没到」。
+  const shareSlotKnownRef = useRef(false);
   // 最后一次房号登记失败的原因：重试预算耗尽时用它给出具体文案（限流/占用/网络），
   // 而不是一律说成「无法连接信令服务器」。
   const shareRoomFailureRef = useRef<ScreenShareRoomFailure | null>(null);
@@ -752,6 +773,13 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       sharerPeerOpenedAtRef.current = Date.now();
       linkPublishedRef.current = true;
       setPeerId(openedId);
+      setLocalPeerId(openedId);
+      localPeerIdRef.current = openedId;
+      roomHostIdRef.current = openedId;
+      if (isSharingRef.current) {
+        activeSharerIdRef.current = openedId;
+        setActiveSharerId(openedId);
+      }
       chat.setLocalPeerId(openedId);
       chat.setRole('sender');
       setIsPeerReady(true);
@@ -838,6 +866,17 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     peer.on('room', (conn) => {
       logDebug('log', 'Room chat connection received from:', conn.peer);
       chat.attachRoomConnection(conn);
+      // 新成员一打开 room 通道就把当前 ShareSlot 快照发过去；晚加入者据此进入 watching/idle。
+      const sendShareSlotState = () => {
+        if (!conn.open) return;
+        try {
+          conn.send(createRoomShareState(activeSharerIdRef.current));
+        } catch {
+          // 控制帧是 best-effort：通道随后会由 close 处理器清理。
+        }
+      };
+      if (conn.open) sendShareSlotState();
+      conn.on('open', sendShareSlotState);
     });
 
     peer.on('call', (call) => {
@@ -1186,6 +1225,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       videoRef.current.srcObject = null;
     }
 
+    isSharingRef.current = false;
     setIsSharing(false);
     setIsPeerReady(false);
     setPeerId(null);
@@ -1535,6 +1575,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       clearPersistedViewerSession();
       setTargetSharerId(null);
       setError(null);
+      localPeerIdRef.current = null;
+      setLocalPeerId(null);
+      roomHostIdRef.current = null;
+      activeWatchedSharerRef.current = null;
+      shareSlotKnownRef.current = false;
       reconnectAttemptsRef.current = 0;
       remoteShareEndedRef.current = false;
       remoteShareEndHandledRef.current = false;
@@ -1551,6 +1596,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const handleRemoteShareEnded = useCallback(
     (reason: RemoteShareEndReason, options: { explicit?: boolean } = {}) => {
       if (options.explicit) clearViewerWaitTerminal();
+      // 本端正在共享时，媒体 call 的关闭只可能是旧观看连接/顶替切换，不能把本端降级成暂停态。
+      if (isSharingRef.current) return;
+      // 已经拿到房主的权威快照且槽位为空：这是正常「停止共享→空闲」，界面直接是 idle，
+      // 不能再落成暂停占位（两条通道到达顺序不固定，这里让 ShareSlot 优先）。
+      if (reason === 'stopped' && shareSlotKnownRef.current && activeSharerIdRef.current === null) return;
       // 观看者主动「停止观看」后，后续远端停共享不应把他从占位态拽回等待态。
       if (isManualStopRef.current || remoteShareEndHandledRef.current) return;
       remoteShareEndHandledRef.current = true;
@@ -1583,7 +1633,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       clearViewerWaitTerminal();
       viewerWaitTerminalTimerRef.current = setTimeout(() => {
         viewerWaitTerminalTimerRef.current = null;
-        if (!remoteShareEndedRef.current) return;
+        if (isSharingRef.current || !remoteShareEndedRef.current) return;
         // 只结束「等待画面」这件事，不拆 peer/聊天。
         streamRef.current = null;
         markViewerSharePaused(false);
@@ -1620,6 +1670,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
     // 用户自己发起的新连接：清掉上一轮的终态标记，但不影响聊天历史（历史只在真离房时清）。
     if (!isRetry) {
+      shareSlotKnownRef.current = false;
       remoteShareEndedRef.current = false;
       remoteShareEndHandledRef.current = false;
       remoteShareFullRef.current = false;
@@ -1683,6 +1734,31 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     });
 
     peerRef.current = peer;
+
+    // 观看端在房间内被顶替/被要求观看时也会接收媒体 call：只要本端正在共享，
+    // 就用本地采集流应答；否则立即拒绝，避免空占一条永远不会出画面的连接。
+    peer.on('call', (call) => {
+      const outgoing = streamRef.current;
+      if (!outgoing || !isSharingRef.current) {
+        try { call.close(); } catch { /* ignore */ }
+        return;
+      }
+      if (call.peerConnection) preferVideoCodecs(call.peerConnection);
+      call.on('close', () => removeActiveCall(call));
+      call.on('error', () => removeActiveCall(call));
+      void call.answer(outgoing)
+        .then(() => {
+          if (!streamRef.current || !isSharingRef.current) {
+            try { call.close(); } catch { /* ignore */ }
+            return;
+          }
+          addActiveCall(call);
+          startBandwidthMonitoring(call);
+        })
+        .catch(() => {
+          try { call.close(); } catch { /* ignore */ }
+        });
+    });
 
     // 会话消息可能来自我们自己发起的数据连接，也可能来自分享端满员时反向连的那一条
     // （此时我们这条还没登记到分享端）。两条都走同一段处理，否则「人数已满」会被静默丢掉。
@@ -1809,6 +1885,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       // 限流文案例外——它带着冷却倒计时，清掉就等于放用户立刻重试。
       setError((prev) => (prev === RATE_LIMITED_CONNECTION_MESSAGE ? prev : null));
       if (dataConnectionRef.current) return; // 已经建过会话，恢复事件只代表信令可用
+      localPeerIdRef.current = peer.id;
+      setLocalPeerId(peer.id);
+      if (!roomHostIdRef.current) roomHostIdRef.current = sharerId;
       logDebug('log', 'Viewer peer opened, calling:', sharerId);
       // 信令 open 不代表媒体连通：这里不重置重连预算，否则 ICE 反复失败时会永远重连。
       // 预算只在 connectionState === 'connected' 时清零（见 handleViewerConnectionState）。
@@ -2562,7 +2641,267 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     });
   }, []);
 
+  const isRoomHost = useCallback(
+    () => roomHostIdRef.current !== null && localPeerIdRef.current === roomHostIdRef.current,
+    [],
+  );
+
+  const applyActiveSharer = useCallback((next: string | null) => {
+    activeSharerIdRef.current = next;
+    setActiveSharerId(next);
+  }, []);
+
+  const broadcastShareState = useCallback((next: string | null) => {
+    applyActiveSharer(next);
+    chat.sendControl(createRoomShareState(next));
+  }, [applyActiveSharer, chat.sendControl]);
+
+  const clearWatchingMedia = useCallback(() => {
+    if (mediaConnectionRef.current) {
+      try { mediaConnectionRef.current.close(); } catch { /* ignore */ }
+      mediaConnectionRef.current = null;
+    }
+    if (videoRef.current) videoRef.current.srcObject = null;
+    streamRef.current = null;
+    activeWatchedSharerRef.current = null;
+    viewerHadStreamRef.current = false;
+    setNeedsPlayClick(false);
+    setIsViewing(false);
+    setIsConnecting(false);
+    setViewerConnectingStage('');
+    markViewerSharePaused(false);
+    setViewerReconnecting(false);
+  }, [markViewerSharePaused]);
+
+  /**
+   * 只停止本端共享：摘视频轨、停采集、关闭当前观看连接，保留 room peer / 星形 data 通道 /
+   * 聊天 / 语音。共享槽的广播由调用方决定（房主广播，普通成员发请求）。
+   */
+  const stopLocalShareSilently = useCallback((notifyViewers: boolean) => {
+    peerSessionTokenRef.current += 1;
+    peerInitFlightRef.current.reset();
+    pauseActiveCallVideo(activeCallsRef.current);
+    if (notifyViewers) broadcastShareEnded('stopped');
+    if (sharerReconnectTimerRef.current) { clearTimeout(sharerReconnectTimerRef.current); sharerReconnectTimerRef.current = null; }
+    sharerReconnectAttemptsRef.current = 0;
+    sharerPeerRebuildsRef.current = 0;
+    sharerSignalingBrokenRef.current = false;
+    sharerFailureHandledRef.current = false;
+    shareRoomFailureRef.current = null;
+    shareRoomRenewalFailuresRef.current = 0;
+    shareRoomTimeoutsRef.current = 0;
+    setShareRoomRenewalWarning(false);
+    setSharerFailure(null);
+    setShareRoomRetryAt(null);
+    releaseShareStream();
+    if (videoRef.current) videoRef.current.srcObject = null;
+    activeCallsRef.current.forEach((call) => { try { call.close(); } catch { /* ignore */ } });
+    activeCallsRef.current = [];
+    setViewerCount(0);
+    stopBandwidthMonitoring();
+    isSharingRef.current = false;
+    setIsSharing(false);
+  }, [broadcastShareEnded, releaseShareStream, stopBandwidthMonitoring]);
+
+  /**
+   * 观看当前 sharer：复用房间 peer，只新建一条媒体 call；聊天/语音连接完全不动。
+   * 顶替或切人时旧 media call 先关，状态先回到 waiting_stream，画面到达再进 isViewing。
+   */
+  const watchActiveSharer = useCallback((sharerId: string) => {
+    const peer = peerRef.current;
+    if (!peer || peer.destroyed) return;
+    if (localPeerIdRef.current === sharerId) return;
+    if (mediaConnectionRef.current && activeWatchedSharerRef.current === sharerId && streamRef.current) return;
+    if (mediaConnectionRef.current) {
+      try { mediaConnectionRef.current.close(); } catch { /* ignore */ }
+      mediaConnectionRef.current = null;
+    }
+    if (videoRef.current) videoRef.current.srcObject = null;
+    streamRef.current = null;
+    viewerHadStreamRef.current = false;
+    activeWatchedSharerRef.current = sharerId;
+    setTargetSharerId(sharerId);
+    setError(null);
+    setIsViewing(false);
+    setIsConnecting(true);
+    setViewerConnectingStage('waiting_stream');
+    markViewerSharePaused(false);
+    setViewerReconnecting(false);
+    setNeedsPlayClick(false);
+
+    const call = peer.call(sharerId);
+    if (!call) {
+      setIsConnecting(false);
+      markViewerSharePaused(true);
+      setError('当前共享者暂时无法连接，请稍后再试');
+      return;
+    }
+    mediaConnectionRef.current = call;
+    let received = false;
+    call.on('stream', (remoteStream) => {
+      if (received || isSharingRef.current) return;
+      received = true;
+      streamRef.current = remoteStream;
+      viewerHadStreamRef.current = true;
+      activeWatchedSharerRef.current = sharerId;
+      if (videoRef.current) {
+        videoRef.current.srcObject = remoteStream;
+        void videoRef.current.play().catch(() => setNeedsPlayClick(true));
+      }
+      setNeedsPlayClick(false);
+      setIsViewing(true);
+      setIsConnecting(false);
+      setViewerConnectingStage('');
+      markViewerSharePaused(false);
+      setViewerReconnecting(false);
+      onNotification('已连接到屏幕共享', 'success');
+    });
+    call.on('close', () => {
+      if (received || isSharingRef.current) return;
+      mediaConnectionRef.current = null;
+      setIsConnecting(false);
+      markViewerSharePaused(true);
+      setViewerReconnecting(false);
+    });
+    call.on('error', (err) => {
+      if (received || isSharingRef.current) return;
+      mediaConnectionRef.current = null;
+      setIsConnecting(false);
+      markViewerSharePaused(true);
+      setViewerReconnecting(false);
+      setError(getMediaConnectionErrorMessage(err));
+    });
+  }, [markViewerSharePaused, onNotification]);
+
+  const handleRoomControl = useCallback((message: unknown, sourcePeerId: string) => {
+    if (!isRoomShareControl(message)) return;
+    const hostId = roomHostIdRef.current;
+    if (message.type === 'share-state') {
+      // 只有房主广播的槽位快照可信；普通成员之间的伪造状态一律忽略。
+      if (!isRoomHost() && hostId && sourcePeerId === hostId) {
+        shareSlotKnownRef.current = true;
+        applyActiveSharer(message.activeSharerId);
+      }
+      return;
+    }
+    if (message.type === 'share-leave') {
+      if (isRoomHost() && activeSharerIdRef.current === sourcePeerId) {
+        broadcastShareState(null);
+      }
+      return;
+    }
+    if (!isRoomHost()) return;
+    const plan = planRoomShareRequest({
+      action: message.action,
+      fromPeerId: sourcePeerId,
+      currentActiveSharerId: activeSharerIdRef.current,
+      localPeerId: localPeerIdRef.current,
+      localIsSharing: isSharingRef.current,
+    });
+    if (!plan.accepted) {
+      // 拒绝静默抢占：把当前权威槽位重新广播，让发起方退回 idle/watching。
+      chat.sendControl(createRoomShareState(activeSharerIdRef.current));
+      return;
+    }
+    if (plan.stopLocalShare) {
+      stopLocalShareSilently(true);
+      onNotification('共享已被其他成员接替，已转为观看', 'info');
+    }
+    broadcastShareState(plan.nextActiveSharerId);
+  }, [applyActiveSharer, broadcastShareState, chat.sendControl, isRoomHost, onNotification, stopLocalShareSilently]);
+
+  /**
+   * 在房间内开始共享：有活跃房间时复用 room peer，不重建聊天/语音；空闲 action=start，
+   * 他人占用时 action=takeover（由 UI 二次确认后传入）。采集完成后只广播共享槽。
+   */
+  const startInRoomShare = useCallback(async (action: RoomShareRequestAction) => {
+    const hostId = roomHostIdRef.current;
+    setError(null);
+    if (!navigator.mediaDevices || !navigator.mediaDevices.getDisplayMedia) {
+      setError('您的浏览器不支持屏幕共享，请使用桌面端浏览器:Chrome、Edge 或 Firefox');
+      return;
+    }
+    if (shareRoomRetryCooldown.secondsLeft !== null) return;
+    try {
+      const stream = await prepareCapturedStream(
+        await navigator.mediaDevices.getDisplayMedia(buildDisplayMediaConstraints())
+      );
+      // 从 watching 切换为 sharing：先断开只用于观看的媒体 call，避免旧画面挂在同一容器。
+      if (mediaConnectionRef.current) {
+        try { mediaConnectionRef.current.close(); } catch { /* ignore */ }
+        mediaConnectionRef.current = null;
+      }
+      if (videoRef.current) videoRef.current.srcObject = null;
+      activeWatchedSharerRef.current = null;
+      viewerHadStreamRef.current = false;
+      setTargetSharerId(null);
+      setIsViewing(false);
+      setIsConnecting(false);
+      setViewerConnectingStage('');
+      markViewerSharePaused(false);
+      setViewerReconnecting(false);
+      setNeedsPlayClick(false);
+
+      releaseShareStream();
+      attachSharePreviewStream(stream, 'Share preview playback failed');
+      // 复用房间时旧观看连接可能还挂着：把新轨替换进去，新观众再走 peer.on('call')。
+      replaceActiveCallTracks(stream);
+      isSharingRef.current = true;
+      setIsSharing(true);
+      chat.setRole('sender');
+      if (localPeerIdRef.current === hostId) {
+        broadcastShareState(localPeerIdRef.current);
+      } else {
+        chat.sendControl(createRoomShareRequest(action));
+      }
+      onNotification(action === 'takeover' ? '已接替共享' : '已开始共享', 'success');
+    } catch (err) {
+      const failure = describeCaptureError(err);
+      logDebug('warn', 'in-room screen-share start failed', {
+        name: failure.name,
+        message: failure.message,
+        embeddedFrame: isEmbeddedFrame(),
+      });
+      setError(failure.description);
+    }
+  }, [attachSharePreviewStream, broadcastShareState, buildDisplayMediaConstraints, chat.setRole, chat.sendControl, markViewerSharePaused, onNotification, prepareCapturedStream, releaseShareStream, replaceActiveCallTracks, shareRoomRetryCooldown.secondsLeft]);
+
+  useEffect(() => {
+    // 共享槽是单一事实来源：active 为空 → 关闭观看画面回 idle；active 为别人 → 观看；
+    // active 为自己 → 保持本端采集。任何分支都不 reset 聊天/销毁 room peer。
+    const active = activeSharerId;
+    if (!active) {
+      if (isSharingRef.current) return;
+      clearWatchingMedia();
+      if (roomHostIdRef.current && localPeerIdRef.current !== roomHostIdRef.current) {
+        setTargetSharerId(roomHostIdRef.current);
+      }
+      return;
+    }
+    if (localPeerIdRef.current === active) return;
+    if (isSharingRef.current) {
+      stopLocalShareSilently(false);
+      onNotification('共享已被其他成员接替，已转为观看', 'info');
+    }
+    watchActiveSharer(active);
+  }, [activeSharerId, clearWatchingMedia, onNotification, stopLocalShareSilently, watchActiveSharer]);
+
+  useEffect(() => {
+    roomControlHandlerRef.current = handleRoomControl;
+  }, [handleRoomControl]);
+
   const startScreenShare = async () => {
+    if (roomHostIdRef.current && peerRef.current && !peerRef.current.destroyed) {
+      const active = activeSharerIdRef.current;
+      const action: RoomShareRequestAction =
+        active && active !== localPeerIdRef.current ? 'takeover' : 'start';
+      await startInRoomShare(action);
+      return;
+    }
+    await startFreshScreenShare();
+  };
+
+  const startFreshScreenShare = async () => {
     // 冷却期内发起登记只会再吃一次 429，还会把静默期往后推：按钮已禁用，这里再兜一层。
     if (shareRoomRetryCooldown.secondsLeft !== null) return;
     setError(null);
@@ -2587,6 +2926,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
         replaceActiveCallTracks(stream);
         broadcastShareStarted();
         setSharerFailure(null); setError(null);
+        isSharingRef.current = true;
         setIsSharing(true);
         onNotification(`已重新开始共享${getScreenShareAudioSuffix(stream)}`, 'success');
         return;
@@ -2613,6 +2953,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       }
       setSharerFailure(null);
       chat.reset('sender');
+      isSharingRef.current = true;
       setIsSharing(true);
       // 「已开始」要等信令 ready 再发：这里只记下这次的音频后缀。
       shareStartNotice.queue(getScreenShareAudioSuffix(stream));
@@ -2668,6 +3009,13 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
    * 销毁 peer、撤销房号、断开所有观看者并清空本端聊天；页面卸载之外的主动离房走这里。
    */
   const endRoomAndLeave = () => {
+    // 离房前先把自己的共享交还槽位，再通知房主自己离开；房间/聊天随后才全断。
+    if (isSharingRef.current && !isRoomHost()) {
+      chat.sendControl(createRoomShareRequest('stop'));
+    }
+    if (roomHostIdRef.current && localPeerIdRef.current !== roomHostIdRef.current) {
+      chat.sendControl(createRoomShareLeave());
+    }
     peerSessionTokenRef.current += 1;
     peerInitFlightRef.current.reset();
     const room = shareRoomRef.current;
@@ -2706,7 +3054,19 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     stopBandwidthMonitoring();
     if (peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
     chat.reset('sender');
+    isSharingRef.current = false;
+    activeSharerIdRef.current = null;
+    setActiveSharerId(null);
+    activeWatchedSharerRef.current = null;
+    localPeerIdRef.current = null;
+    setLocalPeerId(null);
+    roomHostIdRef.current = null;
     setIsSharing(false);
+    setIsViewing(false);
+    setIsConnecting(false);
+    setTargetSharerId(null);
+    markViewerSharePaused(false);
+    setViewerReconnecting(false);
     setIsPeerReady(false);
     setPeerId(null);
     setCopied(false);
@@ -2716,6 +3076,20 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   };
 
   const stopScreenShare = () => {
+    if (roomHostIdRef.current) {
+      stopLocalShareSilently(true);
+      if (isRoomHost()) {
+        broadcastShareState(null);
+      } else {
+        chat.sendControl(createRoomShareRequest('stop'));
+      }
+      onNotification('屏幕共享已停止，房间与聊天仍保留', 'info');
+      return;
+    }
+    stopFreshScreenShare();
+  };
+
+  const stopFreshScreenShare = () => {
     peerSessionTokenRef.current += 1;
     peerInitFlightRef.current.reset();
     const stopPlan = planStopScreenShare({ hasPeer: Boolean(peerRef.current && !peerRef.current.destroyed), hasShareRoom: Boolean(shareRoomRef.current) });
@@ -2743,6 +3117,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     }
     if (!stopPlan.keepPeer && peerRef.current) { peerRef.current.destroy(); peerRef.current = null; }
     if (stopPlan.chatSession === 'reset') chat.reset('sender');
+    isSharingRef.current = false;
     setIsSharing(false);
     if (!stopPlan.keepPeer) { setPeerId(null); setIsPeerReady(false); }
     onNotification('屏幕共享已停止，房间与聊天仍保留', 'info');
@@ -2785,8 +3160,11 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       }}
       stopViewing={() => stopViewing(true)}
       roomRetained={Boolean(shareRoom)}
-      sharePaused={Boolean(shareRoom) && !isSharing && !sharerFailure}
+      sharePaused={false}
       onResumeShare={startScreenShare}
+      shareSlotActiveId={activeSharerId}
+      localPeerId={localPeerId}
+      onTakeoverShare={() => { void startInRoomShare('takeover'); }}
       viewerSharePaused={viewerSharePaused}
       viewerReconnecting={viewerReconnecting}
       chat={chat.ui}

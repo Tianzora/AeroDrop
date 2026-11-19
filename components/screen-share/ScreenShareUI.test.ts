@@ -126,6 +126,29 @@ test('共享端停止共享后显示占位与开始共享，房间聊天入口�
   assert.match(withViewers, /房间、聊天和观看者都还在/);
 });
 
+test('房间空闲时显示开始共享，任何成员都能发起共享', () => {
+  const markup = render({ roomRetained: true });
+  assert.match(markup, /还没有人共享屏幕/);
+  assert.match(markup, /任何人都可以开始共享/);
+  assert.match(markup, />\s*开始共享\s*</);
+  assert.match(markup, /结束并离开/);
+  assert.doesNotMatch(markup, /停止共享/);
+});
+
+test('他人共享中提供顶替共享；顶替需先确认，本端不出现停止观看', () => {
+  const markup = render({
+    targetSharerId: 'sharer-1',
+    isViewing: true,
+    shareSlotActiveId: 'sharer-1',
+    localPeerId: 'me',
+  });
+  assert.match(markup, /顶替共享/);
+  assert.match(markup, /结束并离开/);
+  assert.doesNotMatch(markup, /停止观看/);
+  assert.doesNotMatch(markup, /重新观看/);
+  assert.doesNotMatch(markup, />\s*停止共享\s*</);
+});
+
 test('聊天默认收起，点主卡「加入聊天房间」后才展开互动卡', () => {
   const closed = render({ isSharing: true });
   assert.doesNotMatch(closed, /aria-label="房间聊天"/);
