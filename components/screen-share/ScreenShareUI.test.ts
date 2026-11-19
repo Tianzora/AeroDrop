@@ -238,6 +238,19 @@ test('他人共享中提供顶替共享；顶替需先确认，本端不出现�
   assert.doesNotMatch(markup, />\s*停止共享\s*</);
 });
 
+test('落地页未进房只显示屏幕共享卡，不渲染互动卡与双栏', () => {
+  const markup = render();
+
+  // 未进房：互动卡（聊天/语音）完全不渲染，也不预留右侧空栏。
+  assert.doesNotMatch(markup, /aria-label="房间聊天"/);
+  assert.doesNotMatch(markup, /互动/);
+  assert.doesNotMatch(markup, /语音/);
+  assert.doesNotMatch(markup, /lg:max-w-5xl/);
+  assert.doesNotMatch(markup, /lg:grid-cols/);
+  assert.match(markup, /max-w-xl/);
+  assert.match(markup, /屏幕共享/);
+});
+
 test('共享页固定左右两栏，互动卡常驻无需「加入聊天房间」', () => {
   const markup = render({
     isSharing: true,

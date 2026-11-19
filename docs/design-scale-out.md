@@ -813,6 +813,6 @@ CI 仍是信号不是闸门（Cloudflare Git 集成不读 GitHub 检查，除非
 | 产品（M2）：`suspected-share-full`（`ScreenShare.tsx` 的 `reportSuspectedShareFull`）没有任何正向 e2e，把它的 toast 加回来也不会红 | **判定为「e2e 难以确定性构造」，记入 residual**：判定条件是 `services/screenShare/viewerShareFullFallback.ts` 的 `!receivedStream && !dataChannelOpened`，真实触发靠「满员 share-full 是 best-effort 丢包」这种竞态；逻辑与文案已有单测钉住（`viewerShareFullFallback.test.ts`、`viewerCallEndAction.test.ts`、`connectionGuidance.test.ts`）。注入伪 `RTCPeerConnection`（吞 `ontrack`/`ondatachannel`、反复推 `connectionState='closed'`）的尝试始终等不到终态，已删除该用例，计数回到 15 条屏幕共享 / 18 条产品级 | 该结论本身有可复现证据：上述注入后 `toHaveCount(1)` 收到 0；放开 track 则 `hasReceivedStream` 为真、落到 `reconnect` |
 | 用例计数与引用文案随之上调 | `scripts/e2e-suite-inventory.test.ts`、`.github/workflows/ci.yml`、`scripts/check-coverage-scope.mjs`、`e2e/screenshare.spec.ts` 头注释统一为 screenshare 22 / 产品级 25 / `ensureDisplayCapture` 19 | `node ./scripts/run-node-tests.mjs scripts` → 33 pass / 0 fail |
 
-本轮实测（身份系统收口，2026-11-19）：`npm run typecheck` → 0；`npm run build` → 0；`--scope=services` 130 文件 / 128 行 / 2 例外、预算 152/19352（0.79%）；`--scope=components` 15 文件 / 12 行 / 3 例外、预算 8337/11858（70.31%）；
+本轮实测（身份系统收口，2026-11-19）：`npm run typecheck` → 0；`npm run build` → 0；`--scope=services` 130 文件 / 128 行 / 2 例外、预算 152/19352（0.79%）；`--scope=components` 15 文件 / 12 行 / 3 例外、预算 8337/11864（70.27%）；
 三个千行组件：`components/Receiver.tsx`（3367 行）、`components/ScreenShare.tsx`（3300 行）、`components/Sender.tsx`（1670 行）。
 身份同步 residual（2026-11-19）：房主负责汇总并广播 `peer-profile-list`。旧版房主不广播时，成员列表与语音 tab 没有头像昵称，聊天作者退化为 `观众-<短 peerId>`（观看端仍显示「房主」），需房主升级到本版后完整显示。

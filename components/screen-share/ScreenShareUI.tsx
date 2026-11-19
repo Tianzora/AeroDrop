@@ -380,12 +380,16 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
     copyShareLink();
   }, [shareLink, copyShareLink]);
 
-  // 共享页固定左右两栏：左「屏幕共享」卡、右「互动」卡（语音/聊天 tab）；窄屏由 grid 自动上下堆叠，
-  // 不再默认收起、也不再靠「加入聊天房间」按钮展开。
+  // 进房后固定左右两栏：左「屏幕共享」卡、右「互动」卡（语音/聊天 tab）；窄屏由 grid 自动上下堆叠。
+  // 落地页/未进房时只保留单列共享卡，不预留右侧互动栏；互动卡本身也由 inRoomShell 门控。
 
   return (
     <div className="w-full mx-auto">
-      <div className="mx-auto grid max-w-xl items-stretch gap-4 lg:max-w-5xl lg:grid-cols-[minmax(0,1.4fr)_minmax(320px,1fr)]">
+      <div
+        className={`mx-auto grid max-w-xl items-stretch gap-4 ${
+          inRoomShell ? 'lg:max-w-5xl lg:grid-cols-[minmax(0,1.4fr)_minmax(320px,1fr)]' : ''
+        }`}
+      >
         <div className="min-w-0 bg-white rounded-card shadow-card border border-slate-100 p-6 md:p-8 transition-colors motion-base animate-slide-up">
         {/* 共享 / 观看中把装饰性大头部压成工具条式紧凑头部：Meet / Zoom 进入「正在
             共享」态后都会收起介绍性大标题，把纵向空间让给画面和操作；未开始时保
@@ -1041,18 +1045,20 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
         )}
         </div>
 
-        <ChatPanel
-          role={chat.role}
-          connected={chat.connected}
-          messages={chat.messages}
-          onSend={chat.onSend}
-          onExport={chat.onExport}
-          connectingHint={chat.role === 'viewer' ? '共享已结束，聊天连接建立中' : '等待观众加入聊天'}
-          localPeerId={localPeerId}
-          localProfile={localProfile}
-          peerProfiles={peerProfiles}
-          voice={voice}
-        />
+        {inRoomShell && (
+          <ChatPanel
+            role={chat.role}
+            connected={chat.connected}
+            messages={chat.messages}
+            onSend={chat.onSend}
+            onExport={chat.onExport}
+            connectingHint={chat.role === 'viewer' ? '共享已结束，聊天连接建立中' : '等待观众加入聊天'}
+            localPeerId={localPeerId}
+            localProfile={localProfile}
+            peerProfiles={peerProfiles}
+            voice={voice}
+          />
+        )}
       </div>
       {showTakeoverConfirm &&
         createPortal(
