@@ -4,6 +4,8 @@ import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { Monitor, StopCircle, Play, Pause, AlertCircle, Copy, Check, Share2, Eye, Loader2, RefreshCw, X, MonitorUp, Maximize, Minimize, Volume2, VolumeX, PictureInPicture, AlertTriangle, LogOut, MessageCircle } from 'lucide-react';
 import { ChatPanel, type ChatPanelMessage } from './ChatPanel';
 import type { RoomVoiceApi } from '../../services/voice/useRoomVoice';
+import type { LocalProfile } from '../../services/profile/localProfile';
+import type { DisplayProfile } from '../../services/screenShare/peerProfile';
 
 export type ScreenShareViewerConnectingStage = 'fetching_ice' | 'connecting_signaling' | 'connecting_media' | 'waiting_stream' | '';
 
@@ -37,6 +39,10 @@ interface ScreenShareUIProps {
   shareSlotActiveId?: string | null;
   /** 本端 peerId：判断当前 active 是否是自己。 */
   localPeerId?: string | null;
+  /** 房间内其它成员身份（昵称+头像），键为真实 peerId。 */
+  peerProfiles?: Record<string, DisplayProfile>;
+  /** 本机身份（昵称+头像），用于聊天/语音里显示自己。 */
+  localProfile?: LocalProfile;
   /** 观看端在「他人共享中」发起顶替（UI 已做二次确认）。 */
   onTakeoverShare?: () => void;
 
@@ -189,6 +195,8 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   viewerReconnecting = false,
   shareSlotActiveId = null,
   localPeerId = null,
+  peerProfiles,
+  localProfile,
   onTakeoverShare,
   voice,
   chat,
@@ -1087,6 +1095,9 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
             onExport={chat.onExport}
             onClose={chat.onClose}
             connectingHint={chat.role === 'viewer' ? '共享已结束，聊天连接建立中' : '等待观众加入聊天'}
+            localPeerId={localPeerId}
+            localProfile={localProfile}
+            peerProfiles={peerProfiles}
             voice={voice}
           />
         )}

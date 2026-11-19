@@ -6,6 +6,7 @@ import { ErrorBoundary } from './components/ErrorBoundary';
 import { Send, Inbox, Monitor, Package, ShieldAlert, X, ChevronDown } from 'lucide-react';
 import { Toaster, toast } from 'sonner';
 import { ScreenShare } from './components/ScreenShare';
+import { ProfileMenu } from './components/profile/ProfileMenu';
 import { AppNotification } from './types';
 import { PWAInstallPrompt } from './components/PWAInstallPrompt';
 import { getInitialDeviceName } from './services/deviceName';
@@ -577,6 +578,7 @@ const App: React.FC = () => {
                 </button>
               </>
             )}
+            <ProfileMenu />
           </div>
         </div>
       </header>

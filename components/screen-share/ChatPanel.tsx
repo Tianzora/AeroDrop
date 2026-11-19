@@ -2,6 +2,8 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Download, Headphones, MessageCircle, Mic, MicOff, PhoneOff, Send, Volume2, WifiOff, X } from 'lucide-react';
 import type { RoomVoiceApi } from '../../services/voice/useRoomVoice';
 import { describeVoiceStatus } from '../../services/voice/voiceCore';
+import type { LocalProfile } from '../../services/profile/localProfile';
+import type { DisplayProfile } from '../../services/screenShare/peerProfile';
 
 export interface ChatPanelMessage {
   id: string;
@@ -23,6 +25,12 @@ export interface ChatPanelProps {
   connectingHint?: string;
   /** 房间语音：与聊天同卡，语音页接真实麦克风控件。 */
   voice?: RoomVoiceApi;
+  /** 本端真实 peer id（来自 conn.peer），用于判断「我的」消息。 */
+  localPeerId?: string | null;
+  /** 本机身份（昵称 + 头像）；缺省时回退「我」。 */
+  localProfile?: LocalProfile;
+  /** 房间内其它成员身份，键为真实 peerId。 */
+  peerProfiles?: Record<string, DisplayProfile>;
   className?: string;
 }
 
@@ -64,6 +72,58 @@ export const handleDraftKeyDown = (
   }
 };
 
+export interface ResolvedAuthor {
+  mine: boolean;
+  name: string;
+  avatar: string;
+}
+
+/**
+ * 解析一条消息的展示身份。
+ * - 本端：fromPeerId === 本端真实 peerId → 用本机昵称/头像，缺省「我」。
+ * - 远端：优先用房间内交换到的身份；没有则回退「房主/观众」。
+ * 身份只用于显示，聊天去重/限流仍由 chatCore 以真实 conn.peer 处理。
+ */
+export const resolveAuthor = (
+  fromPeerId: string,
+  localPeerId: string | null,
+  localProfile: LocalProfile | undefined,
+  peerProfiles: Record<string, DisplayProfile> | undefined,
+  isViewer: boolean,
+): ResolvedAuthor => {
+  const mine = Boolean(localPeerId) && fromPeerId === localPeerId;
+  if (mine) {
+    const name = localProfile?.name?.trim() || '我';
+    return { mine: true, name, avatar: localProfile?.avatar || name.slice(0, 1) };
+  }
+  const peer = peerProfiles?.[fromPeerId];
+  const peerName = peer?.name?.trim();
+  if (peerName) {
+    return { mine: false, name: peerName, avatar: peer?.avatar || peerName.slice(0, 1) };
+  }
+  const fallback = isViewer ? '房主' : '观众';
+  return { mine: false, name: fallback, avatar: fallback.slice(0, 1) };
+};
+
+const MemberRow: React.FC<{ avatar: string; name: string; isSelf?: boolean }> = ({
+  avatar,
+  name,
+  isSelf,
+}) => (
+  <div className="flex items-center gap-2">
+    <span
+      aria-hidden="true"
+      className="flex h-7 w-7 items-center justify-center rounded-full bg-slate-100 text-sm"
+    >
+      {avatar}
+    </span>
+    <span className="min-w-0 max-w-40 truncate text-xs font-semibold text-slate-700">{name}</span>
+    {isSelf && (
+      <span className="rounded-full bg-brand-50 px-1.5 py-0.5 text-[10px] font-bold text-brand-700">你</span>
+    )}
+  </div>
+);
+
 /**
  * 右侧「互动」卡：默认不在页面里，由主卡上的「加入聊天房间」按钮展开。
  * 参考设计稿把聊天与语音放在同一列，用顶部 tab 切换；语音生产版尚未接入 M2，
@@ -78,6 +138,9 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onClose,
   connectingHint,
   voice,
+  localPeerId = null,
+  localProfile,
+  peerProfiles,
   className = '',
 }) => {
   const [draft, setDraft] = useState('');
@@ -185,20 +248,21 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
               </div>
             ) : (
               messages.map((message) => {
-                const mine = message.fromPeerId === 'me';
-                const authorLabel = mine ? '我' : isViewer ? '房主' : '观众';
-                const avatarTone = mine
-                  ? 'bg-brand-600 text-white'
-                  : isViewer
-                    ? 'bg-slate-500 text-white'
-                    : 'bg-slate-500 text-white';
+                const { mine, name: authorLabel, avatar } = resolveAuthor(
+                  message.fromPeerId,
+                  localPeerId,
+                  localProfile,
+                  peerProfiles,
+                  isViewer,
+                );
+                const avatarTone = mine ? 'bg-brand-600 text-white' : 'bg-slate-100 text-slate-700';
                 return (
                   <div key={message.id} className={`flex items-start gap-2 ${mine ? 'flex-row-reverse' : ''}`}>
                     <span
                       aria-hidden="true"
                       className={`mt-0.5 inline-flex h-7 w-7 shrink-0 items-center justify-center rounded-full text-xs font-bold ${avatarTone}`}
                     >
-                      {authorLabel.slice(0, 1)}
+                      {avatar}
                     </span>
                     <div className={`min-w-0 max-w-chat-bubble ${mine ? 'text-right' : 'text-left'}`}>
                       <div className={`flex items-center gap-2 px-1 text-xs text-slate-400 ${mine ? 'justify-end' : ''}`}>
@@ -261,6 +325,13 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                   : '语音通道未接入'}
               </p>
             </div>
+          </div>
+
+          <div className="flex flex-col gap-2" aria-label="房间成员">
+            <MemberRow avatar={localProfile?.avatar ?? '🙂'} name={localProfile?.name ?? '我'} isSelf />
+            {Object.entries(peerProfiles ?? {}).map(([peerId, peer]) => (
+              <MemberRow key={peerId} avatar={peer.avatar} name={peer.name} />
+            ))}
           </div>
 
           {voice && voice.error && (

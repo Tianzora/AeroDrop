@@ -2,6 +2,13 @@ import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react'
 import { loadPeerRuntime, type Peer, type MediaConnection, type DataConnection } from '../services/peerRuntime';
 import { useRoomChat } from '../services/chat/useRoomChat';
 import { useRoomVoice } from '../services/voice/useRoomVoice';
+import { useLocalProfile } from '../services/profile/useLocalProfile';
+import {
+  createPeerProfileMessage,
+  isPeerProfileMessage,
+  sanitizePeerProfile,
+  type DisplayProfile,
+} from '../services/screenShare/peerProfile';
 import { getIceConfig } from '../services/stunService';
 import {
   getPreferredScreenShareCodecOrder,
@@ -193,6 +200,15 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   // —— 房间语音（M2）——
   // 复用 room DataConnection 预留的 audio transceiver；共享开停与顶替都不会重建它。
   const voice = useRoomVoice();
+
+  // —— 本机身份与房间成员身份（纯呈现层，不参与 peer 校验/聊天去重）——
+  const { profile: localProfile } = useLocalProfile();
+  const localProfileRef = useRef(localProfile);
+  useEffect(() => {
+    localProfileRef.current = localProfile;
+  }, [localProfile]);
+  // 键为真实 conn.peer，值是对方广播的昵称/头像。
+  const [peerProfiles, setPeerProfiles] = useState<Record<string, DisplayProfile>>({});
 
   const hasInitialConnectedRef = useRef(false);
 
@@ -883,6 +899,17 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       };
       if (conn.open) sendShareSlotState();
       conn.on('open', sendShareSlotState);
+      // 新成员一打开就告知自己的昵称/头像（仅显示用，best-effort）。
+      const sendProfile = () => {
+        if (!conn.open) return;
+        try {
+          conn.send(createPeerProfileMessage(localProfileRef.current));
+        } catch {
+          // 身份帧失败不影响共享控制。
+        }
+      };
+      if (conn.open) sendProfile();
+      conn.on('open', sendProfile);
     });
 
     peer.on('call', (call) => {
@@ -1584,6 +1611,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       setError(null);
       localPeerIdRef.current = null;
       setLocalPeerId(null);
+      setPeerProfiles({});
       roomHostIdRef.current = null;
       activeWatchedSharerRef.current = null;
       shareSlotKnownRef.current = false;
@@ -1933,6 +1961,17 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       const roomConnection = peer.connectRoom(sharerId);
       chat.attachRoomConnection(roomConnection);
       voice.attachConnection(roomConnection);
+      // 把自己的昵称/头像发给房主（仅显示用，best-effort）。
+      const sendViewerProfile = () => {
+        if (!roomConnection.open) return;
+        try {
+          roomConnection.send(createPeerProfileMessage(localProfileRef.current));
+        } catch {
+          // 身份帧失败不影响聊天/语音。
+        }
+      };
+      if (roomConnection.open) sendViewerProfile();
+      roomConnection.on('open', sendViewerProfile);
 
       // 2. 建立媒体连接
       const call = peer.call(sharerId);
@@ -2789,6 +2828,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   }, [markViewerSharePaused, onNotification]);
 
   const handleRoomControl = useCallback((message: unknown, sourcePeerId: string) => {
+    // 身份帧优先处理：以真实 conn.peer 为键，只用于显示，不进入共享槽逻辑。
+    if (isPeerProfileMessage(message)) {
+      const profile = sanitizePeerProfile(message);
+      if (profile) {
+        setPeerProfiles((prev) => ({ ...prev, [sourcePeerId]: profile }));
+      }
+      return;
+    }
     if (!isRoomShareControl(message)) return;
     const hostId = roomHostIdRef.current;
     if (message.type === 'share-state') {
@@ -3089,6 +3136,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     activeWatchedSharerRef.current = null;
     localPeerIdRef.current = null;
     setLocalPeerId(null);
+    setPeerProfiles({});
     roomHostIdRef.current = null;
     setIsSharing(false);
     setIsViewing(false);
@@ -3194,6 +3242,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       onResumeShare={startScreenShare}
       shareSlotActiveId={activeSharerId}
       localPeerId={localPeerId}
+      localProfile={localProfile}
+      peerProfiles={peerProfiles}
       onTakeoverShare={() => { void startInRoomShare('takeover'); }}
       viewerSharePaused={viewerSharePaused}
       viewerReconnecting={viewerReconnecting}
