@@ -322,7 +322,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
                   onChange={(event) => voice.setVolume(Number(event.target.value))}
                   aria-label="对方音量"
                   className="h-2 w-full cursor-pointer accent-brand-600"
-                  style={{ accentColor: '#2563eb' }}
+                  style={{ accentColor: 'var(--color-brand-600)' }}
                 />
                 <span className="text-xs text-slate-400">调节对端播放音量 0–200%（不会改变对方麦克风）</span>
               </label>

@@ -4,7 +4,17 @@ import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { ScreenShareUI } from './ScreenShareUI.tsx';
+import {
+  ScreenShareUI,
+  deriveIsChatEntryVisible,
+  deriveIsChatPanelVisible,
+  deriveIsInRoomShell,
+  deriveIsShareSlotIdle,
+  deriveIsViewerSession,
+  indexViewerStage,
+  isShareLinkUsable,
+  isSlotActiveForOther,
+} from './ScreenShareUI.tsx';
 import {
   SHARER_RECONNECT_EXHAUSTED_MESSAGE,
   SIGNALING_UNREACHABLE_MESSAGE,
@@ -63,6 +73,97 @@ const baseProps: React.ComponentProps<typeof ScreenShareUI> = {
 
 const render = (overrides: Partial<React.ComponentProps<typeof ScreenShareUI>> = {}) =>
   renderToStaticMarkup(React.createElement(ScreenShareUI, { ...baseProps, ...overrides }));
+
+test('房间共享视图判定是纯函数：链接/槽位/视角/聊天入口组合都可单测', () => {
+  assert.equal(isShareLinkUsable(true, false), true);
+  assert.equal(isShareLinkUsable(true, true), false);
+  assert.equal(isShareLinkUsable(false, false), false);
+
+  assert.equal(isSlotActiveForOther('a', 'b'), true);
+  assert.equal(isSlotActiveForOther('a', 'a'), false);
+  assert.equal(isSlotActiveForOther(null, 'a'), false);
+  assert.equal(isSlotActiveForOther('a', null), false);
+
+  assert.equal(
+    deriveIsViewerSession({ isViewing: true, targetSharerId: null, viewerSharePaused: false, slotActiveIsOther: false }),
+    true,
+  );
+  assert.equal(
+    deriveIsViewerSession({ isViewing: false, targetSharerId: 'a', viewerSharePaused: false, slotActiveIsOther: false }),
+    true,
+  );
+  assert.equal(
+    deriveIsViewerSession({ isViewing: false, targetSharerId: null, viewerSharePaused: true, slotActiveIsOther: false }),
+    true,
+  );
+  assert.equal(
+    deriveIsViewerSession({ isViewing: false, targetSharerId: null, viewerSharePaused: false, slotActiveIsOther: true }),
+    true,
+  );
+  assert.equal(
+    deriveIsViewerSession({ isViewing: false, targetSharerId: null, viewerSharePaused: false, slotActiveIsOther: false }),
+    false,
+  );
+
+  assert.equal(
+    deriveIsInRoomShell({ isSharing: false, isViewerSession: false, roomRetained: true, sharePaused: false }),
+    true,
+  );
+  assert.equal(
+    deriveIsInRoomShell({ isSharing: false, isViewerSession: false, roomRetained: false, sharePaused: false }),
+    false,
+  );
+
+  assert.equal(
+    deriveIsShareSlotIdle({
+      inRoomShell: true,
+      isSharing: false,
+      isViewing: false,
+      isConnecting: false,
+      viewerSharePaused: false,
+      slotActiveIsOther: false,
+    }),
+    true,
+  );
+  assert.equal(
+    deriveIsShareSlotIdle({
+      inRoomShell: true,
+      isSharing: false,
+      isViewing: false,
+      isConnecting: false,
+      viewerSharePaused: false,
+      slotActiveIsOther: true,
+    }),
+    false,
+  );
+  assert.equal(
+    deriveIsShareSlotIdle({
+      inRoomShell: false,
+      isSharing: false,
+      isViewing: false,
+      isConnecting: false,
+      viewerSharePaused: false,
+      slotActiveIsOther: false,
+    }),
+    false,
+  );
+
+  const steps = ['fetching_ice', 'connecting_signaling', 'connecting_media', 'waiting_stream'] as const;
+  assert.equal(indexViewerStage('', steps), -1);
+  assert.equal(indexViewerStage('connecting_media', steps), 2);
+
+  assert.equal(
+    deriveIsChatEntryVisible({ inRoomShell: false, chatConnected: false, messageCount: 1, viewerFullscreen: false }),
+    true,
+  );
+  assert.equal(
+    deriveIsChatEntryVisible({ inRoomShell: true, chatConnected: false, messageCount: 0, viewerFullscreen: true }),
+    false,
+  );
+  assert.equal(deriveIsChatPanelVisible(true, true), true);
+  assert.equal(deriveIsChatPanelVisible(true, false), false);
+  assert.equal(deriveIsChatPanelVisible(false, true), false);
+});
 
 test('观看态：状态与画质叠进播放器，使用自绘控件条', () => {
   const markup = render({ isViewing: true, targetSharerId: 'sharer-1' });

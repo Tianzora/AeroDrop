@@ -87,6 +87,86 @@ interface ScreenShareUIProps {
   onEndRoom: () => void;
 }
 
+
+/**
+ * 房内共享界面状态是纯函数：把「谁在共享、我现在是什么视角、聊天入口是否可见」
+ * 这些判定从组件 render 里抽出来，既方便单测覆盖组合矩阵，也避免每个分支各写一遍。
+ */
+export function isShareLinkUsable(isShareLive: boolean, shareRoomExpired: boolean): boolean {
+  return isShareLive && !shareRoomExpired;
+}
+
+export function isSlotActiveForOther(
+  shareSlotActiveId: string | null | undefined,
+  localPeerId: string | null | undefined
+): boolean {
+  return Boolean(shareSlotActiveId && localPeerId && shareSlotActiveId !== localPeerId);
+}
+
+export function deriveIsViewerSession(input: {
+  isViewing: boolean;
+  targetSharerId: string | null;
+  viewerSharePaused: boolean;
+  slotActiveIsOther: boolean;
+}): boolean {
+  return (
+    input.isViewing ||
+    Boolean(input.targetSharerId) ||
+    input.viewerSharePaused ||
+    input.slotActiveIsOther
+  );
+}
+
+export function deriveIsInRoomShell(input: {
+  isSharing: boolean;
+  isViewerSession: boolean;
+  roomRetained: boolean;
+  sharePaused: boolean;
+}): boolean {
+  return input.isSharing || input.isViewerSession || input.roomRetained || input.sharePaused;
+}
+
+export function deriveIsShareSlotIdle(input: {
+  inRoomShell: boolean;
+  isSharing: boolean;
+  isViewing: boolean;
+  isConnecting: boolean;
+  viewerSharePaused: boolean;
+  slotActiveIsOther: boolean;
+}): boolean {
+  return (
+    input.inRoomShell &&
+    !input.isSharing &&
+    !input.isViewing &&
+    !input.isConnecting &&
+    !input.viewerSharePaused &&
+    !input.slotActiveIsOther
+  );
+}
+
+export function indexViewerStage(
+  stage: ScreenShareViewerConnectingStage,
+  steps: readonly ScreenShareViewerConnectingStage[]
+): number {
+  return stage ? steps.indexOf(stage) : -1;
+}
+
+export function deriveIsChatEntryVisible(input: {
+  inRoomShell: boolean;
+  chatConnected: boolean;
+  messageCount: number;
+  viewerFullscreen: boolean;
+}): boolean {
+  return (
+    (input.inRoomShell || input.chatConnected || input.messageCount > 0) &&
+    !input.viewerFullscreen
+  );
+}
+
+export function deriveIsChatPanelVisible(chatEntryVisible: boolean, chatOpen: boolean): boolean {
+  return chatEntryVisible && chatOpen;
+}
+
 export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   isSharing,
   isViewing,
@@ -134,26 +214,37 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   onEndRoom,
 }) => {
   // 链接可用 = 信令就绪 且 房号没过期。任一不成立，这个链接就指向一个连不上的分享。
-  const linkUsable = isShareLive && !shareRoomExpired;
+  const linkUsable = isShareLinkUsable(isShareLive, shareRoomExpired);
   // 只要还在房间里，就保持共享工具条/聊天入口，而不是退回大标题落地页。
   // 房间共享槽：active 是别人 → watching（可顶替）；active 是自己时仍算共享端，
   // 不能因为槽里有值就把自己当成观看端，否则顶替成功后界面不会切到共享工具条。
-  const slotActiveIsOther = Boolean(
-    shareSlotActiveId && localPeerId && shareSlotActiveId !== localPeerId,
-  );
-  const isViewerSession =
-    isViewing || Boolean(targetSharerId) || viewerSharePaused || slotActiveIsOther;
-  const inRoomShell = isSharing || isViewerSession || roomRetained || sharePaused;
-  const slotIdle =
-    inRoomShell && !isSharing && !isViewing && !isConnecting && !viewerSharePaused && !slotActiveIsOther;
+  const slotActiveIsOther = isSlotActiveForOther(shareSlotActiveId, localPeerId);
+  const isViewerSession = deriveIsViewerSession({
+    isViewing,
+    targetSharerId,
+    viewerSharePaused,
+    slotActiveIsOther,
+  });
+  const inRoomShell = deriveIsInRoomShell({
+    isSharing,
+    isViewerSession,
+    roomRetained,
+    sharePaused,
+  });
+  const slotIdle = deriveIsShareSlotIdle({
+    inRoomShell,
+    isSharing,
+    isViewing,
+    isConnecting,
+    viewerSharePaused,
+    slotActiveIsOther,
+  });
   const reduceMotion = useReducedMotion();
 
   // 观看端建连的四个阶段：把「系统正在做什么」摊成一条可见的进度轨，
   // 而不是只留一个转圈图标（.impeccable：动效要成为系统在工作的证据）。
   const viewerStageSteps = ['fetching_ice', 'connecting_signaling', 'connecting_media', 'waiting_stream'] as const;
-  const viewerStageIndex = viewerConnectingStage
-    ? viewerStageSteps.indexOf(viewerConnectingStage as (typeof viewerStageSteps)[number])
-    : -1;
+  const viewerStageIndex = indexViewerStage(viewerConnectingStage, viewerStageSteps);
 
   const viewerContainerRef = useRef<HTMLDivElement | null>(null);
   const viewerElRef = useRef<HTMLVideoElement | null>(null);
@@ -298,10 +389,13 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
 
   // 右侧「互动」卡默认收起：主卡里先给一个「加入聊天房间」按钮，点击才展开。
   // 停止共享只停画面、不断房间，所以聊天入口仍要保留；全屏观看时让位给画面。
-  const chatEntryVisible =
-    (inRoomShell || chat.connected || chat.messages.length > 0) &&
-    !viewerFullscreen;
-  const showChat = chatEntryVisible && chat.open;
+  const chatEntryVisible = deriveIsChatEntryVisible({
+    inRoomShell,
+    chatConnected: chat.connected,
+    messageCount: chat.messages.length,
+    viewerFullscreen,
+  });
+  const showChat = deriveIsChatPanelVisible(chatEntryVisible, chat.open);
 
   const chatEntryButton = chatEntryVisible ? (
     <button
