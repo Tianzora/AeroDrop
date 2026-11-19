@@ -1,7 +1,7 @@
 import React, { useCallback, useEffect, useRef, useState } from 'react';
 import { createPortal } from 'react-dom';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
-import { Monitor, StopCircle, Play, Pause, AlertCircle, Copy, Check, Share2, Eye, Loader2, RefreshCw, X, MonitorUp, Maximize, Minimize, Volume2, VolumeX, PictureInPicture, AlertTriangle, LogOut, MessageCircle } from 'lucide-react';
+import { Monitor, StopCircle, Play, Pause, AlertCircle, Copy, Check, Share2, Eye, Loader2, RefreshCw, X, MonitorUp, Maximize, Minimize, Volume2, VolumeX, PictureInPicture, AlertTriangle, LogOut } from 'lucide-react';
 import { ChatPanel, type ChatPanelMessage } from './ChatPanel';
 import type { RoomVoiceApi } from '../../services/voice/useRoomVoice';
 import type { LocalProfile } from '../../services/profile/localProfile';
@@ -395,41 +395,12 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
     copyShareLink();
   }, [shareLink, copyShareLink]);
 
-  // 右侧「互动」卡默认收起：主卡里先给一个「加入聊天房间」按钮，点击才展开。
-  // 停止共享只停画面、不断房间，所以聊天入口仍要保留；全屏观看时让位给画面。
-  const chatEntryVisible = deriveIsChatEntryVisible({
-    inRoomShell,
-    chatConnected: chat.connected,
-    messageCount: chat.messages.length,
-    viewerFullscreen,
-  });
-  const showChat = deriveIsChatPanelVisible(chatEntryVisible, chat.open);
-
-  const chatEntryButton = chatEntryVisible ? (
-    <button
-      type="button"
-      onClick={chat.onToggle}
-      aria-expanded={chat.open}
-      aria-controls="room-chat-panel"
-      className="inline-flex h-9 shrink-0 items-center gap-2 rounded-full border border-slate-200 bg-white px-3 text-xs font-bold text-slate-600 transition-colors hover:bg-slate-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-slate-300"
-    >
-      <MessageCircle size={15} />
-      {chat.open ? '收起聊天' : '加入聊天房间'}
-      {chat.messages.length > 0 && (
-        <span className="inline-flex min-w-4 items-center justify-center rounded-full bg-brand-600 px-1.5 py-0.5 text-xs leading-none text-white">
-          {chat.messages.length}
-        </span>
-      )}
-    </button>
-  ) : null;
+  // 共享页固定左右两栏：左「屏幕共享」卡、右「互动」卡（语音/聊天 tab）；窄屏由 grid 自动上下堆叠，
+  // 不再默认收起、也不再靠「加入聊天房间」按钮展开。
 
   return (
     <div className="w-full mx-auto">
-      <div
-        className={`grid items-stretch gap-4 mx-auto ${
-          showChat ? 'max-w-5xl lg:grid-cols-[minmax(0,1fr)_22rem]' : 'max-w-xl'
-        }`}
-      >
+      <div className="mx-auto grid max-w-xl items-stretch gap-4 lg:max-w-5xl lg:grid-cols-[minmax(0,1.4fr)_minmax(320px,1fr)]">
         <div className="min-w-0 bg-white rounded-card shadow-card border border-slate-100 p-6 md:p-8 transition-colors motion-base animate-slide-up">
         {/* 共享 / 观看中把装饰性大头部压成工具条式紧凑头部：Meet / Zoom 进入「正在
             共享」态后都会收起介绍性大标题，把纵向空间让给画面和操作；未开始时保
@@ -457,7 +428,6 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
                   实时观看对方共享的屏幕内容
                 </p>
               )}
-              {chatEntryButton}
             </div>
           </div>
         ) : (
@@ -479,7 +449,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
               </p>
             )}
           </div>
-          {chatEntryButton && <div className="mb-6 flex justify-end">{chatEntryButton}</div>}
+
           </>
         )}
 
@@ -1086,21 +1056,18 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
         )}
         </div>
 
-        {showChat && (
-          <ChatPanel
-            role={chat.role}
-            connected={chat.connected}
-            messages={chat.messages}
-            onSend={chat.onSend}
-            onExport={chat.onExport}
-            onClose={chat.onClose}
-            connectingHint={chat.role === 'viewer' ? '共享已结束，聊天连接建立中' : '等待观众加入聊天'}
-            localPeerId={localPeerId}
-            localProfile={localProfile}
-            peerProfiles={peerProfiles}
-            voice={voice}
-          />
-        )}
+        <ChatPanel
+          role={chat.role}
+          connected={chat.connected}
+          messages={chat.messages}
+          onSend={chat.onSend}
+          onExport={chat.onExport}
+          connectingHint={chat.role === 'viewer' ? '共享已结束，聊天连接建立中' : '等待观众加入聊天'}
+          localPeerId={localPeerId}
+          localProfile={localProfile}
+          peerProfiles={peerProfiles}
+          voice={voice}
+        />
       </div>
       {showTakeoverConfirm &&
         createPortal(

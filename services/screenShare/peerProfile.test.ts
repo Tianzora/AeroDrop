@@ -3,10 +3,14 @@ import test from 'node:test';
 
 import { DEFAULT_AVATAR } from '../profile/localProfile.ts';
 import {
+  PEER_PROFILE_LIST_MESSAGE_TYPE,
   PEER_PROFILE_MESSAGE_TYPE,
+  createPeerProfileListMessage,
   createPeerProfileMessage,
+  isPeerProfileListMessage,
   isPeerProfileMessage,
   sanitizePeerProfile,
+  sanitizePeerProfileMap,
 } from './peerProfile.ts';
 
 test('身份帧类型固定为 peer-profile，和聊天/共享控制帧区分开', () => {
@@ -45,4 +49,39 @@ test('createPeerProfileMessage 发送前也做一次规整', () => {
     name: '访客',
     avatar: DEFAULT_AVATAR,
   });
+});
+test('成员映射帧类型为 peer-profile-list，和单帧 peer-profile 区分开', () => {
+  assert.equal(PEER_PROFILE_LIST_MESSAGE_TYPE, 'peer-profile-list');
+  assert.equal(isPeerProfileListMessage({ type: 'peer-profile-list', profiles: {} }), true);
+  assert.equal(isPeerProfileListMessage({ type: 'peer-profile', name: '阿狸', avatar: '🦊' }), false);
+  assert.equal(isPeerProfileListMessage({ type: 'peer-profile-list', profiles: [] }), false);
+  assert.equal(isPeerProfileListMessage({ type: 'peer-profile-list' }), false);
+  assert.equal(isPeerProfileListMessage(null), false);
+});
+
+test('sanitizePeerProfileMap 逐项清洗，丢弃空键/空名/非对象条目', () => {
+  const map = sanitizePeerProfileMap({
+    type: 'peer-profile-list',
+    profiles: {
+      'peer-a': { name: '  阿狸 ', avatar: '🦊' },
+      'peer-b': { name: '阿呆', avatar: 'bad' },
+      'peer-c': { name: '   ', avatar: '🐼' },
+      'peer-d': 'nope',
+      '': { name: '无键', avatar: '🐼' },
+    },
+  });
+  assert.deepEqual(map, {
+    'peer-a': { name: '阿狸', avatar: '🦊' },
+    'peer-b': { name: '阿呆', avatar: DEFAULT_AVATAR },
+  });
+  assert.deepEqual(sanitizePeerProfileMap({ type: 'nope' }), {});
+});
+
+test('createPeerProfileListMessage 发送前清洗整个映射', () => {
+  const message = createPeerProfileListMessage({
+    'peer-a': { name: '  阿狸  ', avatar: '🐼' },
+    'peer-b': { name: '', avatar: '🐼' },
+  });
+  assert.equal(message.type, 'peer-profile-list');
+  assert.deepEqual(message.profiles, { 'peer-a': { name: '阿狸', avatar: '🐼' } });
 });

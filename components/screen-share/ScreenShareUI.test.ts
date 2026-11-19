@@ -250,24 +250,23 @@ test('他人共享中提供顶替共享；顶替需先确认，本端不出现�
   assert.doesNotMatch(markup, />\s*停止共享\s*</);
 });
 
-test('聊天默认收起，点主卡「加入聊天房间」后才展开互动卡', () => {
-  const closed = render({ isSharing: true });
-  assert.doesNotMatch(closed, /aria-label="房间聊天"/);
-  assert.match(closed, /加入聊天房间/);
-
-  const open = render({
+test('共享页固定左右两栏，互动卡常驻无需「加入聊天房间」', () => {
+  const markup = render({
     isSharing: true,
     chat: {
       ...baseProps.chat,
-      open: true,
       connected: true,
       messages: [{ id: 'm1', fromPeerId: 'me', ts: Date.now(), text: '你好' }],
     },
   });
-  assert.match(open, /aria-label="房间聊天"/);
-  assert.match(open, /收起聊天/);
-  assert.match(open, /互动/);
-  assert.match(open, /语音/);
+  // 互动卡常驻：不依赖按钮展开，也不提供收起。
+  assert.match(markup, /aria-label="房间聊天"/);
+  assert.doesNotMatch(markup, /加入聊天房间/);
+  assert.doesNotMatch(markup, /收起聊天/);
+  assert.match(markup, /互动/);
+  assert.match(markup, /语音/);
+  // ≥lg 固定两栏：左屏幕共享、右互动，窄屏单列由 grid 自动堆叠。
+  assert.match(markup, /lg:grid-cols-\[minmax\(0,1.4fr\)_minmax\(320px,1fr\)\]/);
 });
 
 test('共享态：保留分享链接卡片与共享操作条', () => {
@@ -493,7 +492,8 @@ test('冷却结束后「重新开始共享」恢复可点，倒计时也从界�
   });
 
   assert.doesNotMatch(markup, /秒后可重试/);
-  assert.doesNotMatch(markup, /disabled=""/);
+  // 互动卡常驻后同屏还有其它禁用控件（聊天输入等），只确认「重新开始共享」这颗按钮没有被禁用。
+  assert.doesNotMatch(markup, /<button[^>]*disabled=""[^>]*>(?:(?!<button)[\s\S])*?重新开始共享/);
   assert.match(markup, /重新开始共享/);
 });
 
@@ -540,7 +540,8 @@ test('观众没有冷却时不显示倒计时，也不禁用重试', () => {
 
   assert.match(markup, /重试连接/);
   assert.doesNotMatch(markup, /秒后可重试/);
-  assert.doesNotMatch(markup, /disabled=""/);
+  // 只断言「重试连接」这颗按钮，不误伤常驻互动卡里的禁用聊天控件。
+  assert.doesNotMatch(markup, /<button[^>]*disabled=""[^>]*>(?:(?!<button)[\s\S])*?重试连接/);
 });
 
 test('观众端错误终态只留重试/取消，不冒出发送端的「开始共享屏幕」', () => {
@@ -584,7 +585,8 @@ test('冷却结束后主按钮恢复可用且不显示倒计时', () => {
 
   assert.match(markup, /开始共享屏幕/);
   assert.doesNotMatch(markup, /秒后可重试/);
-  assert.doesNotMatch(markup, /disabled=""/);
+  // 常驻互动卡的输入框天然禁用，这里只确认主按钮未被禁用。
+  assert.doesNotMatch(markup, /<button[^>]*disabled=""[^>]*>(?:(?!<button)[\s\S])*?开始共享屏幕/);
 });
 
 test('房号过期卡的「重新开始共享」在冷却期内同样禁用', () => {

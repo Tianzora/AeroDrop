@@ -48,3 +48,61 @@ export function createPeerProfileMessage(profile: DisplayProfile): PeerProfileMe
     avatar: isProfileAvatar(profile.avatar) ? profile.avatar : DEFAULT_AVATAR,
   };
 }
+
+export const PEER_PROFILE_LIST_MESSAGE_TYPE = 'peer-profile-list';
+
+/**
+ * 房主汇总的成员身份映射帧：`{ type: 'peer-profile-list', profiles: { [peerId]: {name,avatar} } }`。
+ * 键必须是对端真实的 `conn.peer`（房主从信令来源取得），名字/头像只用于显示。
+ */
+export interface PeerProfileListMessage {
+  type: typeof PEER_PROFILE_LIST_MESSAGE_TYPE;
+  profiles: Record<string, DisplayProfile>;
+}
+
+export function isPeerProfileListMessage(value: unknown): value is PeerProfileListMessage {
+  if (!value || typeof value !== 'object') return false;
+  const record = value as Record<string, unknown>;
+  return (
+    record.type === PEER_PROFILE_LIST_MESSAGE_TYPE &&
+    !!record.profiles &&
+    typeof record.profiles === 'object' &&
+    !Array.isArray(record.profiles)
+  );
+}
+
+/** 校验并清洗房主广播的成员映射；坏条目（空键、空名）直接丢弃，非法头像回落默认。 */
+export function sanitizePeerProfileMap(value: unknown): Record<string, DisplayProfile> {
+  if (!isPeerProfileListMessage(value)) return {};
+  const out: Record<string, DisplayProfile> = {};
+  for (const [peerId, raw] of Object.entries(value.profiles)) {
+    if (!peerId) continue;
+    if (!raw || typeof raw !== 'object') continue;
+    const entry = raw as unknown as Record<string, unknown>;
+    const name = sanitizeProfileName(entry.name, '');
+    if (!name) continue;
+    out[peerId] = {
+      name,
+      avatar: isProfileAvatar(entry.avatar) ? entry.avatar : DEFAULT_AVATAR,
+    };
+  }
+  return out;
+}
+
+export function createPeerProfileListMessage(
+  profiles: Record<string, DisplayProfile>
+): PeerProfileListMessage {
+  return {
+    type: PEER_PROFILE_LIST_MESSAGE_TYPE,
+    profiles: sanitizePeerProfileMap({ type: PEER_PROFILE_LIST_MESSAGE_TYPE, profiles }),
+  };
+}
+/** 把本机身份补进成员映射（房主广播时用）；selfPeerId 为空时返回副本。 */
+export function withSelfProfile(
+  profiles: Record<string, DisplayProfile>,
+  selfPeerId: string | null,
+  selfProfile: DisplayProfile
+): Record<string, DisplayProfile> {
+  if (!selfPeerId) return { ...profiles };
+  return { ...profiles, [selfPeerId]: selfProfile };
+}

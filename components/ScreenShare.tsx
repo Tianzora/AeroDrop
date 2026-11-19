@@ -4,9 +4,13 @@ import { useRoomChat } from '../services/chat/useRoomChat';
 import { useRoomVoice } from '../services/voice/useRoomVoice';
 import { useLocalProfile } from '../services/profile/useLocalProfile';
 import {
+  createPeerProfileListMessage,
   createPeerProfileMessage,
+  isPeerProfileListMessage,
   isPeerProfileMessage,
   sanitizePeerProfile,
+  sanitizePeerProfileMap,
+  withSelfProfile,
   type DisplayProfile,
 } from '../services/screenShare/peerProfile';
 import { getIceConfig } from '../services/stunService';
@@ -209,6 +213,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   }, [localProfile]);
   // 键为真实 conn.peer，值是对方广播的昵称/头像。
   const [peerProfiles, setPeerProfiles] = useState<Record<string, DisplayProfile>>({});
+  const peerProfilesRef = useRef<Record<string, DisplayProfile>>({});
 
   const hasInitialConnectedRef = useRef(false);
 
@@ -899,17 +904,16 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       };
       if (conn.open) sendShareSlotState();
       conn.on('open', sendShareSlotState);
-      // 新成员一打开就告知自己的昵称/头像（仅显示用，best-effort）。
-      const sendProfile = () => {
+      const sendIdentity = () => {
         if (!conn.open) return;
         try {
           conn.send(createPeerProfileMessage(localProfileRef.current));
+          conn.send(createPeerProfileListMessage(withSelfProfile(peerProfilesRef.current, localPeerIdRef.current, localProfileRef.current)));
         } catch {
-          // 身份帧失败不影响共享控制。
         }
       };
-      if (conn.open) sendProfile();
-      conn.on('open', sendProfile);
+      if (conn.open) sendIdentity();
+      conn.on('open', sendIdentity);
     });
 
     peer.on('call', (call) => {
@@ -1612,6 +1616,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       localPeerIdRef.current = null;
       setLocalPeerId(null);
       setPeerProfiles({});
+      peerProfilesRef.current = {};
       roomHostIdRef.current = null;
       activeWatchedSharerRef.current = null;
       shareSlotKnownRef.current = false;
@@ -2828,11 +2833,24 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   }, [markViewerSharePaused, onNotification]);
 
   const handleRoomControl = useCallback((message: unknown, sourcePeerId: string) => {
-    // 身份帧优先处理：以真实 conn.peer 为键，只用于显示，不进入共享槽逻辑。
     if (isPeerProfileMessage(message)) {
       const profile = sanitizePeerProfile(message);
-      if (profile) {
-        setPeerProfiles((prev) => ({ ...prev, [sourcePeerId]: profile }));
+      if (!profile) return;
+      peerProfilesRef.current = { ...peerProfilesRef.current, [sourcePeerId]: profile };
+      if (isRoomHost()) {
+        chat.sendControl(createPeerProfileListMessage(withSelfProfile(peerProfilesRef.current, localPeerIdRef.current, localProfileRef.current)));
+        setPeerProfiles(withSelfProfile(peerProfilesRef.current, localPeerIdRef.current, localProfileRef.current));
+      } else {
+        setPeerProfiles(peerProfilesRef.current);
+      }
+      return;
+    }
+    if (isPeerProfileListMessage(message)) {
+      const hostId = roomHostIdRef.current;
+      if (!isRoomHost() && hostId && sourcePeerId === hostId) {
+        const map = sanitizePeerProfileMap(message);
+        peerProfilesRef.current = map;
+        setPeerProfiles(map);
       }
       return;
     }
@@ -3137,6 +3155,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     localPeerIdRef.current = null;
     setLocalPeerId(null);
     setPeerProfiles({});
+    peerProfilesRef.current = {};
     roomHostIdRef.current = null;
     setIsSharing(false);
     setIsViewing(false);

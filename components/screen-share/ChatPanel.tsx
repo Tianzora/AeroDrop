@@ -329,7 +329,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
 
           <div className="flex flex-col gap-2" aria-label="房间成员">
             <MemberRow avatar={localProfile?.avatar ?? '🙂'} name={localProfile?.name ?? '我'} isSelf />
-            {Object.entries(peerProfiles ?? {}).map(([peerId, peer]) => (
+            {Object.entries(peerProfiles ?? {}).filter(([peerId]) => peerId !== localPeerId).map(([peerId, peer]) => (
               <MemberRow key={peerId} avatar={peer.avatar} name={peer.name} />
             ))}
           </div>
