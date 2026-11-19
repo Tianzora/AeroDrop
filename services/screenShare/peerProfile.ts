@@ -52,6 +52,13 @@ export function createPeerProfileMessage(profile: DisplayProfile): PeerProfileMe
 export const PEER_PROFILE_LIST_MESSAGE_TYPE = 'peer-profile-list';
 
 /**
+ * 房主在身份上被信任：这里只限制帧大小/条目数，避免恶意房主用超大映射撑爆内存。
+ * 键是真实 conn.peer（不是可伪造的显示名），长度上限只防御异常信令。
+ */
+export const PEER_PROFILE_LIST_MAX_ENTRIES = 64;
+export const PEER_PROFILE_LIST_MAX_KEY_LENGTH = 128;
+
+/**
  * 房主汇总的成员身份映射帧：`{ type: 'peer-profile-list', profiles: { [peerId]: {name,avatar} } }`。
  * 键必须是对端真实的 `conn.peer`（房主从信令来源取得），名字/头像只用于显示。
  */
@@ -75,8 +82,10 @@ export function isPeerProfileListMessage(value: unknown): value is PeerProfileLi
 export function sanitizePeerProfileMap(value: unknown): Record<string, DisplayProfile> {
   if (!isPeerProfileListMessage(value)) return {};
   const out: Record<string, DisplayProfile> = {};
+  let count = 0;
   for (const [peerId, raw] of Object.entries(value.profiles)) {
-    if (!peerId) continue;
+    if (count >= PEER_PROFILE_LIST_MAX_ENTRIES) break;
+    if (!peerId || peerId.length > PEER_PROFILE_LIST_MAX_KEY_LENGTH) continue;
     if (!raw || typeof raw !== 'object') continue;
     const entry = raw as unknown as Record<string, unknown>;
     const name = sanitizeProfileName(entry.name, '');
@@ -85,6 +94,7 @@ export function sanitizePeerProfileMap(value: unknown): Record<string, DisplayPr
       name,
       avatar: isProfileAvatar(entry.avatar) ? entry.avatar : DEFAULT_AVATAR,
     };
+    count += 1;
   }
   return out;
 }
@@ -105,4 +115,23 @@ export function withSelfProfile(
 ): Record<string, DisplayProfile> {
   if (!selfPeerId) return { ...profiles };
   return { ...profiles, [selfPeerId]: selfProfile };
+}
+
+/** 把一个真实 conn.peer 的身份写入映射（不修改原对象）。 */
+export function mergePeerProfile(
+  profiles: Record<string, DisplayProfile>,
+  peerId: string,
+  profile: DisplayProfile
+): Record<string, DisplayProfile> {
+  return { ...profiles, [peerId]: profile };
+}
+
+/** 删除已断开的成员；未命中时也返回新对象，保证 React 状态一定刷新。 */
+export function removePeerProfile(
+  profiles: Record<string, DisplayProfile>,
+  peerId: string
+): Record<string, DisplayProfile> {
+  const next = { ...profiles };
+  delete next[peerId];
+  return next;
 }

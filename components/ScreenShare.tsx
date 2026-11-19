@@ -8,6 +8,8 @@ import {
   createPeerProfileMessage,
   isPeerProfileListMessage,
   isPeerProfileMessage,
+  mergePeerProfile,
+  removePeerProfile,
   sanitizePeerProfile,
   sanitizePeerProfileMap,
   withSelfProfile,
@@ -323,6 +325,20 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const failSharerSessionRef = useRef<(message: string) => void>(() => {});
   // 正在 answer 途中、还没进 activeCalls 的观众：提前占住名额，避免并发超员。
   const pendingViewerPeersRef = useRef<Set<string>>(new Set());
+
+  const publishProfiles = (next: Record<string, DisplayProfile>) => {
+    const isHost = localPeerIdRef.current !== null && localPeerIdRef.current === roomHostIdRef.current;
+    peerProfilesRef.current = next;
+    const visible = isHost ? withSelfProfile(next, localPeerIdRef.current, localProfileRef.current) : next;
+    setPeerProfiles(visible);
+    if (isHost) chat.sendControl(createPeerProfileListMessage(visible));
+  };
+  // 本机资料变化后重广播：房主直接广播新快照，观众发单帧由房主汇总后再回传。
+  useEffect(() => {
+    if (!localPeerId) return;
+    if (localPeerId === roomHostIdRef.current) publishProfiles(peerProfilesRef.current);
+    else chat.sendControl(createPeerProfileMessage(localProfile));
+  }, [chat.sendControl, localPeerId, localProfile]);
 
   // 同一个 viewer 可能在旧 call 的 ICE 宽限期内重连，新的 MediaConnection 会复用同一个
   // peerId。监控器必须绑定到具体的 PeerConnection，否则新连接会继承旧 PC 的定时器。
@@ -904,16 +920,8 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       };
       if (conn.open) sendShareSlotState();
       conn.on('open', sendShareSlotState);
-      const sendIdentity = () => {
-        if (!conn.open) return;
-        try {
-          conn.send(createPeerProfileMessage(localProfileRef.current));
-          conn.send(createPeerProfileListMessage(withSelfProfile(peerProfilesRef.current, localPeerIdRef.current, localProfileRef.current)));
-        } catch {
-        }
-      };
-      if (conn.open) sendIdentity();
-      conn.on('open', sendIdentity);
+      // 观众连接打开后会主动发单帧身份，房主收到后广播完整映射；这里只负责清理离开成员。
+      conn.on('close', () => publishProfiles(removePeerProfile(peerProfilesRef.current, conn.peer)));
     });
 
     peer.on('call', (call) => {
@@ -2835,22 +2843,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
   const handleRoomControl = useCallback((message: unknown, sourcePeerId: string) => {
     if (isPeerProfileMessage(message)) {
       const profile = sanitizePeerProfile(message);
-      if (!profile) return;
-      peerProfilesRef.current = { ...peerProfilesRef.current, [sourcePeerId]: profile };
-      if (isRoomHost()) {
-        chat.sendControl(createPeerProfileListMessage(withSelfProfile(peerProfilesRef.current, localPeerIdRef.current, localProfileRef.current)));
-        setPeerProfiles(withSelfProfile(peerProfilesRef.current, localPeerIdRef.current, localProfileRef.current));
-      } else {
-        setPeerProfiles(peerProfilesRef.current);
-      }
+      if (profile) publishProfiles(mergePeerProfile(peerProfilesRef.current, sourcePeerId, profile));
       return;
     }
     if (isPeerProfileListMessage(message)) {
       const hostId = roomHostIdRef.current;
       if (!isRoomHost() && hostId && sourcePeerId === hostId) {
-        const map = sanitizePeerProfileMap(message);
-        peerProfilesRef.current = map;
-        setPeerProfiles(map);
+        peerProfilesRef.current = sanitizePeerProfileMap(message);
+        setPeerProfiles(peerProfilesRef.current);
       }
       return;
     }

@@ -6,8 +6,6 @@ import { renderToStaticMarkup } from 'react-dom/server';
 
 import {
   ScreenShareUI,
-  deriveIsChatEntryVisible,
-  deriveIsChatPanelVisible,
   deriveIsInRoomShell,
   deriveIsShareSlotIdle,
   deriveIsViewerSession,
@@ -152,17 +150,7 @@ test('房间共享视图判定是纯函数：链接/槽位/视角/聊天入口�
   assert.equal(indexViewerStage('', steps), -1);
   assert.equal(indexViewerStage('connecting_media', steps), 2);
 
-  assert.equal(
-    deriveIsChatEntryVisible({ inRoomShell: false, chatConnected: false, messageCount: 1, viewerFullscreen: false }),
-    true,
-  );
-  assert.equal(
-    deriveIsChatEntryVisible({ inRoomShell: true, chatConnected: false, messageCount: 0, viewerFullscreen: true }),
-    false,
-  );
-  assert.equal(deriveIsChatPanelVisible(true, true), true);
-  assert.equal(deriveIsChatPanelVisible(true, false), false);
-  assert.equal(deriveIsChatPanelVisible(false, true), false);
+
 });
 
 test('观看态：状态与画质叠进播放器，使用自绘控件条', () => {

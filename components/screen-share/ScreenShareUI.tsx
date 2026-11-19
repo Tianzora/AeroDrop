@@ -157,21 +157,6 @@ export function indexViewerStage(
   return stage ? steps.indexOf(stage) : -1;
 }
 
-export function deriveIsChatEntryVisible(input: {
-  inRoomShell: boolean;
-  chatConnected: boolean;
-  messageCount: number;
-  viewerFullscreen: boolean;
-}): boolean {
-  return (
-    (input.inRoomShell || input.chatConnected || input.messageCount > 0) &&
-    !input.viewerFullscreen
-  );
-}
-
-export function deriveIsChatPanelVisible(chatEntryVisible: boolean, chatOpen: boolean): boolean {
-  return chatEntryVisible && chatOpen;
-}
 
 export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   isSharing,

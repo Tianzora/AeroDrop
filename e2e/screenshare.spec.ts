@@ -127,6 +127,16 @@ const trackMaxOccurrences = async (context: BrowserContext, source: string): Pro
 const readMaxSeen = async (page: Page): Promise<number> =>
   page.evaluate(() => (window as typeof window & { __maxSeen?: number }).__maxSeen ?? 0);
 
+/** 在首页右上角「设置资料」里改昵称与预设头像（仅 localStorage，刷新后仍在）。 */
+const setProfile = async (page: Page, name: string, avatar: string): Promise<void> => {
+  await page.getByRole('button', { name: '设置资料' }).click();
+  const dialog = page.getByRole('dialog');
+  await expect(dialog).toBeVisible();
+  await page.locator('#profile-name').fill(name);
+  await page.getByRole('radio', { name: `头像 ${avatar}` }).click();
+  await dialog.getByRole('button', { name: '保存', exact: true }).click();
+  await expect(page.getByRole('button', { name: '设置资料' })).toContainText(name);
+};
 const openViewer = async (browser: Browser, shareLink: string, track?: string): Promise<Page> => {
   const viewerContext = await browser.newContext();
   if (track) await trackMaxOccurrences(viewerContext, track);
@@ -228,7 +238,7 @@ const collectPageErrors = (page: Page): string[] => {
  * 存在的函数，但「没有可采集的桌面」只会在调用时抛错。只有真抓到一帧才算支持。
  *
  * 本机开发者没有显示服务时允许 skip（否则本地/无头环境寸步难行）；但 CI 里
- * fake-capture flag（playwright.product.config.ts）一旦回归，18 条走 ensureDisplayCapture 的用例会整组 skip
+ * fake-capture flag（playwright.product.config.ts）一旦回归，19 条走 ensureDisplayCapture 的用例会整组 skip
  * 而 job 依旧全绿——所以 CI 下把探测结果当断言，必须为 true。
  */
 const ensureDisplayCapture = async (page: Page): Promise<void> => {
@@ -1424,4 +1434,52 @@ test.describe('screen share', () => {
     }
   });
 
+  // 身份系统：本机资料刷新后仍在；房间内两位观众通过房主广播的 peer-profile-list 互见头像昵称。
+  // 不改聊天/语音/信令不变量，只验证身份呈现层。
+  test('room identity: profile survives reload and two viewers see each other', async ({ browser, page }) => {
+    test.slow();
+    await page.goto('/');
+    await setProfile(page, '房主甲', '🐳');
+    await page.reload();
+    await expect(page.getByRole('button', { name: '设置资料' })).toContainText('房主甲');
+
+    await ensureDisplayCapture(page);
+    await startSharing(page);
+    const shareLink = await getShareLink(page);
+
+    const openViewerWithProfile = async (name: string, avatar: string): Promise<Page> => {
+      const context = await browser.newContext();
+      const viewer = await context.newPage();
+      await viewer.goto('/');
+      await setProfile(viewer, name, avatar);
+      await viewer.goto(shareLink);
+      await dismissAutoplayOverlay(viewer);
+      return viewer;
+    };
+
+    const viewerA = await openViewerWithProfile('看客甲', '🐼');
+    const viewerB = await openViewerWithProfile('看客乙', '🦊');
+    try {
+      for (const target of [page, viewerA, viewerB]) {
+        await openChatPanel(target);
+        await waitForChatConnected(target);
+      }
+      for (const target of [page, viewerA, viewerB]) {
+        await target.getByRole('tab', { name: /语音/ }).click();
+      }
+
+      const membersA = viewerA.locator('[aria-label="房间成员"]');
+      await expect(membersA.getByText('看客乙', { exact: true })).toBeVisible({ timeout: 30_000 });
+      await expect(membersA.getByText('房主甲', { exact: true })).toBeVisible();
+      await expect(membersA.getByText('看客甲', { exact: true })).toBeVisible();
+      await expect(membersA.getByText('你', { exact: true })).toBeVisible();
+
+      const membersB = viewerB.locator('[aria-label="房间成员"]');
+      await expect(membersB.getByText('看客甲', { exact: true })).toBeVisible({ timeout: 30_000 });
+      await expect(membersB.getByText('房主甲', { exact: true })).toBeVisible();
+    } finally {
+      await viewerA.context().close();
+      await viewerB.context().close();
+    }
+  });
 })

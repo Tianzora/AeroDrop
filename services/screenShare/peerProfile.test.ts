@@ -4,11 +4,15 @@ import test from 'node:test';
 import { DEFAULT_AVATAR } from '../profile/localProfile.ts';
 import {
   PEER_PROFILE_LIST_MESSAGE_TYPE,
+  PEER_PROFILE_LIST_MAX_ENTRIES,
+  PEER_PROFILE_LIST_MAX_KEY_LENGTH,
   PEER_PROFILE_MESSAGE_TYPE,
   createPeerProfileListMessage,
   createPeerProfileMessage,
   isPeerProfileListMessage,
   isPeerProfileMessage,
+  mergePeerProfile,
+  removePeerProfile,
   sanitizePeerProfile,
   sanitizePeerProfileMap,
 } from './peerProfile.ts';
@@ -84,4 +88,39 @@ test('createPeerProfileListMessage 发送前清洗整个映射', () => {
   });
   assert.equal(message.type, 'peer-profile-list');
   assert.deepEqual(message.profiles, { 'peer-a': { name: '阿狸', avatar: '🐼' } });
+});
+
+test('成员映射有条目数与键长上限，超限条目直接丢弃', () => {
+  const profiles: Record<string, { name: string; avatar: string }> = {};
+  for (let i = 0; i < PEER_PROFILE_LIST_MAX_ENTRIES + 3; i += 1) {
+    profiles[`peer-${i}`] = { name: `成员${i}`, avatar: '🐼' };
+  }
+  const map = sanitizePeerProfileMap({ type: 'peer-profile-list', profiles });
+  assert.equal(Object.keys(map).length, PEER_PROFILE_LIST_MAX_ENTRIES);
+
+  const longKey = 'p'.repeat(PEER_PROFILE_LIST_MAX_KEY_LENGTH + 1);
+  assert.deepEqual(
+    sanitizePeerProfileMap({
+      type: 'peer-profile-list',
+      profiles: { [longKey]: { name: '超长键', avatar: '🐼' } },
+    }),
+    {}
+  );
+});
+
+test('mergePeerProfile / removePeerProfile 都返回新映射，不修改入参', () => {
+  const base = { 'peer-a': { name: '阿狸', avatar: '🦊' } };
+  const merged = mergePeerProfile(base, 'peer-b', { name: '阿呆', avatar: '🐼' });
+  assert.deepEqual(base, { 'peer-a': { name: '阿狸', avatar: '🦊' } });
+  assert.deepEqual(merged, {
+    'peer-a': { name: '阿狸', avatar: '🦊' },
+    'peer-b': { name: '阿呆', avatar: '🐼' },
+  });
+
+  const removed = removePeerProfile(merged, 'peer-a');
+  assert.deepEqual(merged, {
+    'peer-a': { name: '阿狸', avatar: '🦊' },
+    'peer-b': { name: '阿呆', avatar: '🐼' },
+  });
+  assert.deepEqual(removed, { 'peer-b': { name: '阿呆', avatar: '🐼' } });
 });

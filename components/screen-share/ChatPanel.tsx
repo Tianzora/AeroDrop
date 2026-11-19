@@ -101,11 +101,13 @@ export const resolveAuthor = (
   if (peerName) {
     return { mine: false, name: peerName, avatar: peer?.avatar || peerName.slice(0, 1) };
   }
-  const fallback = isViewer ? '房主' : '观众';
+  // 旧房主不会广播身份帧：观看端只连房主，回退「房主」仍然准确；
+  // 发送端可能同时有多条真实 conn.peer，必须退化成可区分的短 peerId，不能全叫「观众」。
+  const fallback = isViewer ? '房主' : `观众-${fromPeerId.slice(-4) || '未知'}`;
   return { mine: false, name: fallback, avatar: fallback.slice(0, 1) };
 };
 
-const MemberRow: React.FC<{ avatar: string; name: string; isSelf?: boolean }> = ({
+export const MemberRow: React.FC<{ avatar: string; name: string; isSelf?: boolean }> = ({
   avatar,
   name,
   isSelf,

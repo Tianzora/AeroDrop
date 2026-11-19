@@ -4,7 +4,7 @@ import test from 'node:test';
 import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
-import { ChatPanel, formatClock, handleDraftChange, handleDraftKeyDown, submitChatDraft } from './ChatPanel.tsx';
+import { ChatPanel, MemberRow, formatClock, handleDraftChange, handleDraftKeyDown, resolveAuthor, submitChatDraft } from './ChatPanel.tsx';
 import type { RoomVoiceApi } from '../../services/voice/useRoomVoice';
 
 const baseProps: React.ComponentProps<typeof ChatPanel> = {
@@ -135,4 +135,36 @@ test('语音 tab 接真实语音状态，不再显示「即将 / 通道尚未接
   assert.doesNotMatch(markup, /即将/);
   assert.doesNotMatch(markup, /语音通道尚未接通/);
   assert.doesNotMatch(markup, /下一阶段接入/);
+});
+
+test('resolveAuthor 区分本机、peerProfiles 命中与短 peerId 回退', () => {
+  const localProfile = { name: '小鱼', avatar: '🐳' };
+  assert.deepEqual(resolveAuthor('peer-self', 'peer-self', localProfile, {}, false), {
+    mine: true,
+    name: '小鱼',
+    avatar: '🐳',
+  });
+  assert.deepEqual(
+    resolveAuthor('peer-a', 'peer-self', localProfile, { 'peer-a': { name: '阿海', avatar: '🐬' } }, false),
+    { mine: false, name: '阿海', avatar: '🐬' }
+  );
+  assert.deepEqual(resolveAuthor('peer-1234', 'peer-self', localProfile, {}, false), {
+    mine: false,
+    name: '观众-1234',
+    avatar: '观',
+  });
+  assert.deepEqual(resolveAuthor('peer-1234', 'peer-self', localProfile, {}, true), {
+    mine: false,
+    name: '房主',
+    avatar: '房',
+  });
+});
+
+test('MemberRow 渲染头像昵称，自己带「你」标记', () => {
+  const markup = renderToStaticMarkup(
+    React.createElement(MemberRow, { avatar: '🐳', name: '小鱼', isSelf: true })
+  );
+  assert.match(markup, /🐳/);
+  assert.match(markup, /小鱼/);
+  assert.match(markup, /你/);
 });
