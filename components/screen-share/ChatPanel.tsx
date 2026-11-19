@@ -1,5 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
-import { Download, Headphones, MessageCircle, Send, WifiOff, X } from 'lucide-react';
+import { Download, Headphones, MessageCircle, Mic, MicOff, PhoneOff, Send, Volume2, WifiOff, X } from 'lucide-react';
+import type { RoomVoiceApi } from '../../services/voice/useRoomVoice';
+import { describeVoiceStatus } from '../../services/voice/voiceCore';
 
 export interface ChatPanelMessage {
   id: string;
@@ -19,6 +21,8 @@ export interface ChatPanelProps {
   onClose?: () => void;
   /** 面板已挂载但连接还没起来时给一句说明。 */
   connectingHint?: string;
+  /** 房间语音：与聊天同卡，语音页接真实麦克风控件。 */
+  voice?: RoomVoiceApi;
   className?: string;
 }
 
@@ -73,6 +77,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
   onExport,
   onClose,
   connectingHint,
+  voice,
   className = '',
 }) => {
   const [draft, setDraft] = useState('');
@@ -161,7 +166,7 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
         >
           语音
           <span className="rounded-full bg-slate-100 px-1.5 py-0.5 text-xs font-semibold leading-none text-slate-500">
-            即将
+            {voice?.joined ? (voice.muted ? '静音' : '通话中') : '未加入'}
           </span>
         </button>
       </div>
@@ -238,17 +243,91 @@ export const ChatPanel: React.FC<ChatPanelProps> = ({
           </div>
         </>
       ) : (
-        <div role="tabpanel" aria-label="语音规划" className="flex min-h-0 flex-1 flex-col items-center justify-center gap-3 px-5 text-center">
-          <div className="inline-flex h-12 w-12 items-center justify-center rounded-control bg-brand-50 text-brand-600">
-            <Headphones size={22} />
+        <div role="tabpanel" aria-label="房间语音" className="flex min-h-0 flex-1 flex-col gap-4 px-5 py-5">
+          <div className="flex items-center gap-3">
+            <div className="inline-flex h-10 w-10 shrink-0 items-center justify-center rounded-control bg-brand-50 text-brand-600">
+              <Headphones size={20} />
+            </div>
+            <div className="min-w-0">
+              <p className="text-sm font-bold text-slate-900">房间语音</p>
+              <p className="text-xs leading-relaxed text-slate-500">
+                {voice
+                  ? describeVoiceStatus({
+                      joined: voice.joined,
+                      muted: voice.muted,
+                      remoteMemberCount: voice.remoteMemberCount,
+                      error: voice.error,
+                    })
+                  : '语音通道未接入'}
+              </p>
+            </div>
           </div>
-          <p className="text-sm font-bold text-slate-900">语音通话</p>
-          <p className="max-w-60 text-xs leading-relaxed text-slate-400">
-            语音通话将在下一阶段接入麦克风轨。加入不自动开麦，每人音量可调 0–200%，按 64 kbps/人 预留带宽。
-          </p>
-          <span className="rounded-full bg-slate-100 px-3 py-1 text-xs font-medium text-slate-500">
-            语音通道尚未接通
-          </span>
+
+          {voice && voice.error && (
+            <p role="alert" className="rounded-control bg-red-50 px-3 py-2 text-xs leading-relaxed text-red-700">
+              {voice.error}
+            </p>
+          )}
+
+          {!voice?.joined ? (
+            <button
+              type="button"
+              onClick={() => void voice?.joinVoice()}
+              disabled={!voice}
+              className="inline-flex h-11 items-center justify-center gap-2 rounded-control bg-brand-600 px-4 text-sm font-bold text-white transition-colors hover:bg-brand-700 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Mic size={16} />
+              加入语音
+            </button>
+          ) : (
+            <>
+              <div className="flex gap-2">
+                <button
+                  type="button"
+                  onClick={() => void voice.toggleMute()}
+                  className={`inline-flex h-11 flex-1 items-center justify-center gap-2 rounded-control text-sm font-bold transition-colors focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-brand-300 ${
+                    voice.muted
+                      ? 'bg-amber-50 text-amber-700 ring-1 ring-amber-200 hover:bg-amber-100'
+                      : 'bg-slate-100 text-slate-700 hover:bg-slate-200'
+                  }`}
+                >
+                  {voice.muted ? <MicOff size={16} /> : <Mic size={16} />}
+                  {voice.muted ? '取消静音' : '静音'}
+                </button>
+                <button
+                  type="button"
+                  onClick={voice.leaveVoice}
+                  aria-label="离开语音"
+                  className="inline-flex h-11 items-center justify-center gap-2 rounded-control border border-red-200 px-3 text-sm font-bold text-red-600 transition-colors hover:bg-red-50 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-red-200"
+                >
+                  <PhoneOff size={16} />
+                  离开
+                </button>
+              </div>
+
+              <label className="flex flex-col gap-2 text-xs font-medium text-slate-600">
+                <span className="inline-flex items-center gap-1.5">
+                  <Volume2 size={14} className="text-slate-500" />
+                  对方音量
+                  <span className="ml-auto rounded-full bg-slate-100 px-2 py-0.5 text-xs font-bold text-slate-700">
+                    {voice.volume}%
+                  </span>
+                </span>
+                <input
+                  type="range"
+                  min={0}
+                  max={200}
+                  step={10}
+                  value={voice.volume}
+                  onChange={(event) => voice.setVolume(Number(event.target.value))}
+                  aria-label="对方音量"
+                  className="h-2 w-full cursor-pointer accent-brand-600"
+                  style={{ accentColor: '#2563eb' }}
+                />
+                <span className="text-xs text-slate-400">调节对端播放音量 0–200%（不会改变对方麦克风）</span>
+              </label>
+            </>
+          )}
         </div>
       )}
     </aside>

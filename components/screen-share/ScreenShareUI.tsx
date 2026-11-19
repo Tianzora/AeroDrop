@@ -3,6 +3,7 @@ import { createPortal } from 'react-dom';
 import { AnimatePresence, motion, useReducedMotion } from 'motion/react';
 import { Monitor, StopCircle, Play, Pause, AlertCircle, Copy, Check, Share2, Eye, Loader2, RefreshCw, X, MonitorUp, Maximize, Minimize, Volume2, VolumeX, PictureInPicture, AlertTriangle, LogOut, MessageCircle } from 'lucide-react';
 import { ChatPanel, type ChatPanelMessage } from './ChatPanel';
+import type { RoomVoiceApi } from '../../services/voice/useRoomVoice';
 
 export type ScreenShareViewerConnectingStage = 'fetching_ice' | 'connecting_signaling' | 'connecting_media' | 'waiting_stream' | '';
 
@@ -38,6 +39,9 @@ interface ScreenShareUIProps {
   localPeerId?: string | null;
   /** 观看端在「他人共享中」发起顶替（UI 已做二次确认）。 */
   onTakeoverShare?: () => void;
+
+  /** 房间语音 API：与聊天同卡，语音页接真实麦克风控件。 */
+  voice?: RoomVoiceApi;
 
   /** 房间聊天浮层的展示状态与回调，由 ScreenShare 提供。 */
   chat: {
@@ -106,6 +110,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   shareSlotActiveId = null,
   localPeerId = null,
   onTakeoverShare,
+  voice,
   chat,
   qualityLabels,
   remoteQuality,
@@ -131,13 +136,14 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
   // 链接可用 = 信令就绪 且 房号没过期。任一不成立，这个链接就指向一个连不上的分享。
   const linkUsable = isShareLive && !shareRoomExpired;
   // 只要还在房间里，就保持共享工具条/聊天入口，而不是退回大标题落地页。
-  const isViewerSession =
-    isViewing || Boolean(targetSharerId) || viewerSharePaused || Boolean(shareSlotActiveId);
-  const inRoomShell = isSharing || isViewerSession || roomRetained || sharePaused;
-  // 房间共享槽：active 是别人 → watching（可顶替）；没有 active 且不在收流/连接 → idle。
+  // 房间共享槽：active 是别人 → watching（可顶替）；active 是自己时仍算共享端，
+  // 不能因为槽里有值就把自己当成观看端，否则顶替成功后界面不会切到共享工具条。
   const slotActiveIsOther = Boolean(
     shareSlotActiveId && localPeerId && shareSlotActiveId !== localPeerId,
   );
+  const isViewerSession =
+    isViewing || Boolean(targetSharerId) || viewerSharePaused || slotActiveIsOther;
+  const inRoomShell = isSharing || isViewerSession || roomRetained || sharePaused;
   const slotIdle =
     inRoomShell && !isSharing && !isViewing && !isConnecting && !viewerSharePaused && !slotActiveIsOther;
   const reduceMotion = useReducedMotion();
@@ -987,6 +993,7 @@ export const ScreenShareUI: React.FC<ScreenShareUIProps> = ({
             onExport={chat.onExport}
             onClose={chat.onClose}
             connectingHint={chat.role === 'viewer' ? '共享已结束，聊天连接建立中' : '等待观众加入聊天'}
+            voice={voice}
           />
         )}
       </div>

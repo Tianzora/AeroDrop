@@ -1,6 +1,7 @@
 import React, { useState, useRef, useCallback, useEffect, useMemo } from 'react';
 import { loadPeerRuntime, type Peer, type MediaConnection, type DataConnection } from '../services/peerRuntime';
 import { useRoomChat } from '../services/chat/useRoomChat';
+import { useRoomVoice } from '../services/voice/useRoomVoice';
 import { getIceConfig } from '../services/stunService';
 import {
   getPreferredScreenShareCodecOrder,
@@ -188,6 +189,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     onNotify: onNotification,
     onControl: (message, sourcePeerId) => roomControlHandlerRef.current(message, sourcePeerId),
   });
+
+  // —— 房间语音（M2）——
+  // 复用 room DataConnection 预留的 audio transceiver；共享开停与顶替都不会重建它。
+  const voice = useRoomVoice();
 
   const hasInitialConnectedRef = useRef(false);
 
@@ -866,6 +871,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     peer.on('room', (conn) => {
       logDebug('log', 'Room chat connection received from:', conn.peer);
       chat.attachRoomConnection(conn);
+      voice.attachConnection(conn);
       // 新成员一打开 room 通道就把当前 ShareSlot 快照发过去；晚加入者据此进入 watching/idle。
       const sendShareSlotState = () => {
         if (!conn.open) return;
@@ -1571,6 +1577,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     // 只有手动停止时才清除目标ID，方便重连；「结束并离开」同时清空聊天记录。
     if (isManual) {
       viewerHadStreamRef.current = false;
+      voice.reset();
       chat.reset('viewer');
       clearPersistedViewerSession();
       setTargetSharerId(null);
@@ -1585,7 +1592,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       remoteShareEndHandledRef.current = false;
       remoteShareFullRef.current = false;
     }
-  }, [clearPersistedViewerSession, clearViewerWaitTerminal, chat.reset, markViewerSharePaused]);
+  }, [clearPersistedViewerSession, clearViewerWaitTerminal, chat.reset, markViewerSharePaused, voice.reset]);
 
   /**
    * 远端共享结束：显式枚举 reason，避免靠中文文案猜「只是停共享」还是「房主离开」。
@@ -1923,10 +1930,15 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       // 房间聊天：独立的 kind:'room' 通道（与上面分享控制 data 通道分开），观看端发起。
       chat.setRole('viewer');
       chat.setLocalPeerId(peer.id);
-      chat.attachRoomConnection(peer.connectRoom(sharerId));
+      const roomConnection = peer.connectRoom(sharerId);
+      chat.attachRoomConnection(roomConnection);
+      voice.attachConnection(roomConnection);
 
       // 2. 建立媒体连接
       const call = peer.call(sharerId);
+      if (call) {
+        activeWatchedSharerRef.current = sharerId;
+      }
 
       if (!call) {
         setError('无法发起连接，请检查连接 ID');
@@ -2711,7 +2723,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     const peer = peerRef.current;
     if (!peer || peer.destroyed) return;
     if (localPeerIdRef.current === sharerId) return;
-    if (mediaConnectionRef.current && activeWatchedSharerRef.current === sharerId && streamRef.current) return;
+    // 已在看/正在连同一个 sharer：保留现有媒体 call，避免 room 的 share-state 到达后
+    // 把刚建好的 call 关掉再重发。首帧前 mediaConnectionRef 可能还没赋值，但
+    // activeWatchedSharerRef 已在本端发起 call 时写入，所以只按它去重。
+    if (activeWatchedSharerRef.current === sharerId) return;
     if (mediaConnectionRef.current) {
       try { mediaConnectionRef.current.close(); } catch { /* ignore */ }
       mediaConnectionRef.current = null;
@@ -2826,7 +2841,10 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       const stream = await prepareCapturedStream(
         await navigator.mediaDevices.getDisplayMedia(buildDisplayMediaConstraints())
       );
-      // 从 watching 切换为 sharing：先断开只用于观看的媒体 call，避免旧画面挂在同一容器。
+      // 从 watching 切换为 sharing：先作废旧观看会话的尝试令牌，再断开只用于观看的
+      // 媒体 call。否则 close 事件会被 reconnectViewerAfterLoss 当作掉线，销毁
+      // room peer，连带把聊天/语音一起拆掉。
+      viewerConnectAttemptRef.current += 1;
       if (mediaConnectionRef.current) {
         try { mediaConnectionRef.current.close(); } catch { /* ignore */ }
         mediaConnectionRef.current = null;
@@ -2848,6 +2866,14 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       replaceActiveCallTracks(stream);
       isSharingRef.current = true;
       setIsSharing(true);
+      // 房间内的成员本来就已经连在信令服务器上；切到共享端时同步就绪态，
+      // 否则共享恢复 effect 会把「isSharing 但 isPeerReady=false」当成信令中断，
+      // 甚至超时后误报「无法连接信令服务器」。
+      setIsPeerReady(true);
+      setHasBeenReady(true);
+      setPeerId(localPeerIdRef.current);
+      setSharerFailure(null);
+      setError(null);
       chat.setRole('sender');
       if (localPeerIdRef.current === hostId) {
         broadcastShareState(localPeerIdRef.current);
@@ -2872,6 +2898,9 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     const active = activeSharerId;
     if (!active) {
       if (isSharingRef.current) return;
+      // watch 刚起步、房主还没把 ShareSlot 快照送到时，active 仍是 null。
+      // 这不是「房间空闲」，不能把正在协商的观看媒体 call 关掉，否则首帧永远到不了。
+      if (!shareSlotKnownRef.current) return;
       clearWatchingMedia();
       if (roomHostIdRef.current && localPeerIdRef.current !== roomHostIdRef.current) {
         setTargetSharerId(roomHostIdRef.current);
@@ -3072,6 +3101,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
     setCopied(false);
     setError(null);
     setHasBeenReady(false);
+    voice.reset();
     onNotification('已结束共享并离开房间', 'info');
   };
 
@@ -3193,6 +3223,7 @@ export const ScreenShare: React.FC<ScreenShareProps> = ({ onNotification, initia
       changeScreenSource={changeScreenSource}
       startScreenShare={startScreenShare}
       stopScreenShare={stopScreenShare}
+      voice={voice}
       onEndRoom={endRoomAndLeave}
     />
   );

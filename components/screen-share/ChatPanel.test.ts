@@ -5,6 +5,7 @@ import React from 'react';
 import { renderToStaticMarkup } from 'react-dom/server';
 
 import { ChatPanel, formatClock, handleDraftChange, handleDraftKeyDown, submitChatDraft } from './ChatPanel.tsx';
+import type { RoomVoiceApi } from '../../services/voice/useRoomVoice';
 
 const baseProps: React.ComponentProps<typeof ChatPanel> = {
   role: 'viewer',
@@ -113,4 +114,25 @@ test('输入变更直接写入，Enter 发送而 Shift+Enter 不发送', () => {
   } as unknown as React.KeyboardEvent<HTMLInputElement>;
   handleDraftKeyDown('hi', (text) => sent.push(text), (value) => (cleared = value), shiftEnterEvent);
   assert.deepEqual(sent, ['hi']);
+});
+test('语音 tab 接真实语音状态，不再显示「即将 / 通道尚未接通」占位', () => {
+  const voice: RoomVoiceApi = {
+    joined: false,
+    muted: false,
+    volume: 100,
+    remoteMemberCount: 0,
+    error: null,
+    joinVoice: async () => {},
+    leaveVoice: () => {},
+    toggleMute: async () => {},
+    setVolume: () => {},
+    attachConnection: () => {},
+    reset: () => {},
+  };
+  const markup = render({ voice });
+
+  assert.match(markup, /未加入/);
+  assert.doesNotMatch(markup, /即将/);
+  assert.doesNotMatch(markup, /语音通道尚未接通/);
+  assert.doesNotMatch(markup, /下一阶段接入/);
 });

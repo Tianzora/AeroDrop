@@ -228,7 +228,7 @@ const collectPageErrors = (page: Page): string[] => {
  * 存在的函数，但「没有可采集的桌面」只会在调用时抛错。只有真抓到一帧才算支持。
  *
  * 本机开发者没有显示服务时允许 skip（否则本地/无头环境寸步难行）；但 CI 里
- * fake-capture flag（playwright.product.config.ts）一旦回归，17 条走 ensureDisplayCapture 的用例会整组 skip
+ * fake-capture flag（playwright.product.config.ts）一旦回归，18 条走 ensureDisplayCapture 的用例会整组 skip
  * 而 job 依旧全绿——所以 CI 下把探测结果当断言，必须为 true。
  */
 const ensureDisplayCapture = async (page: Page): Promise<void> => {
@@ -1189,6 +1189,75 @@ test.describe('screen share', () => {
       await expect(page.getByText('after-rewatch', { exact: true })).toBeVisible({
         timeout: 15_000,
       });
+    } finally {
+      await viewer.context().close();
+    }
+  });
+
+  // M2 语音：语音与聊天同卡，加入后靠 room PC 的 audio m-line 传输；
+  // 共享的停止/重新开始只动 media call，不能重协商或断开房间语音与聊天。
+  test('room voice stays connected while sharing stops and restarts', async ({ browser, page }) => {
+    test.slow();
+    await page.goto('/');
+    await ensureDisplayCapture(page);
+    await startSharing(page);
+    const shareLink = await getShareLink(page);
+    const viewer = await openChatViewerWithFrames(() => openViewer(browser, shareLink));
+    try {
+      await openChatPanel(page);
+      await openChatPanel(viewer);
+      await waitForChatConnected(page);
+      await waitForChatConnected(viewer);
+
+      const joinVoice = async (target: typeof page) => {
+        await target.getByRole('tab', { name: /语音/ }).click();
+        await target.getByRole('button', { name: '加入语音' }).click();
+        await expect(target.getByText(/麦克风已开启/)).toBeVisible({
+          timeout: 30_000,
+        });
+      };
+      await joinVoice(page);
+      await joinVoice(viewer);
+      await expect(page.getByText(/麦克风已开启 · 正在和 1 位成员通话/)).toBeVisible({
+        timeout: 30_000,
+      });
+      await expect(viewer.getByText(/麦克风已开启 · 正在和 1 位成员通话/)).toBeVisible({
+        timeout: 30_000,
+      });
+
+      // 静音只 replaceTrack，不重协商；再取消静音仍保持同一房间连接。
+      await page.getByRole('button', { name: '静音', exact: true }).click();
+      await expect(page.getByText(/已静音 · 正在收听 1 位成员/)).toBeVisible({ timeout: 10_000 });
+      await page.getByRole('button', { name: '取消静音', exact: true }).click();
+      await expect(page.getByText(/麦克风已开启 · 正在和 1 位成员通话/)).toBeVisible({
+        timeout: 10_000,
+      });
+
+      // 对端音量 0–200% 可调。
+      await page.getByLabel('对方音量').fill('150');
+      await expect(page.getByText('150%', { exact: true })).toBeVisible();
+
+      // 停共享/重开共享期间，语音与聊天连接都必须在。
+      await page.getByRole('button', { name: '停止共享' }).click();
+      await expect(page.getByText('还没有人共享屏幕', { exact: true })).toBeVisible({
+        timeout: 20_000,
+      });
+      await expect(page.getByText(/麦克风已开启 · 正在和 1 位成员通话/)).toBeVisible();
+      await page.getByRole('tab', { name: /聊天/ }).click();
+      await viewer.getByRole('tab', { name: /聊天/ }).click();
+      await sendChatMessage(page, 'voice-chat-while-stopped');
+      await expect(viewer.getByText('voice-chat-while-stopped', { exact: true })).toBeVisible({
+        timeout: 15_000,
+      });
+
+      await page.getByRole('button', { name: '开始共享' }).click();
+      await expect(page.getByText('正在共享')).toBeVisible({ timeout: 20_000 });
+      await dismissAutoplayOverlay(viewer);
+      await waitForViewerFrames(viewer);
+      await page.getByRole('tab', { name: /语音/ }).click();
+      await viewer.getByRole('tab', { name: /语音/ }).click();
+      await expect(page.getByText(/麦克风已开启 · 正在和 1 位成员通话/)).toBeVisible();
+      await expect(viewer.getByText(/麦克风已开启 · 正在和 1 位成员通话/)).toBeVisible();
     } finally {
       await viewer.context().close();
     }

@@ -75,6 +75,8 @@ type DataConnectionEvents = {
   data: (data: any) => void;
   close: () => void;
   error: (error: PeerRuntimeError) => void;
+  /** 房间语音：远端音轨到达时推送汇总后的远端音频流。 */
+  'audio-stream': (stream: MediaStream) => void;
 };
 
 /**
@@ -613,8 +615,11 @@ class BaseConnection<EventMap extends Record<string, Listener>> extends TinyEmit
 
 export class DataConnection extends BaseConnection<DataConnectionEvents> {
   public dataChannel: RTCDataChannel | null = null;
-  /** 这条 DataConnection 承载哪类通道：'data' 是分享控制（心跳/画质/share-ended），'room' 是房间聊天。 */
+  /** 这条 DataConnection 承载哪类通道：'data' 是分享控制（心跳/画质/share-ended），'room' 是房间聊天 + 语音。 */
   public readonly channelKind: 'data' | 'room';
+  /** room 通道的远端音频汇总流；由 ontrack 持续填充。'data' 通道不创建（Node 测试环境也无 MediaStream）。 */
+  public readonly remoteAudioStream: MediaStream;
+  private audioTracksAttached = false;
 
   constructor(
     provider: WorkerSignaledPeer,
@@ -626,6 +631,62 @@ export class DataConnection extends BaseConnection<DataConnectionEvents> {
   ) {
     super(provider, peerId, connectionId, peerConnection, isInitiator);
     this.channelKind = channelKind;
+    this.remoteAudioStream = typeof MediaStream === 'undefined' ? ({} as MediaStream) : new MediaStream();
+    if (channelKind === 'room' && typeof MediaStream !== 'undefined') {
+      // 发起方建 PC 时就预留 audio m-line；应答方必须复用 offer 里的 m-line，
+      // 再 addTransceiver 会多出一条 mid:null 的幽灵 transceiver，声音只挂在它上面。
+      if (isInitiator) peerConnection.addTransceiver('audio', { direction: 'sendrecv' });
+      peerConnection.ontrack = (event) => {
+        const track = event.track;
+        if (track.kind !== 'audio') return;
+        this.audioTracksAttached = true;
+        if (!this.remoteAudioStream.getTracks().includes(track)) {
+          this.remoteAudioStream.addTrack(track);
+        }
+        track.onended = () => {
+          this.remoteAudioStream.removeTrack(track);
+          this.emit('audio-stream', this.remoteAudioStream);
+        };
+        this.emit('audio-stream', this.remoteAudioStream);
+      };
+    }
+  }
+
+  /** 房间语音：把本地麦克风轨挂到已预留的 audio transceiver；null 表示静音（只 replaceTrack）。 */
+  async attachAudioTrack(track: MediaStreamTrack | null): Promise<void> {
+    if (this.channelKind !== 'room') return;
+    const transceiver = this.peerConnection
+      .getTransceivers()
+      .find((item) => item.receiver.track?.kind === 'audio' || item.sender.track?.kind === 'audio')
+      ?? this.peerConnection.getTransceivers()[0];
+    if (!transceiver) {
+      if (track) this.peerConnection.addTrack(track, new MediaStream([track]));
+      return;
+    }
+    await transceiver.sender.replaceTrack(track);
+    if (!this.audioTracksAttached) {
+      this.audioTracksAttached = true;
+    }
+  }
+
+  /** 房间语音：限制单条音频编码码率（每人对端 64kbps）。 */
+  async setAudioBitrate(bitrate: number): Promise<void> {
+    if (this.channelKind !== 'room') return;
+    const sender = this.peerConnection
+      .getTransceivers()
+      .map((item) => item.sender)
+      .find((item) => item.track?.kind === 'audio' || this.audioTracksAttached);
+    if (!sender) return;
+    try {
+      const parameters = sender.getParameters();
+      if (!parameters.encodings || parameters.encodings.length === 0) {
+        parameters.encodings = [{}];
+      }
+      parameters.encodings[0].maxBitrate = bitrate;
+      await sender.setParameters(parameters);
+    } catch {
+      // 某些浏览器在协商完成前拒收 setParameters；语音仍可用，只放弃码率上限。
+    }
   }
 
   bindDataChannel(channel: RTCDataChannel): void {
@@ -1277,13 +1338,21 @@ export default class WorkerSignaledPeer extends TinyEmitter<PeerEvents> {
       };
       this.addConnection(connection);
       // room 聊天连接与分享控制连接分开投递：上层用不同事件监听，互不干扰。
-      if (channelKind === 'room') this.emit('room', connection);
-      else this.emit('connection', connection);
+      if (channelKind !== 'room') this.emit('connection', connection);
       try {
         await connection.applyRemoteDescription(payload.description);
+        if (channelKind === 'room') {
+          // 应答方复用 offer 的 audio m-line，并在 createAnswer 前显式改为 sendrecv。
+          const audioTransceiver = peerConnection
+            .getTransceivers()
+            .find((item) => item.receiver.track?.kind === 'audio');
+          if (audioTransceiver) audioTransceiver.direction = 'sendrecv';
+        }
         const answer = await peerConnection.createAnswer();
         await peerConnection.setLocalDescription(answer);
         this.forwardAnswer(connection, answer);
+        // answer 落地后再交给上层：此时 voice 能拿到真正的 audio transceiver。
+        if (channelKind === 'room') this.emit('room', connection);
       } catch (error) {
         this.emitConnectionError(connection, createRuntimeError('webrtc-error', 'Failed to handle incoming data offer', error));
         connection.close();
